@@ -21,10 +21,10 @@ G1_XML = ASSETS / "g1_29dof.xml"
 LIDAR_TRANSPARENT_MESHES = ("head_link",)
 
 
-def build_model(boxes=(), xml: Path = G1_XML, friction: float | None = None):
+def augment_spec(spec, boxes=()):
+    """Add task boxes as static colliders `obstacle_<i>` and make the head shell lidar-transparent."""
     import mujoco
 
-    spec = mujoco.MjSpec.from_file(str(xml))
     for g in spec.geoms:
         # The MID-360 sits inside the head shell's mesh in this MJCF; on the robot it looks out of a
         # cutout. Group 3 keeps the head colliding but outside the lidar's ray mask (groups 0 only).
@@ -40,7 +40,13 @@ def build_model(boxes=(), xml: Path = G1_XML, friction: float | None = None):
         g.pos = [b["center_xy"][0], b["center_xy"][1], b["z_bottom"] + h]
         g.quat = [math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]
         g.rgba = [0.85, 0.45, 0.2, 0.9] if b["z_bottom"] >= 0.8 else [0.3, 0.55, 0.85, 0.9]
-    model = spec.compile()
+    return spec
+
+
+def build_model(boxes=(), xml: Path = G1_XML, friction: float | None = None):
+    import mujoco
+
+    model = augment_spec(mujoco.MjSpec.from_file(str(xml)), boxes).compile()
     model.opt.timestep = C.SIM_DT
     joints = [model.joint(j).name for j in range(model.njnt) if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_HINGE]
     if tuple(joints) != C.MJ_JOINTS:

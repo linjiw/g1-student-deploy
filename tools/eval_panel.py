@@ -70,15 +70,21 @@ def main(argv=None):
     ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--latency-s", type=float, default=0.0)
+    ap.add_argument("--anchor", choices=("measured", "predict"), default="measured")
+    ap.add_argument("--inflight", type=int, default=1)
     ap.add_argument("--start", choices=("recorded", "stand"), default="recorded")
     ap.add_argument("--route", choices=("privileged", "sensor"), default="privileged")
     ap.add_argument("--lidar", choices=("analytic", "mjray"), default="analytic")
     ap.add_argument("--odom-noise", default=None)
+    ap.add_argument("--prescan-s", type=float, default=None)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
     jobs = episodes(Path(args.packet), args.families, args.limit)
-    cond = dict(device=args.device, latency_s=args.latency_s, start=args.start, route_source=args.route,
-                lidar=args.lidar, odom_noise=json.loads(args.odom_noise) if args.odom_noise else None)
+    cond = dict(device=args.device, latency_s=args.latency_s, anchor_mode=args.anchor, inflight=args.inflight,
+                start=args.start,
+                route_source=args.route,
+                lidar=args.lidar, odom_noise=json.loads(args.odom_noise) if args.odom_noise else None,
+                prescan_s=args.prescan_s)
     out_dir = ROOT / "runs" / args.name
     print(f"{len(jobs)} episodes -> {out_dir}  condition {cond}  workers {args.workers}", flush=True)
     if args.dry_run:

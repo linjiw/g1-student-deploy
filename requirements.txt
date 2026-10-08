@@ -7,3 +7,7 @@ pyzmq
 msgpack
 pytest
 matplotlib==3.10.3  # imported transitively by the frozen planner source (proxy_flow -> boundary_report)
+PyYAML==6.0.3   # lucid gear_sonic_sim (real-time rehearsal)
+glfw==2.10.2
+PyOpenGL==3.1.10
+cyclonedds==0.10.2  # build with CYCLONEDDS_HOME=$HOME/opt/sonic-deploy-toolchain/cyclonedds (see env.sh)

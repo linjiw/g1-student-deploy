@@ -9,9 +9,14 @@ differ. Deployment effects can be switched on one at a time:
   --latency-s L   a plan requested at tick t becomes usable at t + L (physics keeps running on
                   the previous plan, exactly what the real-time streamer will do); the next
                   request is issued when the planner is free and `replan_ticks` have passed.
+  --anchor predict  plan from the predicted state at t + L (g1deploy/latency.py) instead of t.
+  --inflight N    up to N requests in flight (pipelined planner workers), one every `replan_ticks`;
+                  predictions use only the plan that has landed, as on hardware.
   --odom-noise    random-walk xy/yaw error on the planner's pose (flow `StateEstimate` config JSON).
   --start stand   start standing at SONIC's default pose instead of the recorded walk.
   --route sensor  lidar route (A* on the sensor memory, 0.3 s pre-scan) instead of the true boxes.
+  --prescan-s P   lidar captures during P s before the first plan (hardware: the robot stands while
+                  the memory fills). Isaac's privileged-route protocol used 0.
   --lidar mjray   MuJoCo ray-cast MID-360 (scene incl. the robot's own body) + label-free memory.
 
 Outputs one directory per episode: score.json, plans.json, closed_loop.npz (realized qpos, references).
@@ -33,6 +38,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from g1deploy import bundle  # noqa: E402
+from g1deploy.latency import predicted_history  # noqa: E402
 from g1deploy.scoring import TaskScorer  # noqa: E402
 from sim.episode import Physics, read_json, stand_start_state, task_start_state  # noqa: E402
 
@@ -73,8 +79,10 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
     return goal_fn
 
 
-def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, start="recorded", route_source="privileged",
-                lidar="analytic", odom_noise=None, planner_overrides=None, deadline_s=None, save_npz=True):
+def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mode="measured", inflight=1,
+                start="recorded",
+                route_source="privileged", lidar="analytic", odom_noise=None, prescan_s=None, planner_overrides=None,
+                deadline_s=None, save_npz=True):
     import torch
 
     flow = bundle.load_flow()
@@ -94,9 +102,11 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, start="re
     replan, lookahead = int(ep["replan_ticks"]), float(ep["goal_lookahead_m"])
     variant = cfg["route_variants"][route_source]
     route_cfg = variant.get("route", {})
-    prescan = float(variant.get("sensor_prescan_s", 0.0))
+    prescan = float(variant.get("sensor_prescan_s", 0.0) if prescan_s is None else prescan_s)
     run_cfg = dict(task_path=str(task_path), seed=int(seed), planner=pdict, episode=ep, route_source=route_source,
-                   route=route_cfg, sensor_prescan_s=prescan, latency_s=latency_s, start=start, lidar=lidar,
+                   route=route_cfg, sensor_prescan_s=prescan, latency_s=latency_s, anchor_mode=anchor_mode, inflight=inflight,
+                   start=start,
+                   lidar=lidar,
                    odom_noise=odom_noise, engine="mujoco", sonic_onnx=str(bundle.sonic_onnx()))
     write_json(out / "run_config.json", run_cfg)
     np.random.seed(int(seed))
@@ -152,7 +162,7 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, start="re
     lat_ticks = int(round(latency_s / 0.02))
 
     active = None  # (plan, anchor_tick, anchor_q, anchor_dq)
-    pending = None  # (ready_tick, plan, anchor_tick, anchor_q, anchor_dq)
+    pending = []  # [(ready_tick, plan, anchor_tick, anchor_q, anchor_dq)], oldest first
     last_request = -10**9
     plans, references, realized, pre_q, est_q, wall = [], [], [], [], [], []
     outcome, error = None, None
@@ -169,27 +179,32 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, start="re
                 est_q.append(qpos.copy())
                 memory.pose_error = tuple(estimate.err)
             memory.step(tick * 0.02, true_q[:3], true_q[3:7])
-            if pending is not None and tick >= pending[0]:
-                active, pending = pending[1:], None
-            if pending is None and (active is None or tick - last_request >= replan):
+            while pending and tick >= pending[0][0]:
+                active = pending.pop(0)[1:]
+            if len(pending) < inflight and (active is None or tick - last_request >= replan):
                 if route_source == "sensor":
                     route.refresh(qpos[:2], tick * 0.02)
                 wp, heading, remaining = route.waypoint(qpos[:2], lookahead)
                 guide_boxes = sm.memory_boxes(memory, grow_overhead_m=pcfg.guide_grow_overhead_m) \
                     if pcfg.guide_w > 0 and pcfg.guide_source == "sensor" else None
-                prev = None if active is None else (active[0], tick - active[1])
+                predictive = anchor_mode == "predict" and lat_ticks > 0 and active is not None
+                plan_hist = predicted_history(history, active, tick, lat_ticks, planner.history + 2) \
+                    if predictive else history
+                anchor_at = tick + lat_ticks if predictive else tick
+                prev = None if active is None else (active[0], anchor_at - active[1])
                 tp = time.perf_counter()
-                plan = planner.plan(np.asarray(history), boxes, goal_fn, map_fn, clearance_fn, prev=prev,
+                plan = planner.plan(np.asarray(plan_hist), boxes, goal_fn, map_fn, clearance_fn, prev=prev,
                                     guide_boxes=guide_boxes)
                 latency = time.perf_counter() - tp
-                anchor = (plan, tick, qpos.copy(), flow.feed.finite_difference_dq(history))
+                anchor = (plan, anchor_at, np.asarray(plan_hist[-1], dtype=np.float64).copy(),
+                          flow.feed.finite_difference_dq(plan_hist))
                 last_request = tick
                 if lat_ticks == 0 or active is None:
                     # The first plan is computed before the stream starts (on hardware: while standing),
                     # so only replans pay the latency.
                     active = anchor
                 else:
-                    pending = (tick + lat_ticks,) + anchor
+                    pending.append((tick + lat_ticks,) + anchor)
                 plans.append(dict(tick=tick, waypoint_xy=np.asarray(wp).tolist(), route_remaining_m=remaining,
                                   rule=plan["rule"], chosen_clearance_m=plan["chosen_clearance_m"],
                                   latency_s=latency, plan_xy=plan["qpos"][:, :2].tolist(),
@@ -218,7 +233,7 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, start="re
                       plan_latency_s={"p50": float(np.median(lat)), "p95": float(np.quantile(lat, 0.95))} if lat else None,
                       selection_rules={r: sum(p["rule"] == r for p in plans) for r in sorted({p["rule"] for p in plans})},
                       control_step_wall_p50_s=float(np.median(wall)) if wall else None, **{k: run_cfg[k] for k in (
-                          "latency_s", "start", "lidar", "route_source")})
+                          "latency_s", "anchor_mode", "inflight", "start", "lidar", "route_source")})
         write_json(out / "score.json", report)
         write_json(out / "plans.json", plans)
         if save_npz:
@@ -235,15 +250,21 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--latency-s", type=float, default=0.0)
+    ap.add_argument("--anchor", choices=("measured", "predict"), default="measured")
+    ap.add_argument("--inflight", type=int, default=1, help="planner requests in flight (pipelined planners)")
     ap.add_argument("--start", choices=("recorded", "stand"), default="recorded")
     ap.add_argument("--route", choices=("privileged", "sensor"), default="privileged")
     ap.add_argument("--lidar", choices=("analytic", "mjray"), default="analytic")
     ap.add_argument("--odom-noise", default=None, help="JSON dict, e.g. '{\"xy_rw_m\": 0.02, \"yaw_rw_rad\": 0.01}'")
     ap.add_argument("--deadline-s", type=float, default=None)
+    ap.add_argument("--prescan-s", type=float, default=None,
+                    help="lidar captures before the first plan (default: the route variant's; Isaac privileged = 0)")
     args = ap.parse_args(argv)
-    r = run_episode(args.task, args.seed, args.out, device=args.device, latency_s=args.latency_s, start=args.start,
+    r = run_episode(args.task, args.seed, args.out, device=args.device, latency_s=args.latency_s,
+                    anchor_mode=args.anchor, inflight=args.inflight, start=args.start,
                     route_source=args.route, lidar=args.lidar,
-                    odom_noise=json.loads(args.odom_noise) if args.odom_noise else None, deadline_s=args.deadline_s)
+                    odom_noise=json.loads(args.odom_noise) if args.odom_noise else None, deadline_s=args.deadline_s,
+                    prescan_s=args.prescan_s)
     print(json.dumps({k: r[k] for k in ("task_id", "outcome", "elapsed_s", "replans", "plan_latency_s")}))
     return 0
 
