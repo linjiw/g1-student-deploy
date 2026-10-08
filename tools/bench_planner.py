@@ -30,9 +30,12 @@ def main(argv=None):
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--n", type=int, default=20)
     ap.add_argument("--episode", default=str(EPISODE))
+    ap.add_argument("--tf32", action="store_true", help="allow TF32 matmuls (faster on Ampere+; numerics change slightly)")
     args = ap.parse_args(argv)
     import torch
 
+    if args.tf32:
+        torch.set_float32_matmul_precision("high")
     flow = bundle.load_flow()
     cfg = bundle.student_config()
     ep = Path(args.episode)
@@ -65,11 +68,13 @@ def main(argv=None):
         sync()
         ts.append(time.perf_counter() - t)
     p50, p95 = float(np.median(ts)), float(np.quantile(ts, 0.95))
+    p99, mx = float(np.quantile(ts, 0.99)), float(np.max(ts))
     verdict = ("OK: within the 0.32 s tested with predictive anchoring" if p95 <= 0.32 else
                "MARGINAL: test this latency in sim (eval_panel --latency-s <p95> --anchor predict)" if p95 <= 0.5 else
                "TOO SLOW: expect large losses; use a faster GPU or reduce planner compute")
     print(json.dumps({"device": args.device, "gpu": torch.cuda.get_device_name() if args.device.startswith("cuda") else None,
-                      "plan_s_p50": round(p50, 3), "plan_s_p95": round(p95, 3), "verdict": verdict}, indent=1))
+                      "tf32": bool(args.tf32), "n": args.n, "plan_s_p50": round(p50, 3), "plan_s_p95": round(p95, 3),
+                      "plan_s_p99": round(p99, 3), "plan_s_max": round(mx, 3), "verdict": verdict}, indent=1))
     return 0
 
 
