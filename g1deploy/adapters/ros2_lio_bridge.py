@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""ROS 2 bridge: FAST-LIO2 on the head MID-360 -> the node's `odom` and `cloud` ZMQ topics.
+"""ROS 2 bridge: LIO odometry on the head MID-360 -> the node's `odom` ZMQ topic (and optionally `cloud`).
+
+Recommended LIO (docs/G1_PERCEPTION.md): Point-LIO on the robot's own DDS lidar topics, seen by ROS 2 as
+/utlidar/cloud_livox_mid360 + /utlidar/imu_livox_mid360 (lidar_type 2, timestamp_unit 3, acc_norm 1.0,
+extrinsic_T [-0.011, -0.02329, 0.04412], extrinsic_est_en false); its high-rate odometry is
+/aft_mapped_to_init (the default here). With FAST-LIO2 use --odom-topic /Odometry (10 Hz; our 50 Hz pose
+filter smooths it). The node reads the lidar itself (`--cloud dds`), so cloud forwarding is off by default
+(`--forward-cloud` re-enables it for setups that only have the registered cloud).
 
 UNTESTED: there is no ROS 2 on the development machine. The frame math it calls
 (`g1deploy/adapters/lio.py`) is unit-tested (tests/test_lio.py); this file only moves messages.
@@ -35,8 +42,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--iface", required=True, help="DDS interface on the robot network (e.g. eth0)")
     ap.add_argument("--bind", default="tcp://*:5561")
-    ap.add_argument("--odom-topic", default="/Odometry")
+    ap.add_argument("--odom-topic", default="/aft_mapped_to_init", help="Point-LIO; FAST-LIO2: /Odometry")
     ap.add_argument("--cloud-topic", default="/cloud_registered")
+    ap.add_argument("--forward-cloud", action="store_true", help="also forward the LIO registered cloud as `cloud`")
     args = ap.parse_args(argv)
 
     import rclpy
@@ -94,7 +102,8 @@ def main(argv=None):
     rclpy.init()
     node = rclpy.create_node("g1_student_lio_bridge")
     node.create_subscription(Odometry, args.odom_topic, on_odom, 10)
-    node.create_subscription(PointCloud2, args.cloud_topic, on_cloud, 2)
+    if args.forward_cloud:
+        node.create_subscription(PointCloud2, args.cloud_topic, on_cloud, 2)
     node.create_timer(0.02, tick)
     try:
         rclpy.spin(node)
