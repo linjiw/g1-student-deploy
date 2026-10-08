@@ -10,6 +10,7 @@ Isaac numbers, with a sha256 manifest:
     bundle/flow/artifacts/native-reference-v1-final/geometry.json   collision shapes (fk.GEOMETRY)
     bundle/newton/allterrain/...                 MID-360 / D435i mounts (sensor_map.NEWTON)
     bundle/sonic/sonic_release_g1.onnx           fused release g1 encoder + FSQ + decoder (1570 -> 29)
+    bundle/sonic/planner/V2/planner_sonic.onnx   SONIC's kinematic planner (operator takeover, gamepad_manager)
     bundle/config/student.json                   the deployed arm's planner + episode config
     bundle/config/sonic_model_contract.json      joint names + limits used to clip SONIC targets
 
@@ -46,6 +47,10 @@ NEWTON_FILES = ["allterrain/__init__.py", "allterrain/constants.py", "allterrain
                 "allterrain/perception/data/LICENSE-MuJoCo-LiDAR.txt"]
 SONIC_EXPORT = Path("/home/linjiw/hoi-retarget/outputs/contact_bfm/sonic_bridge/release_export_v2")
 TEST_V4 = FLOW / "artifacts/closed-loop-test-v4/config.json"
+# SONIC's own kinematic planner (released GEAR-SONIC). The runner's gamepad_manager input needs it loaded: it is
+# the operator's takeover (D-pad -> SONIC standing) while our stream drives the robot. The runner detects the
+# planner version from "V2" in the path.
+SONIC_PLANNER = Path("/home/linjiw/.cache/huggingface/hub/models--nvidia--GEAR-SONIC/snapshots/6733128a3d8a523b1418b06bca3cdf61c8b0987f/planner_sonic.onnx")
 V2_MAIN = FLOW / "configs/closed_loop_v2_main.json"
 # Joint names/limits the Isaac callback clips SONIC targets to (task["model_contract_path"]).
 MODEL_CONTRACT = Path("/home/linjiw/code/lfh_runs/next_stage/native_g1/sonic_model_contract.json")
@@ -120,6 +125,7 @@ def main(argv=None) -> int:
     place(GEOMETRY, out / "flow/artifacts/native-reference-v1-final/geometry.json")
     for rel in NEWTON_FILES:
         place(NEWTON / rel, out / "newton" / rel)
+    place(SONIC_PLANNER.resolve(), out / "sonic/planner/V2/planner_sonic.onnx", link=True)
     for name in ("sonic_release_g1.onnx", "export_receipt.json", "export_parity_vectors.npz"):
         place(SONIC_EXPORT / name, out / "sonic" / name, link=name.endswith(".onnx"))
     (out / "config").mkdir(exist_ok=True)

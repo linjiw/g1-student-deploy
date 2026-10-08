@@ -1,6 +1,6 @@
 {
  "kind": "g1_student_deploy_bundle",
- "created": "2026-10-08T04:52:16.218010+00:00",
+ "created": "2026-10-08T05:27:31.443123+00:00",
  "sources": {
   "planner_snapshot": "/home/linjiw/flow/artifacts/closed-loop-v2-main/source/src",
   "student": "/home/linjiw/flow/artifacts/student-s2-kcsc_s0",
@@ -564,6 +564,10 @@
   "sonic/export_receipt.json": {
    "sha256": "70b7ac110a2b86ee1d98ed1b72ca9b26331868f357760bf4c704ab129b33c6cd",
    "bytes": 4819
+  },
+  "sonic/planner/V2/planner_sonic.onnx": {
+   "sha256": "39b553e197f62f077975ba38512bc04781a3fc37c2af7c6756e04629f760edea",
+   "bytes": 773952989
   },
   "sonic/sonic_release_g1.onnx": {
    "sha256": "325031d750a5199248ad73448f7fa922767e8a78ddc870115651cd19752fb5c6",
