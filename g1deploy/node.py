@@ -384,9 +384,9 @@ class StudentNode:
         mount = Mount.load(self.args.mount_calib) if self.args.mount_calib else Mount.nominal()
         self.from_sensor = CloudFromSensorFrame(self.memory.body_filter, mount, transport_s=self.args.lidar_transport_s)
 
-    def perception_loop(self, cloud, state, t0):
+    def perception_loop(self, cloud, state, t0, stop):
         """Clouds -> memory, and the route refresh (A* on the memory grid, up to ~0.2 s) - both off the 50 Hz loop."""
-        while not self.stop_flag.is_set():
+        while not self.stop_flag.is_set() and not stop.is_set():
             got = cloud.poll()
             snap = state.snapshot()
             if got and snap is not None:
@@ -518,8 +518,19 @@ class StudentNode:
         emit("stand", reason=reason, tick=now_tick)
 
     # -- main loop -------------------------------------------------------------------------------
+    def reset_run_state(self):
+        """Everything one run accumulates; a restarted run (after a stop or stand) must not inherit it - e.g. a
+        stand pushes last_streamed_anchor far ahead, which would reject every later plan as stale."""
+        self.tick, self.phase, self.active, self.jobs = 0, "WAIT", None, {}
+        self.last_streamed_anchor, self.last_request, self.stream_end = -10**9, -10**9, -1
+        if self.streamer is not None:
+            self.streamer.last_end = None  # the runner resets playback on the new run's first chunk anyway
+        for jid, _, _ in self.pool.poll():  # results of the previous run are dropped
+            pass
+
     def run(self, state: DdsState, cloud: CloudInput, start_event: threading.Event | None = None, odom=None):
         a = self.args
+        self.reset_run_state()
         t0 = time.monotonic()
         prescan_until = None
         emit("node_up", inflight=a.inflight, route=a.route, goal=self.goal.tolist())
@@ -554,7 +565,16 @@ class StudentNode:
             self.history = hist
             if not hasattr(self, "memory"):
                 self.make_memory(q[:2])
-                threading.Thread(target=self.perception_loop, args=(cloud, state, t0), daemon=True).start()
+            if getattr(self, "perc_cloud", None) is not cloud:
+                # one perception thread per run(), bound to this run's lidar source; a previous run's thread is
+                # stopped first (it would otherwise keep polling the old source)
+                if getattr(self, "perc_thread", None) is not None:
+                    self.perc_stop.set()
+                    self.perc_thread.join(1.0)
+                self.perc_stop, self.perc_cloud = threading.Event(), cloud
+                self.perc_thread = threading.Thread(target=self.perception_loop, args=(cloud, state, t0, self.perc_stop),
+                                                    daemon=True)
+                self.perc_thread.start()
             cloud_age = time.monotonic() - cloud.last if cloud.last > 0 else 1e9
 
             if self.phase == "WAIT" and (start_event is None or start_event.is_set()):
@@ -562,8 +582,10 @@ class StudentNode:
                 emit("prescan")
             elif (self.phase == "PRESCAN" and self.tick >= prescan_until and cloud_age < a.cloud_timeout
                   and hasattr(self, "route")):
-                self.phase = "RUN"
-                self.request(self.tick, self.pool.free()[0])
+                self.collect(self.tick)  # drain results still in flight from a previous run (they are dropped)
+                if self.pool.free():
+                    self.phase = "RUN"
+                    self.request(self.tick, self.pool.free()[0])
             elif self.phase == "RUN":
                 self.collect(self.tick)
                 dist = float(np.linalg.norm(q[:2] - self.goal))

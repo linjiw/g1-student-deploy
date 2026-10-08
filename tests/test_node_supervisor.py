@@ -1,0 +1,111 @@
+"""The node's safety reactions, driven with fake robot inputs (no DDS, no runner, CPU planner)."""
+
+import json
+import threading
+import time
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+from g1deploy import contract as C
+
+
+class FakeState:
+    """Stands in for DdsState: a standing robot whose pose / tilt / freshness the test controls."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.tilt = 0.0
+        self.stale = False
+        self.xy = np.zeros(2)
+
+    def _q(self):
+        h = 0.5 * self.tilt
+        return np.r_[self.xy, 0.79, np.cos(h), 0.0, np.sin(h), 0.0, C.DEFAULT_MJ]
+
+    def snapshot(self):
+        q = self._q()
+        age = 1.0 if self.stale else 0.001
+        return dict(qpos=q, dq=np.zeros(29), imu=q[3:7], gyro=np.zeros(3), lin_w=np.zeros(3), ang_w=np.zeros(3),
+                    age_low=age, age_odo=age)
+
+    def history(self, t_end, n):
+        return [self._q().astype(np.float32) for _ in range(n)]
+
+    def qpos_at(self, t):
+        return self._q()
+
+
+class FakeCloud:
+    """Feeds empty-floor world clouds until `stop` is set."""
+
+    def __init__(self):
+        self.last = -1.0
+        self.stop = False
+
+    def poll(self):
+        if self.stop:
+            return []
+        self.last = time.monotonic()
+        g = np.random.default_rng(0).uniform(-3, 3, (2000, 2))
+        pts = np.c_[g, np.zeros(len(g))]
+        return [dict(points=pts, origin=np.array([0.0, 0.0, 1.25]), origins=None, dt=None, wall=self.last)]
+
+
+@pytest.fixture(scope="module")
+def node():
+    from g1deploy.node import StudentNode, parse
+
+    args = parse(["--goal", "3.0", "0.0", "--device", "cpu", "--dry-run", "--prescan-s", "0.1",
+                  "--route", "privileged", "--latency-guess-s", "0.8"])
+    n = StudentNode(args)
+    yield n
+    n.pool.close()
+
+
+def _run(node, state, cloud, until, timeout=20.0):
+    node.stop_flag.clear()  # run() resets its own per-run state (that is part of what these tests check)
+    events = []
+    import g1deploy.node as N
+
+    orig = N.emit
+    N.emit = lambda e, **kw: (events.append(e), orig(e, **kw))
+    result = {}
+    th = threading.Thread(target=lambda: result.setdefault("r", node.run(state, cloud)), daemon=True)
+    th.start()
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout and not until(events):
+        time.sleep(0.05)
+    node.stop_flag.set()
+    th.join(5)
+    N.emit = orig
+    return events, result.get("r")
+
+
+def test_tilt_triggers_estop(node):
+    st, cl = FakeState(), FakeCloud()
+    threading.Timer(4.0, lambda: setattr(st, "tilt", 0.9)).start()
+    ev, r = _run(node, st, cl, lambda e: "estop" in e)
+    assert "estop" in ev and r == "estop_tilt"
+
+
+def test_stale_state_triggers_estop(node):
+    st, cl = FakeState(), FakeCloud()
+    threading.Timer(1.0, lambda: setattr(st, "stale", True)).start()
+    ev, r = _run(node, st, cl, lambda e: "estop" in e)
+    assert r == "stale_state"
+
+
+def test_lidar_loss_settles_to_stand(node):
+    st, cl = FakeState(), FakeCloud()
+    threading.Timer(4.0, lambda: setattr(cl, "stop", True)).start()
+    ev, _ = _run(node, st, cl, lambda e: "stand" in e)
+    assert "stand" in ev and "estop" not in ev
+
+
+def test_arrival_settles_to_stand(node):
+    st, cl = FakeState(), FakeCloud()
+    threading.Timer(4.0, lambda: setattr(st, "xy", np.array([3.0, 0.0]))).start()
+    ev, _ = _run(node, st, cl, lambda e: "arrived" in e and "stand" in e)
+    assert "arrived" in ev and "stand" in ev
