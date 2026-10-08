@@ -387,6 +387,10 @@ class StudentNode:
         variant = cfg["route_variants"][args.route]
         self.route_cfg = variant.get("route", {})
         self.pdict = dict(cfg["planner"], device=args.device)
+        if args.candidates:
+            self.pdict["candidates"] = args.candidates  # faster planner; evaluate first (jobs/g4v.sh)
+        if args.ode_steps:
+            self.pdict["ode_steps"] = args.ode_steps
         self.pcfg = self.flow.planner.PlannerConfig(**self.pdict)
         contract = json.loads((bundle.ROOT / "config/sonic_model_contract.json").read_text())
         self.limits = np.asarray([j["range_rad"] for j in contract["joints"] if j["type"] != "free"])
@@ -735,6 +739,8 @@ def parse(argv=None):
     ap.add_argument("--boxes", default=None, help="JSON list of boxes for --route privileged (a measured course)")
     ap.add_argument("--goal-lookahead", type=float, default=None, help="override (sets walking speed; 1.5 evaluated)")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--candidates", type=int, default=None, help="planner K override (deployed and evaluated: 16)")
+    ap.add_argument("--ode-steps", type=int, default=None, help="planner ODE steps override (deployed and evaluated: 10)")
     ap.add_argument("--inflight", type=int, default=1,
                     help="2+ is harmful: a second in-flight plan is predicted from the landed plan, not the one "
                          "running in between (G4: 32/98 vs 79/98)")

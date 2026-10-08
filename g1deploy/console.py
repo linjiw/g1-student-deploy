@@ -146,6 +146,10 @@ class Session:
             node_cmd += ["--odom", a.odom] + (["--mount-calib", a.mount_calib] if a.mount_calib else [])
         if a.goal_lookahead:
             node_cmd += ["--goal-lookahead", str(a.goal_lookahead)]
+        if a.candidates:
+            node_cmd += ["--candidates", str(a.candidates)]
+        if a.ode_steps:
+            node_cmd += ["--ode-steps", str(a.ode_steps)]
         env = dict(self.env, G1_BODY_MODEL=a.body)
         self.procs["node"] = Proc("node", node_cmd, self.dir / "node.log", env)
         self.event(f"node: student planner, goal {a.goal[0]:.1f} m ahead {a.goal[1]:+.1f} m left")
@@ -416,7 +420,9 @@ def main(argv=None):
     for mode in ("sim", "robot"):
         p = sub.add_parser(mode)
         p.add_argument("--goal", type=float, nargs=2, default=(3.5, 0.0), metavar=("AHEAD", "LEFT"))
-        p.add_argument("--goal-lookahead", type=float, default=None)
+        p.add_argument("--goal-lookahead", type=float, default=None, help="1.0 = slower walking (G4: no cost)")
+        p.add_argument("--candidates", type=int, default=None, help="planner K (default 16)")
+        p.add_argument("--ode-steps", type=int, default=None, help="planner ODE steps (default 10)")
         p.add_argument("--body", choices=("dex3", "rubber"), default="dex3", help="hands (self filter)")
         p.add_argument("--script", default="")
         p.add_argument("--step-timeout", type=float, default=90.0)
