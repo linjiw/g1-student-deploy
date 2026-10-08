@@ -40,7 +40,7 @@ def _rpy(r, p, y):
 class Mid360Scanner:
     def __init__(self, model, data, *, points_per_s=200_000, frame_hz=10.0, range_m=4.0, range_noise_m=0.02,
                  dropout=0.0, mount_error=None, deskew="ideal", rng=None, table=TABLE, geomgroup=(1, 0, 0, 0, 0, 0),
-                 phase=0, body_filter=None, occlusion=None):
+                 phase=0, body_filter=None, occlusion=None, mount_body="torso_link", max_points_per_frame=None):
         import mujoco
 
         self.mujoco, self.model, self.data = mujoco, model, data
@@ -61,9 +61,13 @@ class Mid360Scanner:
         self.deskew = deskew
         self.rng = rng or np.random.default_rng(0)
         self.group = np.asarray(geomgroup, dtype=np.uint8)
-        self.torso = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "torso_link")
-        # nominal mount on torso_link (what the robot assumes) and the true one (what the rays use)
-        self.r_assumed, self.p_assumed = mid360.ROT_PELVIS.copy(), mid360.POS_TORSO.copy()
+        # Ablations: mount_body="pelvis" reproduces the evaluated sensor model (waist ignored, rigid on the pelvis);
+        # max_points_per_frame subsamples each frame to the evaluated density (5,400 grid rays).
+        self.torso = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, mount_body)
+        self.max_points = max_points_per_frame
+        # nominal mount (what the robot assumes) and the true one (what the rays use)
+        self.r_assumed = mid360.ROT_PELVIS.copy()
+        self.p_assumed = (mid360.POS_PELVIS if mount_body == "pelvis" else mid360.POS_TORSO).copy()
         e = dict(roll_deg=0.0, pitch_deg=0.0, yaw_deg=0.0, x_m=0.0, y_m=0.0, z_m=0.0)
         e.update(mount_error or {})
         self.r_true = self.r_assumed @ _rpy(*np.radians([e["roll_deg"], e["pitch_deg"], e["yaw_deg"]]))
@@ -137,9 +141,14 @@ class Mid360Scanner:
                                     np.concatenate([np.full(len(r), ts - t0) for r, ts in zip(self.raw, self.raw_t)])
                                     if self.raw else np.zeros(0), t0))
             self.raw, self.raw_t = [], []
-        self.frames.append((np.concatenate(pts) if pts else np.zeros((0, 3)),
-                            np.concatenate(org) if org else np.zeros((0, 3)), t))
-        self.frame_times.append(np.concatenate(times) if times else np.zeros(0))
+        P = np.concatenate(pts) if pts else np.zeros((0, 3))
+        O = np.concatenate(org) if org else np.zeros((0, 3))
+        T = np.concatenate(times) if times else np.zeros(0)
+        if self.max_points and len(P) > self.max_points:
+            sel = np.sort(self.rng.choice(len(P), self.max_points, replace=False))
+            P, O, T = P[sel], O[sel], T[sel]
+        self.frames.append((P, O, t))
+        self.frame_times.append(T)
         self.buf = []
         self.frame_end += self.frame_dt
 
