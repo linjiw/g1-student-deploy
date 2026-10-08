@@ -1,7 +1,7 @@
 # Planner inference speed (2026-10-08)
 
 **Result.** The deployed student planner (K = 16 candidates, 10 guided Euler steps, 2 chunks, sensor selection,
-leg grounding) now runs **2.3–2.9× faster on the deploy PC**, under the same full GPU contention. The model,
+leg grounding) now runs **2.3–3.4× faster on the deploy PC** under the same GPU contention from other jobs. The model,
 the config and the sampler's maths are unchanged. Implementation: `g1deploy/fastplan.py` (`FastFlowPlanner`,
 `--planner-impl fused`, now the default everywhere). The frozen bundle source is byte-identical.
 
@@ -14,6 +14,8 @@ the config and the sampler's maths are unchanged. Implementation: `g1deploy/fast
 | **fused**, the same 37 states | **0.128–0.134 s** | **0.167–0.176 s** |
 | worst case, every pool unsafe (16 + 48 + 16 candidates), eager | 0.96–1.20 s | 1.05–1.25 s |
 | worst case, fused | 0.34–0.54 s | 0.38–0.59 s |
+| lighter background load, 37 states: eager / fused | 0.317 / **0.074 s** | 0.358 / **0.104 s** |
+| end to end in the real-time rehearsal (node + C++ runner + DDS MuJoCo, beams2-100, 28 plans), fused | **0.083 s** | **0.119 s** |
 
 The ranges are two runs at different background load. The worst case occurs in 4 % of plans in the realistic
 panel (0.5 % in slow mode). Note that the eager arms modelled those plans at the panel's flat 0.32 s, not ~1 s.
@@ -29,7 +31,7 @@ panel (0.5 % in slow mode). Note that the eager arms modelled those plans at the
 |---|---|---|---|
 | ideal lidar, 0.32 s predictive (`g4-lat032-pred` / `g4w-fused-base-lat032`) | 79 | 78 | 97/98 same outcome |
 | realistic: MID-360 + stand + lidar route + LIO noise, 0.32 s (`g4t-deploy-real` / `g4w-fused-real-lat032`) | 75 | 76 | 97/98 same outcome |
-| realistic at the fused p95 latency, 0.18 s (`g4w-fused-real-lat018`) | — | see READINESS | |
+| realistic at the fused planner's measured p95, 0.18 s (`g4w-fused-real-lat018`) | 75 at 0.32 s, 84 at 0 s | **82** | the latency gap is closed (Isaac 83) |
 
 ## 1. Where the time went (eager, one plan, 350 ms under contention)
 
