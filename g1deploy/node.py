@@ -259,6 +259,9 @@ def route_copy(route):
 
 def _worker(conn, pdict, episode, seed):
     import os
+    import signal
+
+    signal.signal(signal.SIGINT, signal.SIG_IGN)  # the parent shuts workers down through the pipe
 
     os.environ.setdefault("OMP_NUM_THREADS", "4")
     import torch
