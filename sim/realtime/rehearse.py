@@ -121,6 +121,11 @@ def main(argv=None):
     ap.add_argument("--mount-calib", default=None)
     ap.add_argument("--odom", choices=("dds", "leg"), default="dds",
                     help="dds: simulator ground truth (stands in for LIO); leg: leg odometry from rt/lowstate only")
+    ap.add_argument("--operator", choices=("keyboard", "remote"), default="keyboard",
+                    help="remote: the robot procedure with the Unitree wireless remote (runner gamepad_manager + SONIC "
+                         "planner): Start = control, F1 = our stream, D-up = SONIC planner takeover, Select = e-stop")
+    ap.add_argument("--takeover-at", type=float, default=None,
+                    help="with --operator remote: press D-up this many s after the stream starts (operator takeover)")
     ap.add_argument("--replay", default=None,
                     help="H4 check: stream this recorded episode (closed_loop.npz) open-loop instead of running the node")
     args = ap.parse_args(argv)
@@ -147,21 +152,30 @@ def main(argv=None):
     t_run = t_stop = arrived_at = None
     try:
         sim = Proc("sim", [py, "-u", "sim/realtime/robot_sim.py", "--task", args.task, "--log", str(out / "sim.npz"),
-                           "--release-file", str(release), "--lidar-io", args.lidar_io]
+                           "--release-file", str(release), "--lidar-io", args.lidar_io,
+                           "--remote-dir", str(out / "remote")]
                    + (["--lidar-cfg", args.lidar_cfg] if args.lidar_cfg else []) + (["--viewer"] if args.viewer else []),
                    out / "sim.log", env)
         procs.append(sim)
         if not sim.wait_for("[sim] task", 60):
             raise RuntimeError("simulator did not start:\n" + sim.text()[-2000:])
+        (out / "remote").mkdir()
+        press = lambda b: (out / "remote" / b).touch()  # noqa: E731
+        input_args = (["--input-type", "gamepad_manager", "--planner-file",
+                       str(bundle.ROOT / "sonic/planner/V2/planner_sonic.onnx")] if args.operator == "remote"
+                      else ["--input-type", "zmq"])
         runner = Proc("runner", [str(RUNNER), "lo", str(bundle.sonic_onnx()), f"{MOTIONS}/", "--obs-config", str(OBS_CONFIG),
-                                 "--disable-crc-check", "--input-type", "zmq", "--zmq-host", "localhost", "--zmq-port",
+                                 "--disable-crc-check", *input_args, "--zmq-host", "localhost", "--zmq-port",
                                  "5556", "--zmq-topic", "pose"], out / "runner.log", env, stdin=True, stamp=True)
         procs.append(runner)
         if not runner.wait_for("Init Done", args.boot_timeout):
             raise RuntimeError("runner did not reach Init Done:\n" + runner.text()[-3000:])
         time.sleep(1.0)
-        runner.key("]")
-        if not runner.wait_for("transitioning to CONTROL", 15):
+        if args.operator == "remote":
+            press("start")
+        else:
+            runner.key("]")
+        if not runner.wait_for("transitioning to CONTROL", 30):
             raise RuntimeError("runner did not enter CONTROL:\n" + runner.text()[-2000:])
         time.sleep(1.0)
         release.touch()  # gantry released: SONIC balances the stand
@@ -198,7 +212,10 @@ def main(argv=None):
             procs.append(node)
             if not node.wait_for('"node_up"', 120):
                 raise RuntimeError("node did not start:\n" + node.text()[-3000:])
-            runner.key("\n")  # Enter: switch the runner to ZMQ streaming
+            if args.operator == "remote":
+                press("F1")  # hand control to our stream
+            else:
+                runner.key("\n")  # Enter: switch the runner to ZMQ streaming
             time.sleep(0.3)
             start.touch()
             if not node.wait_for('"run"', 60):
@@ -208,14 +225,21 @@ def main(argv=None):
             t_end, arrived_at = t_run + task["deadline_s"], None
             while time.monotonic() < t_end:
                 txt = node.text()
+                if args.takeover_at is not None and time.monotonic() > t_run + args.takeover_at and "takeover" not in result:
+                    press("up")  # operator takes over: SONIC's own planner, standing
+                    result["takeover"] = time.monotonic()
+                    t_end = min(t_end, time.monotonic() + 4.0)  # watch the robot stand for a few seconds
                 if '"estop"' in txt:
-                    runner.key("o")
+                    if args.operator == "remote":
+                        press("select")
+                    else:
+                        runner.key("o")
                     result["estop"] = True
                     time.sleep(1.0)
                     break
                 if '"arrived"' in txt and arrived_at is None:
                     arrived_at = time.monotonic()
-                if arrived_at is not None and time.monotonic() - arrived_at > 0.5:
+                if arrived_at is not None and time.monotonic() - arrived_at > 0.5 and "takeover" not in result:
                     break
                 if any(p.p.poll() is not None for p in procs):
                     break

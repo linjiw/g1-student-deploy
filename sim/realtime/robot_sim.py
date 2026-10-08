@@ -55,6 +55,8 @@ def main(argv=None):
                     help="header stamps on a different clock (PC1 vs Orin without chrony); the node must not use them")
     ap.add_argument("--duration", type=float, default=0.0)
     ap.add_argument("--viewer", action="store_true")
+    ap.add_argument("--remote-dir", default=None,
+                    help="virtual wireless remote: a file <dir>/<button> (start, select, F1, A, up, ...) is a 0.2 s press")
     ap.add_argument("--release-file", default=None,
                     help="hold the pelvis (gantry) after the first LowCmd until this file exists")
     args = ap.parse_args(argv)
@@ -152,6 +154,23 @@ def main(argv=None):
     stop = {"flag": False}
     signal.signal(signal.SIGTERM, lambda *_: stop.__setitem__("flag", True))
     signal.signal(signal.SIGINT, lambda *_: stop.__setitem__("flag", True))
+    # Unitree wireless remote: LowState.wireless_remote bytes 2-3 = button word (gamepad.hpp xKeySwitchUnion)
+    BUTTONS = {"R1": 0, "L1": 1, "start": 2, "select": 3, "R2": 4, "L2": 5, "F1": 6, "F2": 7, "A": 8, "B": 9,
+               "X": 10, "Y": 11, "up": 12, "right": 13, "down": 14, "left": 15}
+    pressed = {}  # button -> sim time until which it is held
+
+    def remote_step(t):
+        if args.remote_dir is None:
+            return
+        for f in Path(args.remote_dir).glob("*"):
+            if f.name in BUTTONS:
+                pressed[f.name] = t + 0.2
+                print(f"[sim] EVENT remote_press {f.name} sim_t={t:.3f} wall={time.monotonic():.3f}", flush=True)
+                f.unlink()
+        word = sum(1 << BUTTONS[b] for b, until in pressed.items() if until > t)
+        bridge.low_state.wireless_remote[2] = word & 0xFF
+        bridge.low_state.wireless_remote[3] = (word >> 8) & 0xFF
+
     seen_cmd, sim_t, next_cloud, step = False, 0.0, 0.0, 0
     t_wall0 = time.monotonic()
     try:
@@ -171,6 +190,7 @@ def main(argv=None):
                 if Path(args.release_file).exists():
                     released = True
                     print(f"[sim] EVENT released sim_t={sim_t:.3f} wall={time.monotonic():.3f}", flush=True)
+            remote_step(sim_t)
             env.sim_step()
             sim_t += sim.sim_dt
             if step % 2 == 0:  # 100 Hz log is plenty for scoring at the 50 Hz control rate
