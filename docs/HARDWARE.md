@@ -7,57 +7,58 @@ stand in a gantry, 2026-09-11, policy never armed). Read its `docs/HARDWARE_RUNS
 ## 1. What runs where
 
 ```
-G1 motion board (192.168.123.161)  <-- rt/lowcmd / rt/lowstate (DDS, domain 0) -->  deploy PC (wired, 192.168.123.x)
-MID-360 (192.168.123.120)  --> Livox driver --> FAST-LIO2 --> ros2_lio_bridge.py  --(ZMQ odom :5561, cloud)-->
-                                                                                  node.py --(ZMQ pose :5556)--> runner
+G1 PC1 (192.168.123.161, closed): motion board + Unitree lidar_driver
+   rt/lowstate (500 Hz)  rt/utlidar/cloud_livox_mid360 (10 Hz, raw)  rt/utlidar/imu_livox_mid360 (200 Hz)
+        │ DDS domain 0, wired
+deploy PC (192.168.123.x, NVIDIA GPU) ── or the Orin NX later (JetPack 6.2 + TensorRT 10.7; latency unmeasured)
+   SONIC C++ runner  --input-type gamepad_manager --planner-file bundle/sonic/planner/V2/planner_sonic.onnx
+                     (CRC check ON, never --disable-crc-check on hardware)   <── ZMQ pose :5556 ──  g1deploy/node.py
+   node.py  --cloud dds --mount-calib mount.json --odom zmq|leg --goal-frame start --goal <ahead> <left>
+   [Point-LIO on /utlidar/* + adapters/ros2_lio_bridge.py → ZMQ odom :5561]   (Orin or PC, ROS 2 + rmw_cyclonedds)
 ```
 
-Default: everything on an external PC with an NVIDIA GPU on the robot switch (SONIC's own docs run the
-deploy this way; Wi-Fi is not acceptable). The Orin NX is possible later (runner needs JetPack 6.2 +
-TensorRT 10.7; planner latency on the Orin is unmeasured and likely 2–4× the desktop).
+Details of the robot's sensors and the LIO configuration: [G1_PERCEPTION.md](G1_PERCEPTION.md).
 
-## 2. Interfaces the hardware side must provide
+## 2. Operator procedure (rehearsed in sim: `rehearse.py --operator remote`)
 
-| input | sim (today) | robot (to build/verify) |
+1. Robot in the gantry, feet on the floor. Start the runner; wait for "Init Done" (INIT ramp to the stand).
+2. **Remote Start**: SONIC takes control with its own planner (IDLE, standing). Slacken the gantry.
+3. Start the node (it pre-scans the lidar while standing, then plans from the stand).
+4. **Remote F1**: control passes to the node's stream; the student walks to the goal and settles to a stand.
+5. Override at any time:
+   - **D-up** → SONIC's own planner, standing (from 1.38 m/s walking: standing still in ~1.5 s). **Not near an
+     overhead obstacle**: standing up within ~1 m of a beam drove the head into it (566 N) in rehearsal.
+   - **Select** → e-stop (damping: the robot drops; only with the gantry/spotter).
+   - The node's own events: tilt > 0.75 rad → `estop`; lidar or state stale → stand (deferred near ceilings).
+
+## 3. Measure on the robot before any walking
+
+| check | tool | pass |
 |---|---|---|
-| joints + pelvis IMU | rt/lowstate from robot_sim | rt/lowstate (same IDL) |
-| pelvis pose, floor z = 0 | rt/odostate ground truth | FAST-LIO2 → `adapters/lio.py` frames (tested) → `PoseFilter` 50 Hz (tested) → ZMQ `odom` via `adapters/ros2_lio_bridge.py` (**untested**) |
-| lidar cloud, world frame | ZMQ `cloud` from robot_sim | `/cloud_registered` → bridge → ZMQ `cloud` (**untested**) |
-| SONIC | C++ runner, `--input-type zmq` | same binary, `--iface <robot NIC>`, CRC check ON (never `--disable-crc-check` on hardware) |
+| planner latency on the deploy machine | `tools/bench_planner.py` | p95 ≤ 0.32 s (the latency tested with predictive anchoring) |
+| DDS state and lidar after releasing Unitree's controller | `tools/check_robot.py --iface <nic> --perception --cloud dds` | 500 Hz lowstate, 10 Hz lidar, no returns left on the robot |
+| MID-360 mount + occlusion | `tools/calibrate_mount.py --iface <nic> --out mount.json --png coverage.png` | floor |z| < 1 cm, < 0.5° after calibration; no blocked sector ahead |
+| hands of the self filter | `G1_BODY_MODEL=dex3` if Dex3 hands | no returns within 0.3 m of the pelvis while the arms move |
+| odometry | Point-LIO + bridge (`--odom zmq`), or `--odom leg` for ≤ 3 m tests | walk the robot by hand 5 m out and back: < 5 cm, < 1° |
+| clocks | chrony on the PC/Orin against PC1 | only needed for LIO (the node times points on arrival) |
 
-## 3. Things to measure on the robot before any walking
-
-1. **MID-360 extrinsic.** URDFs disagree (inverted, pitch 0.0511 vs 0.040 vs 3.101 rad, z 0.416–0.428 m on
-   torso_link; Unitree's page says −2.3° and 0.476 m). With the robot standing still, fit the floor plane in
-   the first clouds: it must come out at z = 0 ± 1 cm and level within 0.5°. Adjust `mid360.POS_TORSO/RPY`
-   (or `LioFrames(t_torso_lidar=...)`) until it does. Then put a box of known size 2 m ahead and check its
-   height and position in `CloudMemory`.
-2. **Self filter.** The G1 MJCF used for the filter must match the robot's hands (rubber hands vs Dex3).
-   Count cloud points within 0.3 m of the pelvis axis after filtering while the arms move: must be ~0.
-3. **LIO.** Gravity initialisation standing still; check drift by walking the robot by hand (gantry) 5 m out
-   and back: < 5 cm, < 1°. FAST-LIO's world is the upside-down sensor start frame — `LioFrames.initialise`
-   re-levels it with the pelvis IMU and FK; verify the levelled floor (1.).
-4. **Clocks.** Lidar timestamps vs host: use host receive time for everything the node fuses (the node does).
-5. **Heading.** The runner re-captures heading against the pelvis IMU at stream start; IMU yaw drifts against
-   LIO yaw. Log both for 60 s standing; if the drift is > 2°/min, feed `heading_increment` corrections.
-
-## 4. Ladder (stop at the first failure; every step with gantry/spotter and the remote's e-stop in hand)
+## 4. Ladder (stop at the first failure; gantry/spotter and the remote in hand every time)
 
 | step | what | pass |
 |---|---|---|
-| H0 | desk: bundle verify, `pytest`, G3/G4/G5 in sim on the deploy PC itself | same numbers as on the dev box; planner p95 latency measured on this GPU |
-| H1 | network read-only: `tools/check_robot.py --iface <nic>` (lowstate rate, mode_machine, IMU, joint order sanity) | 500 Hz lowstate, sane joints |
-| H2 | perception standing still: driver + FAST-LIO + bridge; `tools/check_robot.py --perception` | §3.1–3.3 pass |
-| H3 | lucid procedure in the gantry: runner INIT → stand → `]` SONIC tracking the stand motion | stable stand, no runner aborts |
-| H4 | stream path without the planner: `tools/stream_replay.py` replays a recorded rehearsal plan sequence (empty floor, slow) into the runner, gantry slack | tracked like in sim; no catch-up resets after the first |
-| H5 | planner live, empty floor, gantry slack then free with spotter, `--max-speed 0.8` and a short goal | arrives, settles to stand |
+| H0 | desk: `freeze_bundle` copy verifies, `pytest`, `bench_planner.py`, one rehearsal on the deploy PC | numbers as in RUNBOOK |
+| H1 | read-only network check (`check_robot.py`) | §3 rows 2 |
+| H2 | perception standing still: calibrate, coverage, self filter, odometry | §3 |
+| H3 | runner in the gantry: INIT → Start → SONIC planner stand | stable stand, no aborts |
+| H4 | stream without the planner: `tools/stream_replay.py <recorded empty-floor episode> --slow 2`, gantry slack | tracked; one catch-up reset at the start only |
+| H5 | student live, open floor, goal 2–3 m (`--goal-frame start`), gantry slack then spotter | arrives and stands |
 | H6 | ground obstacles (pillar, wall detour), measured course | as G4 in sim |
-| H7 | overhead beams — only after the tilt envelope of deep ducks is checked in place (13/99 student episodes fell at 0.80–0.85 rad tilt in Isaac panel v2) | — |
+| H7 | overhead beams — only after the deep-duck envelope (tilt up to ~0.7 rad) is checked in place, and with a beam that yields | — |
 
 ## 5. Known gaps (decide before H5)
 
-- **Walking speed.** The student walks the panels at ~1.2–1.6 m/s (goal lookahead 1.5 m). Slower operation
-  (shorter lookahead) is untested — evaluate in sim (G4) before using it on the robot.
+- **Walking speed.** From standing the student averages ~0.9 m/s (peaks 1.4 m/s; goal lookahead 1.5 m). A slower mode
+  (`--goal-lookahead 1.0`) is being evaluated (G4e).
 - **Planner latency.** Lock-step assumed 0; with 0.32 s + predictive anchoring + two planners in flight the
   sim cost is measured in G4. A faster planner (TensorRT/torch.compile, fewer ODE steps) is the main lever.
 - **Start state.** Isaac panels start mid-walk; the robot starts standing (G4 `--start stand`).
