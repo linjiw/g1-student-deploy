@@ -5,5 +5,6 @@ _dds="${CYCLONEDDS_HOME:-$HOME/opt/sonic-deploy-toolchain/cyclonedds}"
 [ -d "$_dds/lib" ] && export CYCLONEDDS_HOME="$_dds" LD_LIBRARY_PATH="$_dds/lib:${LD_LIBRARY_PATH:-}"
 export PYTHON="$G1_STUDENT_DEPLOY/.venv/bin/python"
 export PYTHONPATH="$G1_STUDENT_DEPLOY:$LUCID_DEPLOY_ROOT/sdk:${PYTHONPATH:-}"
+export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-$G1_STUDENT_DEPLOY/.cache/inductor}"  # fast planner kernels
 export RUNNER="$LUCID_DEPLOY_ROOT/runner/target/release/g1_deploy_onnx_ref"
 unset _dds

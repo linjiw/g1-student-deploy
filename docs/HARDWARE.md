@@ -35,7 +35,7 @@ Details of the robot's sensors and the LIO configuration: [G1_PERCEPTION.md](G1_
 
 | check | tool | pass |
 |---|---|---|
-| planner latency on the deploy machine | `tools/bench_planner.py` | p95 ≤ 0.32 s (the latency tested with predictive anchoring) |
+| planner latency on the deploy machine | `tools/bench_planner.py` (fused planner) | p95 ≤ 0.32 s (the latency tested with predictive anchoring); measured 0.16–0.18 s on the loaded deploy PC |
 | DDS state and lidar after releasing Unitree's controller | `tools/check_robot.py --iface <nic> --perception --cloud dds` | 500 Hz lowstate, 10 Hz lidar, no returns left on the robot |
 | MID-360 mount + occlusion | `tools/calibrate_mount.py --iface <nic> --out mount.json --png coverage.png` | floor |z| < 1 cm, < 0.5° after calibration; no blocked sector ahead |
 | hands of the self filter | `G1_BODY_MODEL=dex3` if Dex3 hands | no returns within 0.3 m of the pelvis while the arms move |

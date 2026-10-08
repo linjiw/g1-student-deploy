@@ -28,8 +28,10 @@ uv venv .venv --python 3.11
 uv pip install --python .venv/bin/python torch==2.7.0 --index-url https://download.pytorch.org/whl/cu128
 CYCLONEDDS_HOME=$HOME/opt/sonic-deploy-toolchain/cyclonedds uv pip install --python .venv/bin/python -r requirements.txt
 # the frozen policy bundle: copied from the dev box (bundle/, ~0.9 GB) or rebuilt there with tools/freeze_bundle.py
-./g1 test            # 22 tests: bundle hashes, SONIC parity, stream format, perception, node safety
-./g1 bench           # planner latency on this machine: p95 must be <= 0.32 s
+./g1 test            # 26 tests: bundle hashes, SONIC parity, stream format, perception, node safety, fast planner
+./g1 bench           # planner latency on this machine: p95 must be <= 0.32 s (fused planner: ~0.17 s here
+                     # under full GPU load). The first run also compiles the planner kernels into .cache/inductor
+                     # (~2 min once); afterwards every node start warms up in ~25 s before it reports ready
 ```
 
 The first start of each SONIC model builds a TensorRT engine (policy ~30 s, SONIC's planner ~7 min); later starts

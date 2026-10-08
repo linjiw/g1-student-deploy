@@ -5,3 +5,4 @@ bundle/*
 !bundle/MANIFEST.json
 runs/
 *.mp4
+.cache/

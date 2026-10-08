@@ -58,6 +58,8 @@ def _env():
             env[k] = v
     env["LD_LIBRARY_PATH"] = f"{dds / 'lib'}:{env.get('LD_LIBRARY_PATH', '')}"
     env["PYTHONPATH"] = f"{ROOT}:{LUCID / 'sdk'}"
+    # compiled planner kernels (g1deploy/fastplan.py) persist here: /tmp is wiped on reboot -> ~1 min recompile
+    env.setdefault("TORCHINDUCTOR_CACHE_DIR", str(ROOT / ".cache/inductor"))
     return env
 
 

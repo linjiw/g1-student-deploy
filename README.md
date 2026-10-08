@@ -8,7 +8,7 @@ the **lucid-g1-deploy C++ runner**, and test the whole chain in MuJoCo first.
 MID-360 cloud ─► self filter ─► label-free height/ceiling memory ─┐
 G1 joints + IMU (DDS rt/lowstate) + odometry ─► 50 Hz history ────┤
                                                                    ▼
-                    student planner (K=16 guided FM, predictive anchoring, 1 in flight)
+          student planner (K=16 guided FM, fused/CUDA-graph, ~0.17 s p95, predictive anchoring, 1 in flight)
                                                                    │ ZMQ protocol v1 (port 5556)
                                                                    ▼
              SONIC C++ runner (TensorRT, fused release ONNX 1570→29) ─► rt/lowcmd ─► G1
@@ -26,6 +26,7 @@ Status: simulation only. Nothing has run on a robot. See [docs/DESIGN.md](docs/D
 | `sim/lockstep.py`, `tools/eval_panel.py` | Path A: MuJoCo counterpart of the Isaac callback; switches for latency (+ predictive anchoring), standing start, lidar route, ray-cast lidar, odometry drift |
 | `g1deploy/perception/` | MID-360 pattern/mount, MuJoCo ray casting incl. self-hits, mesh-capsule self filter, label-free evidence memory |
 | `g1deploy/node.py` | the deployable node: DDS state + odometry + cloud → planner processes → SONIC stream; supervisor |
+| `g1deploy/fastplan.py` | the planner as deployed: same plans as the evaluated one, 2.3–2.9× faster (CUDA graphs, per-chunk model constants, compiled steps, vectorised selection); [docs/PLANNER_SPEED.md](docs/PLANNER_SPEED.md) |
 | `g1deploy/zmq_stream.py` | SONIC ZMQ protocol v1; framing proven equal to the Isaac feed |
 | `sim/realtime/` | Path B: DDS MuJoCo G1 (lucid gear_sonic_sim) + obstacles + cloud; `rehearse.py` runs sim + C++ runner + node |
 | `g1deploy/adapters/` | LIO frame math through the waist + 50 Hz pose filter (tested), ROS 2 FAST-LIO bridge (untested) |
@@ -34,7 +35,7 @@ Status: simulation only. Nothing has run on a robot. See [docs/DESIGN.md](docs/D
 ## Quick start
 
 ```bash
-./g1 test                                  # 22 tests (bundle, SONIC parity, stream, perception, node safety)
+./g1 test                                  # 26 tests (bundle, SONIC parity, stream, perception, node safety, fast planner)
 ./g1 sim --layout beams2-100               # operator console + MuJoCo G1 + C++ SONIC runner + student node
                                            # keys: s start SONIC, g GO, h stand, t takeover, n goal, o E-STOP, q quit
 ./g1 robot --iface eth0 --goal 3 0 --odom leg --mount-calib mount.json      # the same chain on the G1

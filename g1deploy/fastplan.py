@@ -53,20 +53,28 @@ class FastTree:
              rotation_wxyz(j["q1"]).T, np.asarray(j["p0"], dtype=float), np.asarray(j["p1"], dtype=float))
             for j in tree.ordered
         ]
+        self._cols = np.array([st[4] for st in self._steps])
+        self._axis = np.array(["XYZ".index(st[3]) + 1 for st in self._steps])
 
     def __getattr__(self, name):
         return getattr(self.tree, name)
 
     def forward(self, qpos):
-        from motion2scene_flow.native_geometry import axis_rotation, rotation_wxyz
+        from motion2scene_flow.native_geometry import rotation_wxyz
 
         q = np.asarray(qpos, dtype=float)
         if q.ndim != 2 or q.shape[1] != 7 + len(self.joint_names) or not np.isfinite(q).all():
             raise ValueError("Invalid named qpos")
         poses = {self.root: (q[:, :3], rotation_wxyz(q[:, 3:7]))}
-        for parent, child, r0, axis, col, r1t, p0, p1 in self._steps:
+        # `axis_rotation(axis, angle)` for every joint at once: the same quaternion -> matrix formulas
+        angle = q[:, self._cols]
+        qa = np.zeros((*angle.shape, 4))
+        qa[..., 0] = np.cos(angle / 2)
+        qa[:, np.arange(len(self._cols)), self._axis] = np.sin(angle / 2)
+        axis_r = rotation_wxyz(qa)
+        for j, (parent, child, r0, _, _, r1t, p0, p1) in enumerate(self._steps):
             p, r = poses[parent]
-            child_r = r @ r0 @ axis_rotation(axis, q[:, col]) @ r1t
+            child_r = r @ r0 @ np.ascontiguousarray(axis_r[:, j]) @ r1t
             child_p = p + np.einsum("tij,j->ti", r, p0) - np.einsum("tij,j->ti", child_r, p1)
             poses[child] = child_p, child_r
         return (np.stack([poses[b][0] for b in self.body_names], axis=1),
@@ -85,19 +93,20 @@ def fast_tree(tree):
     return ft
 
 
-def height_field_clearance(sel, qpos, datum_offset_m):
-    """`sensor_map.HeightFieldSelector.__call__` on all candidates at once (bitwise-equal result).
+def height_field_hits(sel, qpos, datum_offset_m):
+    """(len(margins), K) bool: does any capsule point of candidate k hit at margin m (HeightFieldSelector rules).
 
-    The disc dilations are computed on the crop the candidates can reach (k_max cells around their
-    in-grid capsule points) instead of the whole memory grid: every value read is the same."""
+    Frames are independent, so hits over a split of the frames OR together into the hits over all of them.
+    The disc dilations are computed on the crop the points can reach (k_max cells around the in-grid
+    capsule points) instead of the whole memory grid: every value read is the same."""
     from motion2scene_flow.native_geometry import world_capsules
 
     mem = sel.memory
     qpos = np.asarray(qpos)
     n_cand, n_t = qpos.shape[:2]
-    out = np.full(n_cand, -1.0)
-    if n_cand == 0:
-        return out
+    hits = np.zeros((len(sel.margins), n_cand), dtype=bool)
+    if n_cand == 0 or n_t == 0:
+        return hits
     k_max = int(np.ceil((max(s["radius"] for s in sel.shapes) + max(sel.margins)) / mem.res)) + 1
     q = np.array(qpos, dtype=np.float64).reshape(n_cand * n_t, -1)
     q[:, 2] -= datum_offset_m  # memory heights are physical
@@ -109,8 +118,7 @@ def height_field_clearance(sel, qpos, datum_offset_m):
     inside = (ij >= 0).all(-1) & (ij < mem.n).all(-1)
     ij = np.clip(ij, 0, mem.n - 1)
     if not inside.any():
-        out[:] = sel.margins[-1]
-        return out
+        return hits
     shape = np.shape(mem.support)
     lo_c = np.maximum(ij[inside].min(0) - k_max, 0)
     hi_c = np.minimum(ij[inside].max(0) + k_max + 1, shape)
@@ -120,10 +128,8 @@ def height_field_clearance(sel, qpos, datum_offset_m):
     ceil0 = np.nan_to_num(np.asarray(mem.ceiling)[crop], nan=np.inf)
     ci = np.clip(ij - lo_c, 0, hi_c - lo_c - 1)  # out-of-grid points are masked by `inside`
     cache = {}
-    alive = np.ones(n_cand, dtype=bool)
-    for m in sel.margins:
+    for mi, m in enumerate(sel.margins):
         k = np.ceil((radius + m) / mem.res).astype(int).clip(1, k_max)
-        hit = np.zeros(n_cand, dtype=bool)
         for kk in np.unique(k):
             if kk not in cache:
                 y, x = np.ogrid[-kk:kk + 1, -kk:kk + 1]
@@ -135,10 +141,23 @@ def height_field_clearance(sel, qpos, datum_offset_m):
             ii, jj = ci[:, :, cols, 0], ci[:, :, cols, 1]
             z, rr = pts[:, :, cols, 2], radius[cols]
             h = ((sup[ii, jj] > z - rr - m) | (ceil[ii, jj] < z + rr + m)) & inside[:, :, cols]
-            hit |= h.any((1, 2))
-        alive &= ~hit
+            hits[mi] |= h.any((1, 2))
+    return hits
+
+
+def clearance_from_hits(margins, hits):
+    """Largest margin a candidate passes together with every smaller one, or -1 (the selector's result)."""
+    out = np.full(hits.shape[1], -1.0)
+    alive = np.ones(hits.shape[1], dtype=bool)
+    for mi, m in enumerate(margins):
+        alive &= ~hits[mi]
         out[alive] = m
     return out
+
+
+def height_field_clearance(sel, qpos, datum_offset_m):
+    """`sensor_map.HeightFieldSelector.__call__` on all candidates at once (bitwise-equal result)."""
+    return clearance_from_hits(sel.margins, height_field_hits(sel, qpos, datum_offset_m))
 
 
 def ground_legs(qpos, tree, bodies, stance_ankle_z, limits=None, iters=6, eps=1e-3, tol=0.002):
@@ -239,6 +258,8 @@ def _build_class():
             # right after its replay, so the pool holds the largest graph's activations, not their sum
             self._pool = torch.cuda.graph_pool_handle() if self.use_graphs else None
             self.capture_s = 0.0
+            self.overlap_stats = [0, 0]  # overlapped selections reused / recomputed (frames not bitwise equal)
+            self._partial_hits = None
             self.model.eval()
             self._temb = None
             if self.fuse:
@@ -477,7 +498,10 @@ def _build_class():
             if self.cfg.scene_input not in ("true", "empty"):
                 raise ValueError("scene_input must be 'true' or 'empty'")
             xs, ys = host
-            maps = torch.stack([map_fn(xs[i], float(ys[i])) for i in range(b)]).to(hist_raw.device)
+            if (xs == xs[0]).all() and (ys == ys[0]).all():  # first chunk: every candidate starts at the anchor
+                maps = map_fn(xs[0], float(ys[0]))[None].repeat(b, 1, 1, 1).to(hist_raw.device)  # map_fn is pure
+            else:
+                maps = torch.stack([map_fn(xs[i], float(ys[i])) for i in range(b)]).to(hist_raw.device)
             if self.cfg.support_clip_m is not None:
                 maps[:, 0] = maps[:, 0].clamp(max=self.cfg.support_clip_m)
                 maps[:, 1] = maps[:, 1].clamp(max=self.cfg.support_clip_m)
@@ -492,18 +516,43 @@ def _build_class():
                 return super()._condition(hist_raw, xy0, yaw0, goal, world_obs, map_fn)
             return cond, anchor_raw
 
+        def _overlap_selector(self):
+            fn = getattr(self, "_clearance_fn", None)
+            plain = isinstance(fn, sensor_map.HeightFieldSelector) and type(fn).__call__ is sensor_map.HeightFieldSelector.__call__
+            return fn if plain and self.cfg.select_frames is None else None
+
+        def _to_qpos(self, flat, k, n):
+            """Host rows [rot (n*9) | positions (n*3) | joints (n*29)] -> qpos (k, n, 36), as `_candidates`."""
+            rot_h = flat[:, : n * 9].reshape(-1, 3, 3)
+            pos_h = flat[:, n * 9: n * 12].reshape(k, n, 3)
+            joints_h = flat[:, n * 12:].reshape(k, n, 29)
+            quat = Rotation.from_matrix(rot_h).as_quat()[:, [3, 0, 1, 2]]
+            return np.concatenate([pos_h, quat.reshape(k, -1, 4), joints_h], -1), pos_h
+
         @torch.no_grad()
         def _candidates(self, hist0, xy0, yaw0, goal_fn, k, world, map_fn=None, guide_obs=None):
+            """`FlowPlanner._candidates` with one host sync per chunk; while chunk c samples on the GPU, the
+            CPU runs the height-field selection on chunk c-1's frames (exact: frames are independent)."""
+            sel = self._overlap_selector()
             hist = hist0.to(self.device)[None].repeat(k, 1, 1)
             xy = xy0.to(self.device)[None].repeat(k, 1)
             yaw = yaw0.to(self.device)[None].repeat(k)
             xs = np.repeat(np.asarray(xy0, dtype=np.float32)[None], k, 0)  # chunk 0 anchors are on the host
             ys = np.repeat(np.asarray(yaw0, dtype=np.float32)[None], k, 0)
             states, positions, yaws, goals = [], [], [], []
+            done_q, hits = [], None
             for c in range(self.cfg.chunks):
+                prev_q = None
                 if c > 0:
-                    host = torch.cat([xy, yaw[:, None]], 1).cpu().numpy()  # one sync per chunk
+                    parts = [xy, yaw[:, None]]
+                    if sel is not None:  # the previous chunk's frames ride along with the anchors (same sync)
+                        n_prev = states[-1].shape[1]
+                        rot_prev = ps.compose(yaws[-1], states[-1][..., 1:4])
+                        parts += [rot_prev.reshape(k, -1), positions[-1].reshape(k, -1), states[-1][..., 7:36].reshape(k, -1)]
+                    host = torch.cat(parts, 1).cpu().numpy()  # one sync per chunk
                     xs, ys = host[:, :2], host[:, 2]
+                    if sel is not None:
+                        prev_q = self._to_qpos(host[:, 3:], k, n_prev)[0]
                 goal_h = torch.stack([goal_fn(xs[i].astype(float), float(ys[i])) for i in range(k)])
                 goals.append(goal_h)
                 goal = goal_h.to(self.device)
@@ -512,6 +561,10 @@ def _build_class():
                     chunk = self._sample_guided(cond, anchor_raw, xy, yaw, guide_obs)
                 else:
                     chunk = self._sample(cond, anchor_raw)
+                if prev_q is not None:  # CPU work while the GPU samples this chunk
+                    h = height_field_hits(sel, prev_q, self.cfg.datum_offset_m)
+                    hits = h if hits is None else hits | h
+                    done_q.append(prev_q)
                 pos, _, cyaw = self._integrate(chunk, anchor_raw, xy, yaw)
                 states.append(chunk)
                 positions.append(pos)
@@ -524,12 +577,14 @@ def _build_class():
             rot = ps.compose(yaws, states[..., 1:4])
             n = states.shape[1]
             flat = torch.cat([rot.reshape(k, -1), positions.reshape(k, -1), states[..., 7:36].reshape(k, -1)], 1)
-            flat = flat.cpu().numpy()  # one transfer
-            rot_h = flat[:, : n * 9].reshape(-1, 3, 3)
-            pos_h = flat[:, n * 9: n * 12].reshape(k, n, 3)
-            joints_h = flat[:, n * 12:].reshape(k, n, 29)
-            quat = Rotation.from_matrix(rot_h).as_quat()[:, [3, 0, 1, 2]]
-            qpos = np.concatenate([pos_h, quat.reshape(k, -1, 4), joints_h], -1)
+            qpos, pos_h = self._to_qpos(flat.cpu().numpy(), k, n)  # one transfer
+            self._partial_hits = None
+            if done_q:
+                n0 = sum(q_.shape[1] for q_ in done_q)
+                same = np.array_equal(qpos[:, :n0], np.concatenate(done_q, 1))
+                self.overlap_stats[0 if same else 1] += 1
+                if same:  # bitwise the frames the final selection will see -> reuse their hits
+                    self._partial_hits = (qpos, n0, hits)
             return {"states": states, "rot": rot, "qpos": qpos, "goal0": goals[0][0].numpy(),
                     "end_xy": pos_h[:, min(self.horizon, n) - 1, :2]}
 
@@ -537,6 +592,10 @@ def _build_class():
         def _clearance_raw(self, qpos, obstacles):
             fn = getattr(self, "_clearance_fn", None)
             if isinstance(fn, sensor_map.HeightFieldSelector) and type(fn).__call__ is sensor_map.HeightFieldSelector.__call__:
+                pend, self._partial_hits = getattr(self, "_partial_hits", None), None
+                if pend is not None and pend[0] is qpos:  # earlier chunks were checked during sampling
+                    _, n0, h0 = pend
+                    return clearance_from_hits(fn.margins, h0 | height_field_hits(fn, qpos[:, n0:], self.cfg.datum_offset_m))
                 return height_field_clearance(fn, qpos, self.cfg.datum_offset_m)
             return super()._clearance_raw(qpos, obstacles)
 
@@ -572,4 +631,4 @@ def bench(planner, args, kw, n=20, sync=None):
     return np.asarray(ts)
 
 
-__all__ = ["FastTree", "fast_tree", "height_field_clearance", "ground_legs", "fast_planner_class", "make_planner", "bench"]
+__all__ = ["FastTree", "fast_tree", "height_field_hits", "clearance_from_hits", "height_field_clearance", "ground_legs", "fast_planner_class", "make_planner", "bench"]
