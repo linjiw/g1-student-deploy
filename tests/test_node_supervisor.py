@@ -109,3 +109,26 @@ def test_arrival_settles_to_stand(node):
     threading.Timer(4.0, lambda: setattr(st, "xy", np.array([3.0, 0.0]))).start()
     ev, _ = _run(node, st, cl, lambda e: "arrived" in e and "stand" in e)
     assert "arrived" in ev and "stand" in ev
+
+
+class BeamCloud(FakeCloud):
+    """Floor + the underside of a beam (1.15 m) just ahead of the robot, seen from the head."""
+
+    def poll(self):
+        if self.stop:
+            return []
+        self.last = time.monotonic()
+        rng = np.random.default_rng(1)
+        g = np.c_[rng.uniform(0.3, 2.5, 3000), rng.uniform(-1, 1, 3000)]
+        floor = np.c_[g, np.zeros(len(g))]
+        b = np.c_[rng.uniform(0.35, 0.55, 600), rng.uniform(-0.7, 0.7, 600), np.full(600, 1.15)]
+        return [dict(points=np.vstack([floor, b]), origin=np.array([0.0, 0.0, 1.25]), origins=None, dt=None,
+                     wall=self.last)]
+
+
+def test_soft_stop_is_deferred_under_a_beam(node):
+    st, cl = FakeState(), BeamCloud()
+    threading.Timer(4.0, lambda: setattr(cl, "stop", True)).start()
+    threading.Timer(8.0, lambda: setattr(st, "xy", np.array([-2.0, 0.0]))).start()  # walks clear of the beam
+    ev, _ = _run(node, st, cl, lambda e: "stand" in e, timeout=25.0)
+    assert "stand_deferred" in ev and "stand" in ev and ev.index("stand_deferred") < ev.index("stand")

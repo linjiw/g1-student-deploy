@@ -496,10 +496,33 @@ class StudentNode:
             if first:
                 emit("run", tick=now_tick, first_plan_s=lat)
 
+    def ceiling_near(self, xy, radius_m=0.8, below_m=1.35):
+        """Is a remembered overhead obstacle lower than standing head height within `radius_m`? (Standing up there
+        drives the head into it: verified in the rehearsal, 566 N, operator takeover under a beam.)"""
+        m = self.memory
+        with self.mem_lock:
+            c = m.ceiling
+            ij = np.round((np.asarray(xy) - m.lo) / m.res).astype(int)
+            k = int(np.ceil(radius_m / m.res))
+            a0, a1 = max(ij[0] - k, 0), min(ij[0] + k + 1, m.n)
+            b0, b1 = max(ij[1] - k, 0), min(ij[1] + k + 1, m.n)
+            win = c[a0:a1, b0:b1]
+            return bool(np.any(np.isfinite(win) & (win < below_m)))
+
     def stand(self, now_tick, reason, settle_s=1.0, hold_s=3.0):
         """Stream a settle-to-stand chunk from the measured pose: joints -> SONIC default pose over
-        `settle_s`, pelvis yaw kept, then hold. Used at arrival and as the soft stop."""
+        `settle_s`, pelvis yaw kept, then hold. Used at arrival and as the soft stop. Near a remembered ceiling the
+        stand is deferred: the active plan (checked against the memory when it was made) keeps playing and the
+        stand is issued once clear (`self.pending_stand`)."""
         q = np.asarray(self.history[-1], dtype=np.float64)
+        if self.active is not None and self.ceiling_near(q[:2]):
+            if getattr(self, "pending_stand", None) is None:
+                emit("stand_deferred", reason=reason, tick=now_tick)
+            self.pending_stand = reason
+            self.jobs = {}
+            self.last_streamed_anchor = now_tick + 10**6  # no new plans; the current one plays out
+            return
+        self.pending_stand = None
         n_settle, n = int(settle_s / DT), int((settle_s + hold_s) / DT)
         a = np.clip(np.arange(1, n + 1) / n_settle, 0.0, 1.0)[:, None]
         a = a * a * (3 - 2 * a)  # smoothstep
@@ -522,6 +545,7 @@ class StudentNode:
         """Everything one run accumulates; a restarted run (after a stop or stand) must not inherit it - e.g. a
         stand pushes last_streamed_anchor far ahead, which would reject every later plan as stale."""
         self.tick, self.phase, self.active, self.jobs = 0, "WAIT", None, {}
+        self.pending_stand = None
         self.last_streamed_anchor, self.last_request, self.stream_end = -10**9, -10**9, -1
         if self.streamer is not None:
             self.streamer.last_end = None  # the runner resets playback on the new run's first chunk anyway
@@ -600,6 +624,8 @@ class StudentNode:
                     self.request(self.tick, self.pool.free()[0])
                 if self.active is not None and 0 <= self.stream_end - self.tick < LOOKAHEAD_FRAMES:
                     emit("stall_risk", ahead=self.stream_end - self.tick)
+            if getattr(self, "pending_stand", None) is not None:
+                self.stand(self.tick, self.pending_stand)
             if a.max_ticks and self.tick >= a.max_ticks:
                 return "max_ticks"
             self.tick += 1
