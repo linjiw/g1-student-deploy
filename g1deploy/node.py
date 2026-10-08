@@ -73,7 +73,7 @@ class DdsState:
         self.ring = deque(maxlen=1000)  # (t, qpos36, dq29)
         self.sub_low = ChannelSubscriber("rt/lowstate", LowState_)
         self.sub_low.Init(self._on_low, 1)
-        if odom == "dds":  # "zmq"/"none": odometry arrives through set_odometry()
+        if odom == "dds":  # "zmq"/"leg"/"none": odometry arrives through set_odometry()
             self.sub_odo = ChannelSubscriber("rt/odostate", OdoState_)
             self.sub_odo.Init(self._on_odo, 1)
 
@@ -156,6 +156,33 @@ class OdomInput:
             return
         _, f = unpack(msg, topic=b"odom")
         self.state.set_odometry(f["pos"], f["quat_wxyz"], f["lin_w"], f["ang_w"])
+
+
+class LegOdomSource:
+    """`--odom leg`: pelvis pose from joints + pelvis IMU at 200 Hz (g1deploy/leg_odometry.py), no LIO needed.
+    The odometry frame starts at the first sample: origin under the pelvis, yaw from the IMU."""
+
+    def __init__(self, state: "DdsState"):
+        from g1deploy.leg_odometry import LegOdometry
+
+        self.state, self.odo = state, LegOdometry()
+        self.stop = threading.Event()
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def loop(self):
+        last_p, last_t = None, None
+        while not self.stop.is_set():
+            with self.state.lock:
+                low = self.state.low
+            if low is not None:
+                q, _, imu, gyro = low
+                p = self.odo.reset((0.0, 0.0), imu, q) if self.odo.p is None else self.odo.update(imu, q)
+                now = time.monotonic()
+                v = np.zeros(3) if last_p is None else (p - last_p) / max(now - last_t, 1e-3)
+                last_p, last_t = p, now
+                r = np.array(imu, dtype=float)
+                self.state.set_odometry(p, r, v, np.asarray(gyro, dtype=float))
+            time.sleep(0.005)
 
 
 class CloudInput:
@@ -520,8 +547,11 @@ def parse(argv=None):
     ap.add_argument("--goal", type=float, nargs=2, required=True, help="goal xy in the odometry frame")
     ap.add_argument("--iface", default="lo")
     ap.add_argument("--domain", type=int, default=0)
-    ap.add_argument("--odom", choices=("dds", "zmq"), default="dds",
-                    help="dds: rt/odostate (simulator ground truth); zmq: LIO bridge topic `odom`")
+    ap.add_argument("--odom", choices=("dds", "zmq", "leg"), default="dds",
+                    help="dds: rt/odostate (simulator ground truth); zmq: LIO bridge topic `odom`; "
+                         "leg: leg odometry from rt/lowstate only (fallback; ~12%% drift in MuJoCo)")
+    ap.add_argument("--goal-frame", choices=("odom", "start"), default="odom",
+                    help="start: --goal is (ahead, left) metres from the robot's start pose")
     ap.add_argument("--odom-connect", default="tcp://localhost:5561")
     ap.add_argument("--cloud", default="tcp://localhost:5560")
     ap.add_argument("--stream-bind", default="tcp://*:5556")
@@ -556,6 +586,21 @@ def main(argv=None):
     args = parse(argv)
     node = StudentNode(args)
     state = DdsState(args.iface, args.domain, args.odom)
+    if args.odom == "leg":
+        LegOdomSource(state)
+    if args.goal_frame == "start":
+        t0 = time.monotonic()
+        while state.snapshot() is None and time.monotonic() - t0 < 10:
+            time.sleep(0.02)
+        snap = state.snapshot()
+        if snap is None:
+            raise RuntimeError("no robot state to anchor the goal")
+        w, x, y, z = snap["qpos"][3:7]
+        yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+        c, s_ = math.cos(yaw), math.sin(yaw)
+        ahead, left = args.goal
+        node.goal = snap["qpos"][:2] + np.array([c * ahead - s_ * left, s_ * ahead + c * left])
+        emit("goal", frame="start", goal_odom=node.goal.tolist())
     cloud = CloudInput(args.cloud)
     start = threading.Event()
     if args.start_file:

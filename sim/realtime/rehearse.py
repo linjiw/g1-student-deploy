@@ -115,6 +115,8 @@ def main(argv=None):
     ap.add_argument("--prescan-s", type=float, default=0.5)
     ap.add_argument("--boot-timeout", type=float, default=600.0, help="first run builds the TensorRT engine")
     ap.add_argument("--viewer", action="store_true")
+    ap.add_argument("--odom", choices=("dds", "leg"), default="dds",
+                    help="dds: simulator ground truth (stands in for LIO); leg: leg odometry from rt/lowstate only")
     ap.add_argument("--replay", default=None,
                     help="H4 check: stream this recorded episode (closed_loop.npz) open-loop instead of running the node")
     args = ap.parse_args(argv)
@@ -171,9 +173,19 @@ def main(argv=None):
             while time.monotonic() < t_end:
                 time.sleep(0.05)
         else:
-            node = Proc("node", [py, "-u", "g1deploy/node.py", "--goal", *map(str, task["goal_world_xy"]), "--route", args.route,
-                                 "--boxes", str(boxes_file), "--inflight", str(args.inflight), "--prescan-s", str(args.prescan_s),
-                                 "--start-file", str(start), "--log", str(out / "node_plans.json")], out / "node.log", env)
+            goal_args = ["--goal", *map(str, task["goal_world_xy"])]
+            if args.odom == "leg":  # the robot only knows where it started: goal as (ahead, left) of the start pose
+                z0 = np.load(task["initial_state_record"])
+                q0 = z0["root_quaternion_wxyz"][int(task.get("initial_frame", 0))]
+                yaw0 = float(np.arctan2(2 * (q0[0] * q0[3] + q0[1] * q0[2]), 1 - 2 * (q0[2] ** 2 + q0[3] ** 2)))
+                start_xy = np.asarray(task.get("initial_root_xy", z0["root_position_m"][0][:2]), dtype=float)
+                d = np.asarray(task["goal_world_xy"]) - start_xy
+                rel = [np.cos(yaw0) * d[0] + np.sin(yaw0) * d[1], -np.sin(yaw0) * d[0] + np.cos(yaw0) * d[1]]
+                goal_args = ["--goal", *map(str, rel), "--goal-frame", "start", "--odom", "leg"]
+            node = Proc("node", [py, "-u", "g1deploy/node.py", *goal_args, "--route", args.route,
+                                 "--boxes", str(boxes_file), "--inflight", str(args.inflight), "--prescan-s",
+                                 str(args.prescan_s), "--start-file", str(start), "--log", str(out / "node_plans.json")],
+                        out / "node.log", env)
             procs.append(node)
             if not node.wait_for('"node_up"', 120):
                 raise RuntimeError("node did not start:\n" + node.text()[-3000:])
