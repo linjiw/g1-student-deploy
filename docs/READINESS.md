@@ -35,13 +35,20 @@ perception fixes found in this review. Hard gates: planner p95 ≤ 0.32 s and a 
 | standing start, slower walking (lookahead 1.0 m) | 93 | **slow mode costs nothing** — use it on the robot |
 | **combined: real MID-360 + standing start + lidar route + LIO-level odometry + 0.32 s latency** | **75** | n.s. (p = 0.12) |
 | … the same without planner latency | 84 | = Isaac: **latency is the remaining gap** |
-| planner latency 0.16 / 0.32 / 0.50 s (predictive anchoring) | 79 / 79 / 52 | cliff after 0.32 s → `g1 bench` p95 ≤ 0.32 s is a hard gate |
+| planner latency 0.16 / 0.32 / 0.36 / 0.50 s (predictive anchoring) | 79 / 79 / 70 / 52 | cliff right after 0.32 s → `g1 bench` p95 ≤ 0.32 s is a hard gate |
 | LIO-level odometry noise | 77 | small |
 | leg odometry (joints + IMU only) | 74 | −9 (p = 0.02): fine for short first walks, use LIO afterwards |
 | head shell blocking steep-down front rays (±45°, ≥ 30° down) | 79 | no cost |
 | **front ±45° fully blind** | **58** | large loss → measure the real occlusion (`g1 calibrate --png`) |
 | mount error after calibration (0.5°, 1 cm) | 80 | no cost |
 | **uncalibrated head, 3° pitch** | **15** | **catastrophic → `g1 calibrate` is mandatory** |
+
+**Deploy PC measurement (this machine, RTX 5080, 2026-10-08, GPU shared at ~100% with other training jobs):**
+deployed planner (K 16, 10 ODE steps) p50 0.31 s, p95 0.36 s, p99 0.38 s, max 0.42 s (n = 80); with two more
+evaluation workers on the GPU p95 0.39 s. That is just past the cliff. TF32 does not help. Faster configs measured
+under the same load: K 8 → p95 0.33 s, 6 ODE steps → 0.28 s, both → 0.24 s; their closed-loop cost is being
+evaluated at those latencies (`jobs/g4v.sh`). Before robot runs: free the GPU (pause other training) and re-run
+`./g1 bench`, or deploy a faster config once it passes the panel.
 
 ## 3. Hazards found in rehearsal (and what was done)
 
