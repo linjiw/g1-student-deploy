@@ -192,7 +192,8 @@ def main(argv=None):
                                  "--cloud", "dds" if args.lidar_io == "dds" else "tcp://localhost:5560",
                                  *(["--mount-calib", args.mount_calib] if args.mount_calib else []),
                                  "--boxes", str(boxes_file), "--inflight", str(args.inflight), "--prescan-s",
-                                 str(args.prescan_s), "--start-file", str(start), "--log", str(out / "node_plans.json")],
+                                 str(args.prescan_s), "--start-file", str(start), "--log", str(out / "node_plans.json"),
+                                 "--dump-memory", str(out / "node_memory.npz")],
                         out / "node.log", env)
             procs.append(node)
             if not node.wait_for('"node_up"', 120):

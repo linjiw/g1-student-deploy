@@ -610,7 +610,8 @@ def parse(argv=None):
     ap.add_argument("--latency-guess-s", type=float, default=0.3)
     ap.add_argument("--prescan-s", type=float, default=0.5)
     ap.add_argument("--tilt-estop", type=float, default=0.75)
-    ap.add_argument("--cloud-timeout", type=float, default=0.5)
+    ap.add_argument("--cloud-timeout", type=float, default=1.0,
+                    help="no lidar frame for this long -> settle to stand (10 missed frames at 10 Hz)")
     ap.add_argument("--min-pelvis-z", type=float, default=0.35)
     ap.add_argument("--max-speed", type=float, default=2.5,
                     help="mean planned pelvis speed bound (m/s); panels are walked at ~1.2-1.6 m/s")
@@ -621,6 +622,7 @@ def parse(argv=None):
     ap.add_argument("--max-ticks", type=int, default=0)
     ap.add_argument("--log", default=None)
     ap.add_argument("--dry-run", action="store_true", help="plan but do not open the stream socket")
+    ap.add_argument("--dump-memory", default=None, help="write the lidar memory layers + boxes here at exit (npz)")
     ap.add_argument("--start-file", default=None, help="wait until this file exists before the prescan")
     return ap.parse_args(argv)
 
@@ -670,6 +672,12 @@ def main(argv=None):
             Path(args.log).write_text(json.dumps(dict(result=result, plans=node.log, overruns=node.overruns,
                                                       skipped=node.skipped, ticks=node.tick, max_lag_s=node.max_lag_s),
                                                  indent=1, default=float) + "\n")
+        if args.dump_memory and hasattr(node, "memory"):
+            with node.mem_lock:
+                boxes = node.flow.sensor_map.memory_boxes(node.memory, grow_overhead_m=node.pcfg.guide_grow_overhead_m)
+                np.savez_compressed(args.dump_memory, support=node.memory.support, ceiling=node.memory.ceiling,
+                                    lo=node.memory.lo, res=node.memory.res, boxes=json.dumps(boxes),
+                                    stats=json.dumps(node.memory.stats))
         node.pool.close()
         if node.streamer is not None:
             node.streamer.close()

@@ -124,6 +124,26 @@ def main(argv=None):
             scanner.keep_raw = True
             cloud_pub = ChannelPublisher(TOPIC_CLOUD, PointCloud2_)
             cloud_pub.Init()
+    # encode + serialize + write of a ~1 MB frame takes ~30 ms: off the 200 Hz physics loop, like a driver process
+    import queue
+    import threading
+
+    out_q = queue.Queue(maxsize=4)
+
+    def publisher():
+        while True:
+            item = out_q.get()
+            if item is None:
+                return
+            kind, payload = item
+            if kind == "dds":
+                pts_s, t_s, t0_frame = payload
+                cloud_pub.Write(encode_cloud(pts_s, t_s * 1e9, t0_frame + args.lidar_clock_offset_s, rng=rng))
+            else:
+                sock.send(payload)
+
+    pub_thread = threading.Thread(target=publisher, daemon=True)
+    pub_thread.start()
 
     log = {"t": [], "wall": [], "root_pos": [], "root_quat": [], "contact_n": [], "qpos": []}
     released = args.release_file is None
@@ -163,13 +183,17 @@ def main(argv=None):
                     log["qpos"].append(d.qpos.copy())
             if scanner is not None:
                 scanner.substep(sim_t)
-                for pts_s, t_s, t0_frame in scanner.pop_raw_frames():
-                    cloud_pub.Write(encode_cloud(pts_s, t_s * 1e9, t0_frame + args.lidar_clock_offset_s, rng=rng))
+                for frame in scanner.pop_raw_frames():
+                    if not out_q.full():
+                        out_q.put(("dds", frame))
                 for (pts, org, t_end), times in (scanner.pop_frames(with_times=True) if args.lidar_io == "zmq"
                                                  else scanner.pop_frames(with_times=True) and []):
-                    sock.send(pack([("points", pts.astype(np.float32)), ("origins", org.astype(np.float32)),
-                                    ("dt", (times - t_end).astype(np.float32)), ("origin", org[-1] if len(org) else org.sum(0)),
-                                    ("stamp", np.array([t_end])), ("wall", np.array([time.monotonic()]))], topic=b"cloud"))
+                    if not out_q.full():
+                        out_q.put(("zmq", pack([("points", pts.astype(np.float32)), ("origins", org.astype(np.float32)),
+                                                ("dt", (times - t_end).astype(np.float32)),
+                                                ("origin", org[-1] if len(org) else org.sum(0)),
+                                                ("stamp", np.array([t_end])), ("wall", np.array([time.monotonic()]))],
+                                               topic=b"cloud")))
             elif sim_t >= next_cloud:
                 next_cloud += 1.0 / args.cloud_hz
                 pts, origin, _ = mid360.mj_cast(m, d, d.xpos[pelvis].copy(), d.xmat[pelvis].reshape(3, 3).copy(), rays,
