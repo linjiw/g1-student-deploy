@@ -55,10 +55,13 @@ class Physics:
         self.data = mujoco.MjData(self.model)
         self.index = SceneIndex(self.model)
         self.tracker = SonicTracker(onnx_path)
+        self.t = 0.0
+        self.hooks = []  # called with the sim time after every physics step (e.g. the MID-360 scanner)
 
     def reset(self, start):
         set_state(self.model, self.data, start["pos"], start["quat"], start["lin"], start["ang"], start["q"], start["dq"])
         self.tracker.reset()
+        self.t = 0.0
         # Isaac settles the start pose so feet rest on the floor: drop the robot onto the ground if it
         # starts penetrating (recorded start heights come from a slightly different collision model).
         lowest = self._lowest_foot_z()
@@ -89,6 +92,9 @@ class Physics:
         for _ in range(DECIMATION):
             d.ctrl[:] = pd_torque(target, d.qpos[7:], d.qvel[6:])
             self.mujoco.mj_step(self.model, d)
+            self.t += C.SIM_DT
+            for hook in self.hooks:
+                hook(self.t)
             pos.append(d.qpos[0:3].copy())
             quat.append(d.qpos[3:7].copy())
             force.append(obstacle_contact_force(self.model, d, self.index))

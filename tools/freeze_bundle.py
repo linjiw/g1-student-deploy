@@ -40,7 +40,10 @@ GEOMETRY = FLOW / "artifacts/native-reference-v1-final/geometry.json"
 NEWTON = Path("/home/linjiw/newton-terrain")
 NEWTON_FILES = ["allterrain/__init__.py", "allterrain/constants.py", "allterrain/perception/__init__.py",
                 "allterrain/perception/raster_map.py", "allterrain/perception/sensor_model.py",
-                "allterrain/perception/visibility.py"]
+                "allterrain/perception/visibility.py",
+                # real MID-360 non-repetitive scan pattern (MuJoCo-LiDAR, MIT) + provenance and licence
+                "allterrain/perception/data/mid360.npy", "allterrain/perception/data/PROVENANCE.txt",
+                "allterrain/perception/data/LICENSE-MuJoCo-LiDAR.txt"]
 SONIC_EXPORT = Path("/home/linjiw/hoi-retarget/outputs/contact_bfm/sonic_bridge/release_export_v2")
 TEST_V4 = FLOW / "artifacts/closed-loop-test-v4/config.json"
 V2_MAIN = FLOW / "configs/closed_loop_v2_main.json"

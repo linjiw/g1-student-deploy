@@ -130,6 +130,7 @@ def main(argv=None):
             k, v = kv.decode().split("=", 1)
             env[k] = v if k != "LD_LIBRARY_PATH" else f"{dds / 'lib'}:{v}"
     env["PYTHONPATH"] = f"{ROOT}:{LUCID / 'sdk'}"
+    env.setdefault("G1_BODY_MODEL", "dex3")  # the rehearsal robot (lucid gear_sonic_sim) has Dex3 hands
     py = str(ROOT / ".venv/bin/python")
     release, start = out / "release.flag", out / "start.flag"
     boxes_file = out / "boxes.json"

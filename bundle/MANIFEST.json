@@ -1,6 +1,6 @@
 {
  "kind": "g1_student_deploy_bundle",
- "created": "2026-10-08T03:54:11.098403+00:00",
+ "created": "2026-10-08T04:52:16.218010+00:00",
  "sources": {
   "planner_snapshot": "/home/linjiw/flow/artifacts/closed-loop-v2-main/source/src",
   "student": "/home/linjiw/flow/artifacts/student-s2-kcsc_s0",
@@ -532,6 +532,18 @@
   "newton/allterrain/perception/__init__.py": {
    "sha256": "6091f9dd3220ae21115e2b1d743c21727ce831d3e469fb20c18f0463a1d674ee",
    "bytes": 1320
+  },
+  "newton/allterrain/perception/data/LICENSE-MuJoCo-LiDAR.txt": {
+   "sha256": "4c49f527b703b3b34595cd7b2bb2e4517fae33ed40fe31bfeda465a25ff1586f",
+   "bytes": 1068
+  },
+  "newton/allterrain/perception/data/PROVENANCE.txt": {
+   "sha256": "9e5c65d50bade0dfc32aec1571fdf4b75abaa2f62cb863bb0ec2b28ca592f905",
+   "bytes": 1090
+  },
+  "newton/allterrain/perception/data/mid360.npy": {
+   "sha256": "9fa0165576f0060488254f04bd647a891004d4f4faa6e9b03b69d830c117c9a3",
+   "bytes": 6400128
   },
   "newton/allterrain/perception/raster_map.py": {
    "sha256": "ecaa1fa3deffd5a830d88a628a94f9b93f20c5a8ddc082d410a0eb22aef96e95",

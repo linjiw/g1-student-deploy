@@ -81,7 +81,8 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
 
 def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mode="measured", inflight=1,
                 start="recorded",
-                route_source="privileged", lidar="analytic", odom_noise=None, prescan_s=None, planner_overrides=None,
+                route_source="privileged", lidar="analytic", odom_noise=None, prescan_s=None, lidar_cfg=None,
+                planner_overrides=None,
                 deadline_s=None, save_npz=True):
     import torch
 
@@ -103,7 +104,9 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
     variant = cfg["route_variants"][route_source]
     route_cfg = variant.get("route", {})
     prescan = float(variant.get("sensor_prescan_s", 0.0) if prescan_s is None else prescan_s)
+    lidar_cfg = dict(lidar_cfg or {})
     run_cfg = dict(task_path=str(task_path), seed=int(seed), planner=pdict, episode=ep, route_source=route_source,
+                   lidar_cfg=lidar_cfg,
                    route=route_cfg, sensor_prescan_s=prescan, latency_s=latency_s, anchor_mode=anchor_mode, inflight=inflight,
                    start=start,
                    lidar=lidar,
@@ -126,7 +129,12 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
     else:
         raise ValueError(start)
     sim.reset(s0)
-    estimate = flow.callback.StateEstimate(odom_noise, np.random.default_rng([int(seed), 7]))
+    if odom_noise and odom_noise.get("leg"):  # leg odometry from joints + IMU attitude (g1deploy/leg_odometry.py)
+        from g1deploy.leg_odometry import LegOdomEstimate
+
+        estimate = LegOdomEstimate(odom_noise)
+    else:
+        estimate = flow.callback.StateEstimate(odom_noise, np.random.default_rng([int(seed), 7]))
 
     m0 = sim.measure()
     start_q = m0["qpos"]
@@ -140,9 +148,27 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
         from g1deploy.perception.cloud_memory import MjRayMemory
 
         memory = MjRayMemory(sim, start_q[:2], rng=np.random.default_rng(int(seed)), **dict(pcfg.sensor))
+    elif lidar == "mid360":  # real scan pattern, per-point timing, mount error, deskew mode (mid360_scan.py)
+        from g1deploy.perception.cloud_memory import CloudMemory
+        from g1deploy.perception.mid360_scan import Mid360Scanner
+
+        memory = CloudMemory(start_q[:2], rng=np.random.default_rng(int(seed)), **dict(pcfg.sensor))
+        scanner = Mid360Scanner(sim.model, sim.data, range_m=pcfg.sensor.get("range_m", 4.0),
+                                rng=np.random.default_rng([int(seed), 11]), body_filter=memory.body_filter,
+                                **lidar_cfg)
+        sim.hooks.append(scanner.substep)
+
+        def drain_scanner():
+            for pts, org, t_end in scanner.pop_frames():
+                memory.add_cloud(t_end + memory.latency, pts, org, None)  # self-filtered per slice in the scanner
     else:
         raise ValueError(lidar)
-    if prescan > 0:
+    if prescan > 0 and lidar == "mid360":  # standing/frozen pre-scan: the sensor runs, physics does not
+        for t_ in np.arange(-prescan, 1e-9, 0.005):
+            scanner.substep(float(t_))
+        drain_scanner()
+        memory.step(0.0)
+    elif prescan > 0:
         memory.next_capture = -prescan
         for t_ in np.arange(-prescan, 1e-9, 0.02):
             memory.step(float(t_), start_q[:3], start_q[3:7])
@@ -178,6 +204,8 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
             if estimate.cfg:
                 est_q.append(qpos.copy())
                 memory.pose_error = tuple(estimate.err)
+            if lidar == "mid360":
+                drain_scanner()
             memory.step(tick * 0.02, true_q[:3], true_q[3:7])
             while pending and tick >= pending[0][0]:
                 active = pending.pop(0)[1:]
@@ -254,7 +282,9 @@ def main(argv=None):
     ap.add_argument("--inflight", type=int, default=1, help="planner requests in flight (pipelined planners)")
     ap.add_argument("--start", choices=("recorded", "stand"), default="recorded")
     ap.add_argument("--route", choices=("privileged", "sensor"), default="privileged")
-    ap.add_argument("--lidar", choices=("analytic", "mjray"), default="analytic")
+    ap.add_argument("--lidar", choices=("analytic", "mjray", "mid360"), default="analytic")
+    ap.add_argument("--lidar-cfg", default=None,
+                    help='mid360 options as JSON, e.g. {"mount_error": {"pitch_deg": 1.5}, "deskew": "none", "dropout": 0.1}')
     ap.add_argument("--odom-noise", default=None, help="JSON dict, e.g. '{\"xy_rw_m\": 0.02, \"yaw_rw_rad\": 0.01}'")
     ap.add_argument("--deadline-s", type=float, default=None)
     ap.add_argument("--prescan-s", type=float, default=None,
@@ -263,6 +293,7 @@ def main(argv=None):
     r = run_episode(args.task, args.seed, args.out, device=args.device, latency_s=args.latency_s,
                     anchor_mode=args.anchor, inflight=args.inflight, start=args.start,
                     route_source=args.route, lidar=args.lidar,
+                    lidar_cfg=json.loads(args.lidar_cfg) if args.lidar_cfg else None,
                     odom_noise=json.loads(args.odom_noise) if args.odom_noise else None, deadline_s=args.deadline_s,
                     prescan_s=args.prescan_s)
     print(json.dumps({k: r[k] for k in ("task_id", "outcome", "elapsed_s", "replans", "plan_latency_s")}))

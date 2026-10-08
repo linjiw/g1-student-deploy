@@ -57,7 +57,8 @@ def main(argv=None):
             out_of_range.update(C.MJ_JOINTS[i] for i in bad)
         if cloud is not None:
             snap = state.snapshot()
-            for pts, origin, _ in cloud.poll():
+            for c in cloud.poll():
+                pts, origin = c["points"], c["origin"]
                 if snap is None:
                     continue
                 if memory is None:

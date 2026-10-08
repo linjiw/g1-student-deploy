@@ -76,7 +76,8 @@ def main(argv=None):
     ap.add_argument("--inflight", type=int, default=1)
     ap.add_argument("--start", choices=("recorded", "stand"), default="recorded")
     ap.add_argument("--route", choices=("privileged", "sensor"), default="privileged")
-    ap.add_argument("--lidar", choices=("analytic", "mjray"), default="analytic")
+    ap.add_argument("--lidar", choices=("analytic", "mjray", "mid360"), default="analytic")
+    ap.add_argument("--lidar-cfg", default=None)
     ap.add_argument("--odom-noise", default=None)
     ap.add_argument("--prescan-s", type=float, default=None)
     ap.add_argument("--dry-run", action="store_true")
@@ -86,7 +87,7 @@ def main(argv=None):
                 start=args.start,
                 route_source=args.route,
                 lidar=args.lidar, odom_noise=json.loads(args.odom_noise) if args.odom_noise else None,
-                prescan_s=args.prescan_s)
+                prescan_s=args.prescan_s, lidar_cfg=json.loads(args.lidar_cfg) if args.lidar_cfg else None)
     out_dir = ROOT / "runs" / args.name
     print(f"{len(jobs)} episodes -> {out_dir}  condition {cond}  workers {args.workers}", flush=True)
     if args.dry_run:

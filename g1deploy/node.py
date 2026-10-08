@@ -109,6 +109,10 @@ class DdsState:
             return dict(qpos=np.r_[pos, oq, q], dq=dq, imu=imu, gyro=gyro, lin_w=lin, ang_w=ang,
                         age_low=now - self.t_low, age_odo=now - self.t_odo)
 
+    def qpos_at(self, t):
+        h = self.history(t, 1)
+        return None if h is None else np.asarray(h[0], dtype=np.float64)
+
     def history(self, t_end, n):
         """n world qpos frames at exactly 20 ms spacing ending at t_end (linear in time, quats renormalised)."""
         with self.lock:
@@ -175,7 +179,8 @@ class CloudInput:
                 return out
             _, f = unpack(msg, topic=b"cloud")
             self.last = time.monotonic()
-            out.append((f["points"].astype(np.float64), f["origin"], float(f["stamp"][0])))
+            out.append(dict(points=f["points"].astype(np.float64), origin=f["origin"], stamp=float(f["stamp"][0]),
+                            origins=f.get("origins"), dt=f.get("dt"), wall=float(f["wall"][0]) if "wall" in f else self.last))
 
 
 # ------------------------------------------------------------------------------------------ planners
@@ -321,9 +326,25 @@ class StudentNode:
             got = cloud.poll()
             snap = state.snapshot()
             if got and snap is not None:
+                for c in got:
+                    pts, org = c["points"], c["origins"] if c["origins"] is not None else c["origin"]
+                    if c["dt"] is not None and len(pts):
+                        # self filter per firing-time slice with the joint state of that instant (MID-360 points
+                        # carry their own time; one pose per 0.1 s frame leaks swinging hands into the memory)
+                        keep = np.ones(len(pts), dtype=bool)
+                        for dt in np.unique(c["dt"]):
+                            sel = c["dt"] == dt
+                            q = state.qpos_at(c["wall"] + float(dt))
+                            if q is not None:
+                                keep[sel] = self.memory.body_filter.mask(pts[sel], q)
+                        pts = pts[keep]
+                        org = np.broadcast_to(org, (len(keep), 3))[keep]
+                        qf = None
+                    else:
+                        qf = snap["qpos"]
+                    with self.mem_lock:
+                        self.memory.add_cloud(0.0, pts, org, qf)
                 with self.mem_lock:
-                    for pts, origin, stamp in got:
-                        self.memory.add_cloud(0.0, pts, origin, snap["qpos"])
                     self.memory.step(time.monotonic() - t0)
             if snap is not None and self.phase in ("PRESCAN", "RUN"):
                 xy, t = np.asarray(snap["qpos"][:2], dtype=float), time.monotonic() - t0

@@ -44,6 +44,10 @@ def main(argv=None):
     ap.add_argument("--cloud-bind", default="tcp://*:5560")
     ap.add_argument("--cloud-hz", type=float, default=10.0)
     ap.add_argument("--range-noise-m", type=float, default=0.02)
+    ap.add_argument("--lidar", choices=("mid360", "grid"), default="mid360",
+                    help="mid360: real pattern + per-point timing (unfiltered, deskewed, per-point times); "
+                         "grid: the 2 deg grid the student was evaluated with")
+    ap.add_argument("--lidar-cfg", default=None, help='JSON, e.g. {"mount_error": {"pitch_deg": 1.0}, "dropout": 0.1}')
     ap.add_argument("--duration", type=float, default=0.0)
     ap.add_argument("--viewer", action="store_true")
     ap.add_argument("--release-file", default=None,
@@ -100,6 +104,12 @@ def main(argv=None):
     rays = mid360.ray_grid()
     rng = np.random.default_rng(0)
     pelvis = index.pelvis
+    scanner = None
+    if args.lidar == "mid360":
+        from g1deploy.perception.mid360_scan import Mid360Scanner
+
+        scanner = Mid360Scanner(m, d, frame_hz=args.cloud_hz, range_noise_m=args.range_noise_m, rng=rng,
+                                **(json.loads(args.lidar_cfg) if args.lidar_cfg else {}))
 
     log = {"t": [], "wall": [], "root_pos": [], "root_quat": [], "contact_n": [], "qpos": []}
     released = args.release_file is None
@@ -137,7 +147,13 @@ def main(argv=None):
                 log["contact_n"].append(obstacle_contact_force(m, d, index))
                 if step % 4 == 0:
                     log["qpos"].append(d.qpos.copy())
-            if sim_t >= next_cloud:
+            if scanner is not None:
+                scanner.substep(sim_t)
+                for (pts, org, t_end), times in scanner.pop_frames(with_times=True):
+                    sock.send(pack([("points", pts.astype(np.float32)), ("origins", org.astype(np.float32)),
+                                    ("dt", (times - t_end).astype(np.float32)), ("origin", org[-1] if len(org) else org.sum(0)),
+                                    ("stamp", np.array([t_end])), ("wall", np.array([time.monotonic()]))], topic=b"cloud"))
+            elif sim_t >= next_cloud:
                 next_cloud += 1.0 / args.cloud_hz
                 pts, origin, _ = mid360.mj_cast(m, d, d.xpos[pelvis].copy(), d.xmat[pelvis].reshape(3, 3).copy(), rays,
                                                 range_noise_m=args.range_noise_m, rng=rng)

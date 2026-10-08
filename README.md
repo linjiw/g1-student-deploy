@@ -1,0 +1,41 @@
+# g1-student-deploy
+
+Deploy the best `~/flow` **lidar student** (flow-matching whole-body planner, `S2-guide10m8-grow06`,
+83/98 held-out in Isaac) on a Unitree G1 29-DoF, with the released **GR00T SONIC** tracker running in
+the **lucid-g1-deploy C++ runner**, and test the whole chain in MuJoCo first.
+
+```
+MID-360 cloud ─► self filter ─► label-free height/ceiling memory ─┐
+G1 joints + IMU (DDS rt/lowstate) + odometry ─► 50 Hz history ────┤
+                                                                   ▼
+                    student planner (K=16 guided FM, predictive anchoring, 1 in flight)
+                                                                   │ ZMQ protocol v1 (port 5556)
+                                                                   ▼
+             SONIC C++ runner (TensorRT, fused release ONNX 1570→29) ─► rt/lowcmd ─► G1
+```
+
+Status: simulation only. Nothing has run on a robot. See [docs/DESIGN.md](docs/DESIGN.md),
+[docs/RUNBOOK.md](docs/RUNBOOK.md) (commands + results), [docs/HARDWARE.md](docs/HARDWARE.md) (bring-up ladder).
+
+## What is here
+
+| path | what |
+|---|---|
+| `tools/freeze_bundle.py` → `bundle/` | byte-identical planner source, student checkpoint, SONIC ONNX, mounts, contract; sha256 manifest checked against the evaluated artifacts |
+| `g1deploy/sonic.py` | SONIC 1570-observation tracker in Python (ONNX parity) |
+| `sim/lockstep.py`, `tools/eval_panel.py` | Path A: MuJoCo counterpart of the Isaac callback; switches for latency (+ predictive anchoring), standing start, lidar route, ray-cast lidar, odometry drift |
+| `g1deploy/perception/` | MID-360 pattern/mount, MuJoCo ray casting incl. self-hits, mesh-capsule self filter, label-free evidence memory |
+| `g1deploy/node.py` | the deployable node: DDS state + odometry + cloud → planner processes → SONIC stream; supervisor |
+| `g1deploy/zmq_stream.py` | SONIC ZMQ protocol v1; framing proven equal to the Isaac feed |
+| `sim/realtime/` | Path B: DDS MuJoCo G1 (lucid gear_sonic_sim) + obstacles + cloud; `rehearse.py` runs sim + C++ runner + node |
+| `g1deploy/adapters/` | LIO frame math through the waist + 50 Hz pose filter (tested), ROS 2 FAST-LIO bridge (untested) |
+| `tools/check_robot.py`, `tools/stream_replay.py` | hardware ladder H1–H2 (read-only checks) and H4 (stream without the planner) |
+
+## Quick start
+
+```bash
+source env.sh
+.venv/bin/python -m pytest -q                                   # 15 tests
+.venv/bin/python tools/eval_panel.py --name g3-base --workers 3 # student in MuJoCo vs Isaac, 98 episodes
+$PYTHON sim/realtime/rehearse.py --task ~/flow/artifacts/panels/test-v1/empty-100/task.json --out runs/rt/demo
+```

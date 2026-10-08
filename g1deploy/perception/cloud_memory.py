@@ -42,16 +42,25 @@ class BodyFilter:
     the joint state. `margin_m` covers mesh-vs-capsule slack, timing skew and range noise.
     """
 
-    def __init__(self, xml=None, margin_m=0.03):
+    def __init__(self, xml=None, margin_m=0.03, hand_margin_m=0.04):
+        """`xml`: the robot's MJCF - rubber hands (sim/assets/g1_29dof.xml, default) or Dex3
+        (sim/assets/g1_29dof_dex3.xml; env G1_BODY_MODEL=dex3). Body joints are set by name; hand joints stay
+        at zero (open) and hand links get `hand_margin_m` extra, since the finger state is not streamed."""
+        import os
+
         import mujoco
 
-        from sim.scene import G1_XML
+        from g1deploy import contract as C
+        from sim.scene import ASSETS, G1_XML
 
+        if xml is None and os.environ.get("G1_BODY_MODEL", "") == "dex3":
+            xml = ASSETS / "g1_29dof_dex3.xml"
         self.mujoco = mujoco
         self.model = mujoco.MjModel.from_xml_path(str(xml or G1_XML))
         self.data = mujoco.MjData(self.model)
         m = self.model
         self.margin = margin_m
+        self.adr = np.array([m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, n)] for n in C.MJ_JOINTS])
         geoms, a, b, rad = [], [], [], []
         for g in range(m.ngeom):
             if m.geom_bodyid[g] == 0 or m.geom_contype[g] == 0:
@@ -72,6 +81,8 @@ class BodyFilter:
             b.append(seg_b - shrink * u)
             rad.append(np.linalg.norm(pts - self._closest(pts, a[-1], b[-1]), axis=1).max())
         self.geoms, self.a, self.b, self.rad = np.array(geoms), np.array(a), np.array(b), np.array(rad)
+        hand = np.array(["hand" in (m.body(m.geom_bodyid[g]).name or "") for g in self.geoms])
+        self.rad = self.rad + np.where(hand, hand_margin_m, 0.0)
 
     @staticmethod
     def _closest(p, a, b):
@@ -100,23 +111,28 @@ class BodyFilter:
 
     def capsules(self, qpos36):
         d = self.data
-        d.qpos[:] = qpos36
+        d.qpos[:] = 0
+        d.qpos[:7] = qpos36[:7]
+        d.qpos[self.adr] = qpos36[7:36]
         self.mujoco.mj_kinematics(self.model, d)
         pos, mat = d.geom_xpos[self.geoms], d.geom_xmat[self.geoms].reshape(-1, 3, 3)
         return (pos + np.einsum("gij,gj->gi", mat, self.a), pos + np.einsum("gij,gj->gi", mat, self.b), self.rad)
 
-    def mask(self, points, qpos36):
-        """True for points to keep (not on the robot)."""
-        if len(points) == 0:
-            return np.zeros(0, dtype=bool)
-        s, e, rad = self.capsules(qpos36)
+    def mask(self, points, qpos36, reach_m=1.3):
+        """True for points to keep (not on the robot). Only points within `reach_m` of the pelvis are tested."""
+        points = np.asarray(points, dtype=np.float64)
         keep = np.ones(len(points), dtype=bool)
-        lim = rad + self.margin
-        for k in range(len(s)):
-            d = e[k] - s[k]
-            t = np.clip((points - s[k]) @ d / max(d @ d, 1e-12), 0, 1)
-            dist = np.linalg.norm(points - (s[k] + t[:, None] * d), axis=1)
-            keep &= dist > lim[k]
+        if len(points) == 0:
+            return keep
+        near = np.flatnonzero(np.linalg.norm(points - np.asarray(qpos36[:3]), axis=1) < reach_m)
+        if len(near) == 0:
+            return keep
+        s, e, rad = self.capsules(qpos36)
+        p = points[near]
+        d = e - s
+        t = np.clip(np.einsum("nkj,kj->nk", p[:, None] - s[None], d) / np.maximum((d * d).sum(1), 1e-12), 0, 1)
+        dist = np.linalg.norm(p[:, None] - (s[None] + t[..., None] * d[None]), axis=2)
+        keep[near] = (dist > (rad + self.margin)[None]).all(1)
         return keep
 
 
@@ -138,14 +154,15 @@ class CloudMemory(RayCastMemory):
 
     def __init__(self, origin_xy, *, source=None, ground_tol_m=0.05, face_push_m=0.02, self_filter=True,
                  self_margin_m=0.03, overhead_min_bottom_m=0.8, min_low_points=3, low_ratio=0.2,
-                 free_band_m=(0.1, 0.8), carve_step_m=0.05, carve_stop_m=0.1, edge_cells=2, edge_dz_m=0.05, **kw):
+                 free_band_m=(0.1, 0.8), carve_step_m=0.05, carve_stop_m=0.1, edge_cells=2, edge_dz_m=0.05,
+                 carve_rays=4000, **kw):
         kw.pop("boxes", None)
         super().__init__([], origin_xy, overhead_min_bottom_m=overhead_min_bottom_m, **kw)
         self.source = source
         self.ground_tol, self.face_push, self.over_min = ground_tol_m, face_push_m, overhead_min_bottom_m
         self.min_low, self.low_ratio, self.free_band = int(min_low_points), float(low_ratio), tuple(free_band_m)
         self.edge_cells, self.edge_dz = int(edge_cells), float(edge_dz_m)
-        self.carve_step, self.carve_stop = carve_step_m, carve_stop_m
+        self.carve_step, self.carve_stop, self.carve_rays = carve_step_m, carve_stop_m, int(carve_rays)
         self.body_filter = BodyFilter(margin_m=self_margin_m) if self_filter else None
         shape = (self.n * self.n,)
         self.n_low = np.zeros(shape, dtype=np.int32)
@@ -173,35 +190,44 @@ class CloudMemory(RayCastMemory):
         return np.stack([c * rel[:, 0] - s * rel[:, 1], s * rel[:, 0] + c * rel[:, 1]], -1) + np.asarray(origin[:2]) + [dx, dy]
 
     def evidence(self, points, origin):
-        """One capture -> evidence arrays (cell indices + values), not yet fused."""
+        """One capture -> evidence arrays (cell indices + values), not yet fused.
+
+        `origin`: the sensor origin, (3,) for an instantaneous capture or (N, 3) per point (a moving sensor)."""
         pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-        origin = np.asarray(origin, dtype=np.float64)
-        rays = pts - origin
+        o = np.broadcast_to(np.asarray(origin, dtype=np.float64), pts.shape)
+        center = o.mean(0) if len(o) else np.zeros(3)
+        rays = pts - o
         dist = np.linalg.norm(rays, axis=1)
         unit = rays / np.maximum(dist, 1e-9)[:, None]
-        # free space: samples along each ray, stopping carve_stop before the return
+        # free space: samples along each ray, stopping carve_stop before the return (a random subset of rays when
+        # the frame is dense - a real MID-360 frame has ~15-20k returns and free space is highly redundant)
+        c = np.arange(len(pts))
+        if len(c) > self.carve_rays:
+            c = self.rng.choice(len(pts), self.carve_rays, replace=False)
         steps = np.arange(self.carve_step, max(dist.max(initial=0.0), self.carve_step), self.carve_step)
-        samp = origin[None, None] + unit[:, None] * steps[None, :, None]
-        valid = steps[None] < (dist[:, None] - self.carve_stop)
+        samp = o[c][:, None] + unit[c][:, None] * steps[None, :, None]
+        valid = steps[None] < (dist[c][:, None] - self.carve_stop)
         lo, hi = self.free_band
         valid &= (samp[..., 2] >= lo) & (samp[..., 2] < hi)
-        fxy = self._apply_pose_error(samp[valid][:, :2], origin)
+        fxy = self._apply_pose_error(samp[valid][:, :2], center)
         fi, fok = self._cells(fxy)
         ground = pts[:, 2] < self.ground_tol
-        gi, gok = self._cells(self._apply_pose_error(pts[ground, :2], origin))
+        gi, gok = self._cells(self._apply_pose_error(pts[ground, :2], center))
         obj, ou = pts[~ground], unit[~ground]
-        oi, ook = self._cells(self._apply_pose_error(obj[:, :2] + self.face_push * ou[:, :2], origin))
+        oi, ook = self._cells(self._apply_pose_error(obj[:, :2] + self.face_push * ou[:, :2], center))
         return dict(free=np.unique(fi[fok]), ground=gi[gok], obj_idx=oi[ook], obj_z=obj[ook, 2])
 
     def add_cloud(self, t_ready, points_world, origin_world, qpos36=None):
         """A capture in the gravity-aligned odometry frame (floor at z = 0), usable at `t_ready`."""
         pts = np.asarray(points_world, dtype=np.float64).reshape(-1, 3)
+        org = np.broadcast_to(np.asarray(origin_world, dtype=np.float64), pts.shape)
+        keep = np.linalg.norm(pts - org, axis=1) <= self.range_m  # the evaluated memory saw 4 m
         self.stats["points"] += len(pts)
         if self.body_filter is not None and qpos36 is not None and len(pts):
-            keep = self.body_filter.mask(pts, qpos36)
-            self.stats["self_removed"] += int((~keep).sum())
-            pts = pts[keep]
-        self.pending.append((t_ready, self.evidence(pts, origin_world)))
+            body = self.body_filter.mask(pts, qpos36)
+            self.stats["self_removed"] += int((~body & keep).sum())
+            keep &= body
+        self.pending.append((t_ready, self.evidence(pts[keep], org[keep])))
 
     def _capture(self, t, pos, quat):
         self.captures += 1
