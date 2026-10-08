@@ -83,6 +83,8 @@ def main(argv=None):
     ap.add_argument("--goal-lookahead", type=float, default=None)
     ap.add_argument("--candidates", type=int, default=None, help="planner K override (deployed 16)")
     ap.add_argument("--ode-steps", type=int, default=None, help="planner ODE steps override (deployed 10)")
+    ap.add_argument("--planner-impl", choices=("fused", "graph", "eager"), default="fused",
+                    help="fused (deployed): fast, same plans; eager: the bundle's FlowPlanner (all results before 2026-10-08)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
     jobs = episodes(Path(args.packet), args.families, args.limit)
@@ -93,7 +95,7 @@ def main(argv=None):
                 prescan_s=args.prescan_s, lidar_cfg=json.loads(args.lidar_cfg) if args.lidar_cfg else None,
                 goal_lookahead=args.goal_lookahead,
                 planner_overrides={k: v for k, v in (("candidates", args.candidates), ("ode_steps", args.ode_steps)) if v}
-                or None)
+                or None, planner_impl=args.planner_impl)
     out_dir = ROOT / "runs" / args.name
     print(f"{len(jobs)} episodes -> {out_dir}  condition {cond}  workers {args.workers}", flush=True)
     if args.dry_run:
