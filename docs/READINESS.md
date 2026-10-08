@@ -4,8 +4,9 @@
 real-time MuJoCo rehearsal that uses the robot's own protocols, and ready for the hardware ladder up to H5
 (walking on open floor with the student in control, gantry/spotter, remote in hand). Obstacle runs (H6) are
 reasonable for ground obstacles; **overhead obstacles (beams) are not ready for hardware**. Under the most
-realistic simulated deployment conditions success drops from 83/98 (Isaac) to 69/98, mostly lateral wall contacts;
-the cause is being isolated (G4s leave-one-out arms).
+realistic simulated deployment (real MID-360 model, standing start, lidar route, LIO-level odometry, 0.32 s planner
+latency) the student scores 75/98 (n.s. vs Isaac's 83/98), and 84/98 without the planner latency — after two
+perception fixes found in this review. Hard gates: planner p95 ≤ 0.32 s and a calibrated lidar mount.
 
 ## 1. What is established (simulation evidence)
 
@@ -24,16 +25,23 @@ the cause is being isolated (G4s leave-one-out arms).
 | safety reactions | tilt > 0.75 rad → e-stop (all falls ≥ 0.80; ~1% of successes exceed 0.75); stale state → e-stop; lidar loss → stand (deferred near ceilings); arrival → stand; restart-safe (5 node tests with fake inputs) |
 | operator override | wireless remote via runner `gamepad_manager`: D-up mid-walk at 1.38 m/s → SONIC stand in ~1.5 s; Select = e-stop |
 
-## 2. What costs success (G4, lock-step MuJoCo, 98 held-out episodes)
+## 2. What costs success (G4, lock-step MuJoCo, 98 held-out episodes, Isaac = 83)
 
-| condition | goals | vs Isaac 83 |
+| condition | goals | reading |
 |---|---|---|
-| idealised lidar (MuJoCo rays, 2° grid) | 83 | = |
-| real MID-360 pattern + timing + torso mount | 73 | −10 (p = 0.02) |
-| … pelvis-rigid mount (= evaluated model) | 75 | −8 |
-| odometry drift+jitter (flow robustness level) | 65 | −18 |
-| combined: real MID-360 + standing start + lidar route + LIO-level odometry + 0.32 s latency | **69** | −14 (p = 0.009); 0 falls, 29 collisions (slalom/corridor) |
-| pending: density-matched lidar, LIO-only, leave-one-out of the combined arm, head-shell occlusion, mount residual, leg odometry, 0.5 s latency, slower walking | — | — |
+| idealised lidar (MuJoCo rays, 2° grid) | 83 | = Isaac |
+| real MID-360 (pattern, per-point timing, torso mount), after the perception fixes | 79 | n.s. (was 73 before the along-ray self filter + 3.5 cm face push) |
+| standing start + real MID-360 | 89 | the robot's real start is easier than Isaac's mid-walk start |
+| standing start, slower walking (lookahead 1.0 m) | 93 | **slow mode costs nothing** — use it on the robot |
+| **combined: real MID-360 + standing start + lidar route + LIO-level odometry + 0.32 s latency** | **75** | n.s. (p = 0.12) |
+| … the same without planner latency | 84 | = Isaac: **latency is the remaining gap** |
+| planner latency 0.16 / 0.32 / 0.50 s (predictive anchoring) | 79 / 79 / 52 | cliff after 0.32 s → `g1 bench` p95 ≤ 0.32 s is a hard gate |
+| LIO-level odometry noise | 77 | small |
+| leg odometry (joints + IMU only) | 74 | −9 (p = 0.02): fine for short first walks, use LIO afterwards |
+| head shell blocking steep-down front rays (±45°, ≥ 30° down) | 79 | no cost |
+| **front ±45° fully blind** | **58** | large loss → measure the real occlusion (`g1 calibrate --png`) |
+| mount error after calibration (0.5°, 1 cm) | 80 | no cost |
+| **uncalibrated head, 3° pitch** | **15** | **catastrophic → `g1 calibrate` is mandatory** |
 
 ## 3. Hazards found in rehearsal (and what was done)
 

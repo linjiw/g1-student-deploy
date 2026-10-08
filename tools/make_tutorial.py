@@ -230,7 +230,7 @@ def main(argv=None):
         parts.append(seg)
         print(f"segment {k}: {s['key']} {dur(str(seg)):.1f} s", flush=True)
     lst = work / "list.txt"
-    lst.write_text("".join(f"file '{p}'\n" for p in parts))
+    lst.write_text("".join(f"file '{p.resolve()}'\n" for p in parts))
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy",
                     args.out], check=True)
     print(f"wrote {args.out}: {dur(args.out):.1f} s")
