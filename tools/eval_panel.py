@@ -81,6 +81,8 @@ def main(argv=None):
     ap.add_argument("--odom-noise", default=None)
     ap.add_argument("--prescan-s", type=float, default=None)
     ap.add_argument("--goal-lookahead", type=float, default=None)
+    ap.add_argument("--candidates", type=int, default=None, help="planner K override (deployed 16)")
+    ap.add_argument("--ode-steps", type=int, default=None, help="planner ODE steps override (deployed 10)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
     jobs = episodes(Path(args.packet), args.families, args.limit)
@@ -89,7 +91,9 @@ def main(argv=None):
                 route_source=args.route,
                 lidar=args.lidar, odom_noise=json.loads(args.odom_noise) if args.odom_noise else None,
                 prescan_s=args.prescan_s, lidar_cfg=json.loads(args.lidar_cfg) if args.lidar_cfg else None,
-                goal_lookahead=args.goal_lookahead)
+                goal_lookahead=args.goal_lookahead,
+                planner_overrides={k: v for k, v in (("candidates", args.candidates), ("ode_steps", args.ode_steps)) if v}
+                or None)
     out_dir = ROOT / "runs" / args.name
     print(f"{len(jobs)} episodes -> {out_dir}  condition {cond}  workers {args.workers}", flush=True)
     if args.dry_run:

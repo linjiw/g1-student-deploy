@@ -30,6 +30,8 @@ def main(argv=None):
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--n", type=int, default=20)
     ap.add_argument("--episode", default=str(EPISODE))
+    ap.add_argument("--candidates", type=int, default=None, help="override K (deployed: 16)")
+    ap.add_argument("--ode-steps", type=int, default=None, help="override ODE steps (deployed: 10)")
     ap.add_argument("--tf32", action="store_true", help="allow TF32 matmuls (faster on Ampere+; numerics change slightly)")
     args = ap.parse_args(argv)
     import torch
@@ -41,7 +43,8 @@ def main(argv=None):
     ep = Path(args.episode)
     task = json.loads((ep / "task.json").read_text())
     pre = np.load(ep / "closed_loop.npz")["pre_action_qpos"]
-    pc = flow.planner.PlannerConfig(**dict(cfg["planner"], device=args.device, seed=0))
+    over = {k: v for k, v in (("candidates", args.candidates), ("ode_steps", args.ode_steps)) if v}
+    pc = flow.planner.PlannerConfig(**dict(cfg["planner"], device=args.device, seed=0, **over))
     planner = flow.planner.FlowPlanner(pc)
     sm = flow.sensor_map
     mem = sm.RayCastMemory(task["scene_boxes_world"], pre[0][:2], rng=np.random.default_rng(0), **pc.sensor)
@@ -73,7 +76,7 @@ def main(argv=None):
                "MARGINAL: test this latency in sim (eval_panel --latency-s <p95> --anchor predict)" if p95 <= 0.5 else
                "TOO SLOW: expect large losses; use a faster GPU or reduce planner compute")
     print(json.dumps({"device": args.device, "gpu": torch.cuda.get_device_name() if args.device.startswith("cuda") else None,
-                      "tf32": bool(args.tf32), "n": args.n, "plan_s_p50": round(p50, 3), "plan_s_p95": round(p95, 3),
+                      "tf32": bool(args.tf32), "K": pc.candidates, "ode_steps": pc.ode_steps, "n": args.n, "plan_s_p50": round(p50, 3), "plan_s_p95": round(p95, 3),
                       "plan_s_p99": round(p99, 3), "plan_s_max": round(mx, 3), "verdict": verdict}, indent=1))
     return 0
 
