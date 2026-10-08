@@ -1,0 +1,561 @@
+{
+ "kind": "g1_student_deploy_bundle",
+ "created": "2026-10-08T03:54:11.098403+00:00",
+ "sources": {
+  "planner_snapshot": "/home/linjiw/flow/artifacts/closed-loop-v2-main/source/src",
+  "student": "/home/linjiw/flow/artifacts/student-s2-kcsc_s0",
+  "sonic_export": "/home/linjiw/hoi-retarget/outputs/contact_bfm/sonic_bridge/release_export_v2",
+  "newton": "/home/linjiw/newton-terrain"
+ },
+ "sonic_checkpoint_sha256": "e6bdab3f64a39336b3d41877d4f497d05f58af275f288ec0e6746c283ded8909",
+ "files": {
+  "config/sonic_model_contract.json": {
+   "sha256": "e81ee2ce427311d4c41aac9ef6dc14f24c3997d4121012e14e4a00e2ed900482",
+   "bytes": 53379
+  },
+  "config/student.json": {
+   "sha256": "4772efe02c7aefdbebb31166e904217bef2a8d830a83d7c73f7d19aa6b029275",
+   "bytes": 1341
+  },
+  "flow/artifacts/clean-reference-v2/receipt.json": {
+   "sha256": "e827ef2e1631547e6f5829cc452d8ceaf9462efe0463ea5fee12181aea8008d1",
+   "bytes": 3503
+  },
+  "flow/artifacts/native-reference-v1-final/geometry.json": {
+   "sha256": "1bd037152284fbeca328dd88474cd7c1666b1984bcc0ba8f9bc7e895263d90dd",
+   "bytes": 62340
+  },
+  "flow/artifacts/student-s2-kcsc_s0/history.json": {
+   "sha256": "65efaa60f608ddd7b6ef4afa825998c003271cf71e0c117073a471d278e8ab41",
+   "bytes": 16786
+  },
+  "flow/artifacts/student-s2-kcsc_s0/model.pt": {
+   "sha256": "ad9c5b325bea1e279889da0cbd18cb5ff648ded9401329677c8b00bcd8cff796",
+   "bytes": 37776711
+  },
+  "flow/artifacts/student-s2-kcsc_s0/receipt.json": {
+   "sha256": "7a486c51a3a55063a61e18f3ffeca6796ee17bbccaf5be84cf0895bd11c767a8",
+   "bytes": 9613
+  },
+  "flow/src/motion2scene_flow/__init__.py": {
+   "sha256": "65081397f66094a55219dbc3afa73cded89f759a848e9f22106e497c1474392e",
+   "bytes": 81
+  },
+  "flow/src/motion2scene_flow/audit.py": {
+   "sha256": "3c39a312b2df3d674b3ac83a0a55c6ba140e4c4c3dc25ac09dceac5c7094563f",
+   "bytes": 5073
+  },
+  "flow/src/motion2scene_flow/boundary.py": {
+   "sha256": "fdc53f46ce10a20dd91c7bdc0831c6a90864201a87a35fc369975043ef46a12d",
+   "bytes": 14956
+  },
+  "flow/src/motion2scene_flow/boundary_report.py": {
+   "sha256": "84dc818b23962b6b351cb869f194a4204034ecb1efd3b1a39852fabcca8a6a87",
+   "bytes": 12842
+  },
+  "flow/src/motion2scene_flow/bounded_flow.py": {
+   "sha256": "1c78bb3460a469d47ec26fd69737793de20b58baaeddc6078bc78b2b7121cfac",
+   "bytes": 17091
+  },
+  "flow/src/motion2scene_flow/bounded_report.py": {
+   "sha256": "5fd42fd1cc2813cd6f5205f51c445b06de6c18dceeb05907b5c4252378b10472",
+   "bytes": 11980
+  },
+  "flow/src/motion2scene_flow/budget_queries.py": {
+   "sha256": "03a961b6479b77d9cddb51bd26ee592cc2505562881098b476da1df679589084",
+   "bytes": 4548
+  },
+  "flow/src/motion2scene_flow/clean_references.py": {
+   "sha256": "63081239787c838d8c2b7c44f010d0ac684a3e67f0c7bfa86fd98e4721a370d4",
+   "bytes": 15578
+  },
+  "flow/src/motion2scene_flow/closed_loop/__init__.py": {
+   "sha256": "b8143dc4fa0020a3f46ebcb286b10687bb9b846e6b49e9b54bb61b4ba012e8e7",
+   "bytes": 919
+  },
+  "flow/src/motion2scene_flow/closed_loop/adapted_sensor_maps.py": {
+   "sha256": "a521109a660cffdf8d490125cc59a29300a9288390a2a665f30bcdeb39ea90da",
+   "bytes": 4356
+  },
+  "flow/src/motion2scene_flow/closed_loop/anatomy.py": {
+   "sha256": "7ac1ceb931e20533748c131d43541221e0ce2109cb77968e78a8ac5d97c94933",
+   "bytes": 4208
+  },
+  "flow/src/motion2scene_flow/closed_loop/callback.py": {
+   "sha256": "92742c7d851909f9892e34e1208f64fffb2a582de60cddddeb4ee8085c4d7257",
+   "bytes": 29483
+  },
+  "flow/src/motion2scene_flow/closed_loop/exec_model.py": {
+   "sha256": "aaf54626e95a6b7eaa4d46748f24216b13552ad410ae7cbf837c68d2be7e6302",
+   "bytes": 7750
+  },
+  "flow/src/motion2scene_flow/closed_loop/exec_verify.py": {
+   "sha256": "2a50a58d3f77192c1f314edf12458b10e467c2a92f4a5991ebef515ea8d83a00",
+   "bytes": 4300
+  },
+  "flow/src/motion2scene_flow/closed_loop/feed.py": {
+   "sha256": "e6e5fccb4066e2ffca81fd5b3bb87e16b0b8119f25b6d2809304e54246fdade7",
+   "bytes": 2671
+  },
+  "flow/src/motion2scene_flow/closed_loop/goal_response.py": {
+   "sha256": "5e3e429d88015c62b6cc3f201a07b6ed78f73554ff8f421abd4973617e4d232f",
+   "bytes": 2492
+  },
+  "flow/src/motion2scene_flow/closed_loop/grounding.py": {
+   "sha256": "2518a57f089110a3feab9b112c53c99ef2973513e8d2d9b3e8b2d6cfca45ef99",
+   "bytes": 2603
+  },
+  "flow/src/motion2scene_flow/closed_loop/kinematic.py": {
+   "sha256": "22d9144d57f8331e9fdc06ddff8aed7a367845d8ae0307781b2f2df652036234",
+   "bytes": 5215
+  },
+  "flow/src/motion2scene_flow/closed_loop/paired.py": {
+   "sha256": "379e3c16401d7e98907f786434d3150bae33257a52de23fb32d82b6cc7e8fd6e",
+   "bytes": 2818
+  },
+  "flow/src/motion2scene_flow/closed_loop/panel.py": {
+   "sha256": "0572da17903622b3d0c4a6a587ffe42fc01a7f303f470ebdc3322bc5d59f3e3c",
+   "bytes": 8455
+  },
+  "flow/src/motion2scene_flow/closed_loop/planner.py": {
+   "sha256": "f908d9f6cdb4d6c657aa726e6620b764f2bdf4f9d37ca6dfafd217803eff2413",
+   "bytes": 31626
+  },
+  "flow/src/motion2scene_flow/closed_loop/replan_probe.py": {
+   "sha256": "04833a8b31447cd9ef472923ea53dc0e78ecfdbeba58bfa06bb308456a679644",
+   "bytes": 4818
+  },
+  "flow/src/motion2scene_flow/closed_loop/route.py": {
+   "sha256": "58ac388c8669d3ef73a0a3e9b560d59ef49f0981eb72318bae8c65e99ed05486",
+   "bytes": 8593
+  },
+  "flow/src/motion2scene_flow/closed_loop/runner.py": {
+   "sha256": "4ffe1278632329c9530a2f893114483c26aa5f173559057a6dd9dafb5df2bcd8",
+   "bytes": 15109
+  },
+  "flow/src/motion2scene_flow/closed_loop/sensor_coverage.py": {
+   "sha256": "3367d3b553cd95af88049092b8309b5d62bc74357936690314b46f737abb5028",
+   "bytes": 4229
+  },
+  "flow/src/motion2scene_flow/closed_loop/sensor_dataset.py": {
+   "sha256": "ef9a9b793bb6d32312a12e547894339320ee2c5f41d51336438f2a5e58d4b5e7",
+   "bytes": 6034
+  },
+  "flow/src/motion2scene_flow/closed_loop/sensor_map.py": {
+   "sha256": "d1145c2d0b95b9bc7ab600be8c4a6b939c2a761fe4f3111ebd2ae56e42186ac3",
+   "bytes": 19996
+  },
+  "flow/src/motion2scene_flow/closed_loop/track_callback.py": {
+   "sha256": "e7d08eb1b289b83cd2e241d61e79889bae722d38fe131e0fbc5c10f54d188381",
+   "bytes": 9632
+  },
+  "flow/src/motion2scene_flow/closed_loop/track_runner.py": {
+   "sha256": "17dac715b77016e73d902dc6626435002961b8abab818225077cc941db3a8b82",
+   "bytes": 9026
+  },
+  "flow/src/motion2scene_flow/closed_loop/visualize.py": {
+   "sha256": "14afa92b054b5108b7845aed2b38436f7ba72c0e633766a84b9cd243429e51ca",
+   "bytes": 4555
+  },
+  "flow/src/motion2scene_flow/control_search.py": {
+   "sha256": "67401500299b5b32e723e5d20e868a0740718b38b4468c4b65ceb32cf8434d51",
+   "bytes": 9104
+  },
+  "flow/src/motion2scene_flow/data.py": {
+   "sha256": "a59ce956256b4421bd5eac2ff2abd225fd6b105109530f1ebfa4259ba7cb0ac8",
+   "bytes": 7641
+  },
+  "flow/src/motion2scene_flow/datagen/__init__.py": {
+   "sha256": "d81dda6431766472892f3e935c9000a50287897f23a03da2402872b50919be81",
+   "bytes": 83
+  },
+  "flow/src/motion2scene_flow/datagen/collect_windows.py": {
+   "sha256": "a8d76569aacb32dff3f4a759e85cec747654bf51023a4a02eb43f47332280f2d",
+   "bytes": 2768
+  },
+  "flow/src/motion2scene_flow/datagen/corpus_filter.py": {
+   "sha256": "4fb90201afd7b5ec88e5e8e558fe690eba2d16e88aab350a5a16bdcb5a178232",
+   "bytes": 1586
+  },
+  "flow/src/motion2scene_flow/datagen/coverage.py": {
+   "sha256": "2c4d90528738fd1877b461cac381b8cfc93087af1002cdf2cd7e8f957ff868a5",
+   "bytes": 5063
+  },
+  "flow/src/motion2scene_flow/datagen/executed_groups.py": {
+   "sha256": "72a634d3b99a6eb2eaa65004584528af9fa1d9c46d48e2f617c626f86826b2b2",
+   "bytes": 4159
+  },
+  "flow/src/motion2scene_flow/datagen/expert_iter.py": {
+   "sha256": "00b7d73f5c631c24d01c34748bd5759cabd89763d75f50c2deeb5fa531784d76",
+   "bytes": 9773
+  },
+  "flow/src/motion2scene_flow/datagen/hallucinate.py": {
+   "sha256": "ffd3317cc3002b15b073e34b2b6ac806310411d4929ac6e664bff41f22bd15b7",
+   "bytes": 15896
+  },
+  "flow/src/motion2scene_flow/datagen/kimodo_contrast.py": {
+   "sha256": "22ff4753cd971bb8550bb1a89ec101172976b316ee36b55d133cadd2f0101417",
+   "bytes": 9552
+  },
+  "flow/src/motion2scene_flow/datagen/sonic_continuations.py": {
+   "sha256": "845daad8565d4d3c93704d4cf636351be0b54c37c53b223fd1330e0d385944a1",
+   "bytes": 4669
+  },
+  "flow/src/motion2scene_flow/datagen/sonic_skills.py": {
+   "sha256": "25ec0dfa83645564d6e9870a0af9823be9c2d835d6970a2973eb72f1cee70ac7",
+   "bytes": 7313
+  },
+  "flow/src/motion2scene_flow/fm_checker.py": {
+   "sha256": "fa95788e4c80202ed2e8122528d8db7d6852cd4339c74835195b3126dacd1432",
+   "bytes": 24476
+  },
+  "flow/src/motion2scene_flow/fm_checker_report.py": {
+   "sha256": "3c458c85031a65e807c71fbef8f2dbde105a4b62be098e68963e1f03373dbae3",
+   "bytes": 21342
+  },
+  "flow/src/motion2scene_flow/geometry.py": {
+   "sha256": "0a9647c5fecac4841d8bf96801b32cd321c1fa9d98ae32ddb6cc3a1b675562e4",
+   "bytes": 3383
+  },
+  "flow/src/motion2scene_flow/hybrid_checker.py": {
+   "sha256": "52108757490fc771d5a8cf3847c7d5119d987fdfb86ecb150410f5818eeb8865",
+   "bytes": 11960
+  },
+  "flow/src/motion2scene_flow/hybrid_report.py": {
+   "sha256": "4bfcfc4b334dcbff8b82a121a9cdefd233cb262be4ba1b00a7f7afa798fabb3d",
+   "bytes": 18302
+  },
+  "flow/src/motion2scene_flow/kinematic_audit.py": {
+   "sha256": "1543ea049d432d6ae2dccee7a7625ebfebb94c6133a1ba7de3e234d8fbdf29b6",
+   "bytes": 6128
+  },
+  "flow/src/motion2scene_flow/label_candidates.py": {
+   "sha256": "ec07ddd68dcbc9223beee6cd580953f142b0c7ae2326b602a4cacbd56b41dd4d",
+   "bytes": 4952
+  },
+  "flow/src/motion2scene_flow/metrics.py": {
+   "sha256": "3c13d05b8acf725b36154dfacda4400bdf5f6c405f36a743d1381edc667a24d3",
+   "bytes": 4622
+  },
+  "flow/src/motion2scene_flow/models.py": {
+   "sha256": "565992513396d74dd49ff0b63868ae744dd17833511c9001f66eb899059b2387",
+   "bytes": 1264
+  },
+  "flow/src/motion2scene_flow/native_audit.py": {
+   "sha256": "46ea7b6aa373631e79a79e82ad2543b418abce808606abfd6d0d170f117ec3dd",
+   "bytes": 18807
+  },
+  "flow/src/motion2scene_flow/native_budget.py": {
+   "sha256": "e9bf4e0ced9d7f6a20bd541104118b693f30141dadc8c04b07be3751501d6a0b",
+   "bytes": 14013
+  },
+  "flow/src/motion2scene_flow/native_budget_data.py": {
+   "sha256": "29afa734b1ceef06ef4b484412873a555de7215a78c2df2752a08e01fe1cb495",
+   "bytes": 14034
+  },
+  "flow/src/motion2scene_flow/native_budget_report.py": {
+   "sha256": "ad034c9b97cbb13f6780f97aec1b82be9e9fab9d753a24d0664eff9717470958",
+   "bytes": 14742
+  },
+  "flow/src/motion2scene_flow/native_event_diagnostic.py": {
+   "sha256": "c330a55013ae5847e29d95747a99fa0af66a5b7fe549b3bbf1478451017d169b",
+   "bytes": 5777
+  },
+  "flow/src/motion2scene_flow/native_event_learning.py": {
+   "sha256": "4b7fd5c4c27a385979d079f0076759631268315bfc2a69aeaf468743dc2bdb56",
+   "bytes": 14876
+  },
+  "flow/src/motion2scene_flow/native_event_report.py": {
+   "sha256": "619f32e44c6b71c6e867e3bbc914731642bbea86c4ef780e51a2d3388d598d17",
+   "bytes": 11784
+  },
+  "flow/src/motion2scene_flow/native_events.py": {
+   "sha256": "ad22db5bab480ee52a2ba39ec696856b43acf239e881e9462b895d4500dd2b4d",
+   "bytes": 12262
+  },
+  "flow/src/motion2scene_flow/native_geometry.py": {
+   "sha256": "591a3af253504ce3b032b2f914d7505592594ac8e81bd22d70b69dc0226ff51d",
+   "bytes": 13235
+  },
+  "flow/src/motion2scene_flow/native_reference.py": {
+   "sha256": "7573a82d24721bf933bc0330646014419983c5be06769a18bea39ddb6ebf84ad",
+   "bytes": 4248
+  },
+  "flow/src/motion2scene_flow/native_structure.py": {
+   "sha256": "cc895db195592c876d59558dae4abebec4241f8f18d5171e7fe01f8d7c355a14",
+   "bytes": 16577
+  },
+  "flow/src/motion2scene_flow/native_structure_report.py": {
+   "sha256": "df909c331676cc583d812cbb4cf6055d18273de0d0eb4e6d26a068ff151317a9",
+   "bytes": 16250
+  },
+  "flow/src/motion2scene_flow/native_verify.py": {
+   "sha256": "9b7945c1b48cdd28fc2892c9e3bccd4868f4dae0639938b9a2dc60cc57c25d5e",
+   "bytes": 7767
+  },
+  "flow/src/motion2scene_flow/progress_report.py": {
+   "sha256": "c053ff5aac9aaa3029c94172153dc285dcc9349f09000aa89a8b7fb59a6f75ed",
+   "bytes": 8520
+  },
+  "flow/src/motion2scene_flow/proxy_checker.py": {
+   "sha256": "312b68ea7fb714000cd5d8d994358c86ca8467c293cce2888a238092d43cac07",
+   "bytes": 5311
+  },
+  "flow/src/motion2scene_flow/proxy_flow.py": {
+   "sha256": "8f2dabfa2ab98289a875068b16479df1e72065cae699eb4200e700cd12c631bf",
+   "bytes": 17416
+  },
+  "flow/src/motion2scene_flow/report/__init__.py": {
+   "sha256": "c044e2604f5edf68491a6e0ffee58e80154df16d570f3e83d17f378ea03f4df2",
+   "bytes": 89
+  },
+  "flow/src/motion2scene_flow/report/charts.py": {
+   "sha256": "ad0500f7e6d193ee8a68a2fa5f2d967f526002bdfe5dc055af56e80294eca9d5",
+   "bytes": 7153
+  },
+  "flow/src/motion2scene_flow/report/progress.py": {
+   "sha256": "b8d3f7ef809de4c407c33624493be54a64969b9dbbddf0a65cb7df7a80bb65be",
+   "bytes": 21113
+  },
+  "flow/src/motion2scene_flow/report/render.py": {
+   "sha256": "191ede505b6086792f63e6075fe37c906e49ea9b617839c9bea945554f7b5a57",
+   "bytes": 7543
+  },
+  "flow/src/motion2scene_flow/report/round_fh.py": {
+   "sha256": "df7940d26b9fa95ec6944ac7036147e0df2b565c46987cafb92535226352264b",
+   "bytes": 13882
+  },
+  "flow/src/motion2scene_flow/report/round_flywheel.py": {
+   "sha256": "30d576c0c4fab30590cc004a7bfd8fd656c9a1da981f24f4418e765e84fd0ff9",
+   "bytes": 8768
+  },
+  "flow/src/motion2scene_flow/report/round_ik.py": {
+   "sha256": "59ce6b40cf891d871b76090f91333256d12b49a2016ed39487d48c03173e9c3d",
+   "bytes": 6942
+  },
+  "flow/src/motion2scene_flow/report/round_lt.py": {
+   "sha256": "431026fb170924fc7d044653129914a1a2dfe7714c7a921e6f4875da76f9f61f",
+   "bytes": 7290
+  },
+  "flow/src/motion2scene_flow/report/round_n.py": {
+   "sha256": "3a480c60382f84d2abbacc3bbefe70b19ccdd27bbe031efa955015bb3cea992a",
+   "bytes": 6135
+  },
+  "flow/src/motion2scene_flow/report/round_st.py": {
+   "sha256": "57ed59f9e9e668c683903654268977eaa4a9f6b404ef3a0449bd549be4c923f0",
+   "bytes": 7630
+  },
+  "flow/src/motion2scene_flow/report/video.py": {
+   "sha256": "79a1e444bc6b8720559f1af1efd86ae5a8ecd257c2806868e1675e2eabe29d11",
+   "bytes": 4398
+  },
+  "flow/src/motion2scene_flow/report.py": {
+   "sha256": "c460706ee37477404134515c6861fae35c52e1dba5e8fc3e61b11f8ff008b7fc",
+   "bytes": 9178
+  },
+  "flow/src/motion2scene_flow/route_corpus.py": {
+   "sha256": "b150e3b92653ecff6b8b5446bc38f9b23ed6f9a5b024796ee0fdacae68642574",
+   "bytes": 5995
+  },
+  "flow/src/motion2scene_flow/sonic_planner_baseline.py": {
+   "sha256": "893db1054c32107e3899c411c9c1485c24f3c90db1014acecbbda969cf80b857",
+   "bytes": 49619
+  },
+  "flow/src/motion2scene_flow/spatial.py": {
+   "sha256": "46d536776159ff847a143405967d9a3d2cb722bc1cbfbdfd3071bf622eedcb64",
+   "bytes": 17947
+  },
+  "flow/src/motion2scene_flow/stage0.py": {
+   "sha256": "9f70c65415413d3070d5afcc308feba91ba742c3694d33102a6001b0a88aeb42",
+   "bytes": 58379
+  },
+  "flow/src/motion2scene_flow/stage0_env.py": {
+   "sha256": "ae51ae438e5a7ea29cb386e18a28a9b01c417b67b8653b41d0474cf27b596388",
+   "bytes": 3071
+  },
+  "flow/src/motion2scene_flow/stage0_runtime.py": {
+   "sha256": "dd6cb7281cf27886fe1e1c3d5272215f702a2f3bdb1a55a526ef317118e2f1ce",
+   "bytes": 15421
+  },
+  "flow/src/motion2scene_flow/temporal_phase_control.py": {
+   "sha256": "231c8e1783bb6ac64a4e618a305704d629e50d6b617a127e0731bcfe0b4a669b",
+   "bytes": 4885
+  },
+  "flow/src/motion2scene_flow/temporal_queries.py": {
+   "sha256": "162e5b73c05f5af56ff172f3341456df898e5f22cb94b4a9c30290484cb3699d",
+   "bytes": 4668
+  },
+  "flow/src/motion2scene_flow/track_envelope.py": {
+   "sha256": "ec08985a7b082dc6477847c76a867e1b9ca641e0f0501e2d52ed5f2b3b170d34",
+   "bytes": 10892
+  },
+  "flow/src/motion2scene_flow/tracker_qualification.py": {
+   "sha256": "2cc5d9cc895fda45a43492fae895868d22d28050dc7fa0d6fb9a90f0677f383c",
+   "bytes": 20758
+  },
+  "flow/src/motion2scene_flow/train.py": {
+   "sha256": "2ffcee2583b393a8079323a965eff8b4e48179dcc5d05e031c2391c94fef7dba",
+   "bytes": 12039
+  },
+  "flow/src/motion2scene_flow/wholebody/__init__.py": {
+   "sha256": "d26d9dc569e56904c05f3440169ba8b800acaf18c09f615a97b1a0f5c0c70e7e",
+   "bytes": 389
+  },
+  "flow/src/motion2scene_flow/wholebody/adaptation.py": {
+   "sha256": "ef8a5522826fc2f1a113aa215d09d320762765ea8babc352bcbe5664d9b1c59a",
+   "bytes": 19678
+  },
+  "flow/src/motion2scene_flow/wholebody/certificates.py": {
+   "sha256": "ad741a5347006ac3a5c2454cb6b0a305807725946b2b87d7072a27b1657483e6",
+   "bytes": 3657
+  },
+  "flow/src/motion2scene_flow/wholebody/chunks.py": {
+   "sha256": "b49569d74333d7d5d041efb89bba640e90075a8fd5bc57638fd225c6d7c2b08c",
+   "bytes": 3166
+  },
+  "flow/src/motion2scene_flow/wholebody/diagnostics.py": {
+   "sha256": "1c26c01c46ad4bbd2a7655098bff4c4865ddd61e60e9489b5bb728a83c891bac",
+   "bytes": 29399
+  },
+  "flow/src/motion2scene_flow/wholebody/dose_report.py": {
+   "sha256": "4442f93f15ba093802a61f631b70fc327550f28e497fd22dfe3871f8621b9ae8",
+   "bytes": 6708
+  },
+  "flow/src/motion2scene_flow/wholebody/elevation.py": {
+   "sha256": "2b2d7810d58f22022f46cd852072f33f38c9270dd3919fa27edf3656d949c21e",
+   "bytes": 6781
+  },
+  "flow/src/motion2scene_flow/wholebody/execution_margin.py": {
+   "sha256": "0f42ff67aa57bbe0398318af77accd6058742c7a84b9245b27ec45cd44f718a2",
+   "bytes": 14938
+  },
+  "flow/src/motion2scene_flow/wholebody/export_motions.py": {
+   "sha256": "e8a500f4618b75100091eceafa8add5d0f0e7e70ad37b08885c14c5cdb9ff098",
+   "bytes": 4794
+  },
+  "flow/src/motion2scene_flow/wholebody/fk.py": {
+   "sha256": "53b791873fc87a8b9b94e4f78c451e1b724d130fb50b801148f08a485ec068c1",
+   "bytes": 9451
+  },
+  "flow/src/motion2scene_flow/wholebody/flow.py": {
+   "sha256": "7c55dc22267c43568965ee15e9729e30ea8c917edc4dc68b3d49ff845e6e23af",
+   "bytes": 2703
+  },
+  "flow/src/motion2scene_flow/wholebody/geometry.py": {
+   "sha256": "a8bbd7b5e777c0400d4d0071afed9235f242391c1426f5d104512f6a0f2a2c59",
+   "bytes": 2643
+  },
+  "flow/src/motion2scene_flow/wholebody/guidance_report.py": {
+   "sha256": "d7bf7b09bb2f449cdc03bab6023a03e0f8f5a492b686cb3af8d3dca2a0dc4be8",
+   "bytes": 7542
+  },
+  "flow/src/motion2scene_flow/wholebody/matrix_report.py": {
+   "sha256": "6743c83a8164754dad123b02e3b054dd87ac15788a1553c5d56f35df7d1c5907",
+   "bytes": 5628
+  },
+  "flow/src/motion2scene_flow/wholebody/model.py": {
+   "sha256": "0b3ef7e2531626a45388aa16f0594f7dc56606f8c0e2a85656b45938ba28b2d8",
+   "bytes": 4222
+  },
+  "flow/src/motion2scene_flow/wholebody/necessity.py": {
+   "sha256": "5cc8af3873626504dfa70581b072042c421920ddccc0cc68e137967273b753f4",
+   "bytes": 10803
+  },
+  "flow/src/motion2scene_flow/wholebody/pace_diagnosis.py": {
+   "sha256": "b9a00fb3b79719e9c74ec5ba8386d79fa424a35d71ef634b99718fc32f37e33c",
+   "bytes": 9250
+  },
+  "flow/src/motion2scene_flow/wholebody/paired_stats.py": {
+   "sha256": "615f8f27dbfbb51da1f3b8a356088ff76afcaf311c6aa627467017cdcf03fc6d",
+   "bytes": 5185
+  },
+  "flow/src/motion2scene_flow/wholebody/passage_data.py": {
+   "sha256": "2938b6eb950e7b515341af7e5ca729df4d66e1396d12c0b9d7f7601751925f0a",
+   "bytes": 12329
+  },
+  "flow/src/motion2scene_flow/wholebody/passage_flow.py": {
+   "sha256": "7a988b77673fb88db9e580a32563ed04d32a0facd81d5d37f72840f4b6665371",
+   "bytes": 4290
+  },
+  "flow/src/motion2scene_flow/wholebody/passage_losses.py": {
+   "sha256": "aff4b9a4be3429606f94e3bbfc0d9de1474208b4746ff946d106cbfac31c6926",
+   "bytes": 9245
+  },
+  "flow/src/motion2scene_flow/wholebody/passage_model.py": {
+   "sha256": "0a0917f1b69151604f2dac85ae95d1a1a50bad26239c2bb275cb90cc75cdba87",
+   "bytes": 5204
+  },
+  "flow/src/motion2scene_flow/wholebody/passage_state.py": {
+   "sha256": "4fdd40f552dc2c3c3f759f0c66c56ff509374d713d9c684364f0a7c1c9b63d15",
+   "bytes": 4000
+  },
+  "flow/src/motion2scene_flow/wholebody/replan_envelope.py": {
+   "sha256": "d66e8bd00ec464799e1bc7eda585e24c25be943f51fc31b52cb120c75de38768",
+   "bytes": 7525
+  },
+  "flow/src/motion2scene_flow/wholebody/rollout.py": {
+   "sha256": "1f1be2c729aaa504e4d1bdcb47255fcbe9443834a5cda5f204770c5b15be5b1c",
+   "bytes": 28565
+  },
+  "flow/src/motion2scene_flow/wholebody/select_execute.py": {
+   "sha256": "9a65af641a0e292dfc2e1421b4b526129bacd05fe564b051a5b4da2925054825",
+   "bytes": 11889
+  },
+  "flow/src/motion2scene_flow/wholebody/selectivity.py": {
+   "sha256": "651bf44c257a72b46112fb7c0a526c32d455c145252632bd313da2f73fbf690d",
+   "bytes": 9597
+  },
+  "flow/src/motion2scene_flow/wholebody/swept_attention.py": {
+   "sha256": "bbc7c67acda85dd4a6560fb7b3e04c77628fa4937f76dc81631c3c2effc3acf5",
+   "bytes": 4062
+  },
+  "flow/src/motion2scene_flow/wholebody/train.py": {
+   "sha256": "27167f9b0feb7bedb6f28b3bd77737468f097030c115e1aa397c380f9b3f2c60",
+   "bytes": 7823
+  },
+  "flow/src/motion2scene_flow/wholebody/train_passage.py": {
+   "sha256": "2306907b1bf6a382190dd2832531ae4e7ce7e63136f81cec77c44b75308be76f",
+   "bytes": 37713
+  },
+  "flow/src/motion2scene_flow/wholebody/witness_contact.py": {
+   "sha256": "9296bdf9d8745c1e5107e5329e52ac4009db67271384e35de47a382df6b45f6c",
+   "bytes": 7626
+  },
+  "newton/allterrain/__init__.py": {
+   "sha256": "a17b1267df10d70cc44598b0aea46dec189c2d08361cb06d11d9e38cdd65b195",
+   "bytes": 99
+  },
+  "newton/allterrain/constants.py": {
+   "sha256": "7066bd68fa5a3a32cdff15c029779524227e68ce43d961b37c0d46eea3ad20f1",
+   "bytes": 4234
+  },
+  "newton/allterrain/perception/__init__.py": {
+   "sha256": "6091f9dd3220ae21115e2b1d743c21727ce831d3e469fb20c18f0463a1d674ee",
+   "bytes": 1320
+  },
+  "newton/allterrain/perception/raster_map.py": {
+   "sha256": "ecaa1fa3deffd5a830d88a628a94f9b93f20c5a8ddc082d410a0eb22aef96e95",
+   "bytes": 14256
+  },
+  "newton/allterrain/perception/sensor_model.py": {
+   "sha256": "f4ba047c1c6e084e38c5bc935d52ac662b82ae80379ef87048f0f0b06737071c",
+   "bytes": 33456
+  },
+  "newton/allterrain/perception/visibility.py": {
+   "sha256": "90c266510f3e7f8ef163289264532a730b02612418a8164d7b8a5fd6a742c258",
+   "bytes": 19192
+  },
+  "sonic/export_parity_vectors.npz": {
+   "sha256": "9e9537ddbff21bd35f76cbd50ab56b2b13214e380d0182662f632c480f0ba386",
+   "bytes": 102874
+  },
+  "sonic/export_receipt.json": {
+   "sha256": "70b7ac110a2b86ee1d98ed1b72ca9b26331868f357760bf4c704ab129b33c6cd",
+   "bytes": 4819
+  },
+  "sonic/sonic_release_g1.onnx": {
+   "sha256": "325031d750a5199248ad73448f7fa922767e8a78ddc870115651cd19752fb5c6",
+   "bytes": 57674578
+  }
+ }
+}

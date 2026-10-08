@@ -1,0 +1,9 @@
+[project]
+name = "g1-student-deploy"
+version = "0.1.0"
+description = "Deploy the ~/flow lidar student planner on a Unitree G1 through GR00T SONIC; MuJoCo sim2sim first."
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

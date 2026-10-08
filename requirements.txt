@@ -1,0 +1,9 @@
+# Pinned to the versions the student planner (Isaac venv) and the lucid SONIC MuJoCo player were evaluated with.
+numpy==1.26.4
+scipy==1.15.3
+mujoco==3.13.0
+onnxruntime==1.29.0
+pyzmq
+msgpack
+pytest
+matplotlib==3.10.3  # imported transitively by the frozen planner source (proxy_flow -> boundary_report)
