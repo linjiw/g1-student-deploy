@@ -115,6 +115,10 @@ def main(argv=None):
     ap.add_argument("--prescan-s", type=float, default=0.5)
     ap.add_argument("--boot-timeout", type=float, default=600.0, help="first run builds the TensorRT engine")
     ap.add_argument("--viewer", action="store_true")
+    ap.add_argument("--lidar-io", choices=("zmq", "dds"), default="dds",
+                    help="dds: the G1's own lidar topic and format (default); zmq: deskewed world clouds")
+    ap.add_argument("--lidar-cfg", default=None, help="simulator MID-360 options (JSON), e.g. a mount error")
+    ap.add_argument("--mount-calib", default=None)
     ap.add_argument("--odom", choices=("dds", "leg"), default="dds",
                     help="dds: simulator ground truth (stands in for LIO); leg: leg odometry from rt/lowstate only")
     ap.add_argument("--replay", default=None,
@@ -143,7 +147,9 @@ def main(argv=None):
     t_run = t_stop = arrived_at = None
     try:
         sim = Proc("sim", [py, "-u", "sim/realtime/robot_sim.py", "--task", args.task, "--log", str(out / "sim.npz"),
-                           "--release-file", str(release)] + (["--viewer"] if args.viewer else []), out / "sim.log", env)
+                           "--release-file", str(release), "--lidar-io", args.lidar_io]
+                   + (["--lidar-cfg", args.lidar_cfg] if args.lidar_cfg else []) + (["--viewer"] if args.viewer else []),
+                   out / "sim.log", env)
         procs.append(sim)
         if not sim.wait_for("[sim] task", 60):
             raise RuntimeError("simulator did not start:\n" + sim.text()[-2000:])
@@ -183,6 +189,8 @@ def main(argv=None):
                 rel = [np.cos(yaw0) * d[0] + np.sin(yaw0) * d[1], -np.sin(yaw0) * d[0] + np.cos(yaw0) * d[1]]
                 goal_args = ["--goal", *map(str, rel), "--goal-frame", "start", "--odom", "leg"]
             node = Proc("node", [py, "-u", "g1deploy/node.py", *goal_args, "--route", args.route,
+                                 "--cloud", "dds" if args.lidar_io == "dds" else "tcp://localhost:5560",
+                                 *(["--mount-calib", args.mount_calib] if args.mount_calib else []),
                                  "--boxes", str(boxes_file), "--inflight", str(args.inflight), "--prescan-s",
                                  str(args.prescan_s), "--start-file", str(start), "--log", str(out / "node_plans.json")],
                         out / "node.log", env)

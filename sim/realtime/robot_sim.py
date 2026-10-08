@@ -48,6 +48,11 @@ def main(argv=None):
                     help="mid360: real pattern + per-point timing (unfiltered, deskewed, per-point times); "
                          "grid: the 2 deg grid the student was evaluated with")
     ap.add_argument("--lidar-cfg", default=None, help='JSON, e.g. {"mount_error": {"pitch_deg": 1.0}, "dropout": 0.1}')
+    ap.add_argument("--lidar-io", choices=("zmq", "dds"), default="zmq",
+                    help="zmq: deskewed world cloud (what a LIO bridge delivers); dds: the G1's own topic "
+                         "rt/utlidar/cloud_livox_mid360, raw sensor frame, per-point time, placeholders")
+    ap.add_argument("--lidar-clock-offset-s", type=float, default=-1234.5,
+                    help="header stamps on a different clock (PC1 vs Orin without chrony); the node must not use them")
     ap.add_argument("--duration", type=float, default=0.0)
     ap.add_argument("--viewer", action="store_true")
     ap.add_argument("--release-file", default=None,
@@ -110,6 +115,15 @@ def main(argv=None):
 
         scanner = Mid360Scanner(m, d, frame_hz=args.cloud_hz, range_noise_m=args.range_noise_m, rng=rng,
                                 **(json.loads(args.lidar_cfg) if args.lidar_cfg else {}))
+        if args.lidar_io == "dds":
+            from unitree_sdk2py.core.channel import ChannelPublisher
+            from unitree_sdk2py.idl.sensor_msgs.msg.dds_ import PointCloud2_
+
+            from g1deploy.perception.unitree_lidar import TOPIC_CLOUD, encode_cloud
+
+            scanner.keep_raw = True
+            cloud_pub = ChannelPublisher(TOPIC_CLOUD, PointCloud2_)
+            cloud_pub.Init()
 
     log = {"t": [], "wall": [], "root_pos": [], "root_quat": [], "contact_n": [], "qpos": []}
     released = args.release_file is None
@@ -149,7 +163,10 @@ def main(argv=None):
                     log["qpos"].append(d.qpos.copy())
             if scanner is not None:
                 scanner.substep(sim_t)
-                for (pts, org, t_end), times in scanner.pop_frames(with_times=True):
+                for pts_s, t_s, t0_frame in scanner.pop_raw_frames():
+                    cloud_pub.Write(encode_cloud(pts_s, t_s * 1e9, t0_frame + args.lidar_clock_offset_s, rng=rng))
+                for (pts, org, t_end), times in (scanner.pop_frames(with_times=True) if args.lidar_io == "zmq"
+                                                 else scanner.pop_frames(with_times=True) and []):
                     sock.send(pack([("points", pts.astype(np.float32)), ("origins", org.astype(np.float32)),
                                     ("dt", (times - t_end).astype(np.float32)), ("origin", org[-1] if len(org) else org.sum(0)),
                                     ("stamp", np.array([t_end])), ("wall", np.array([time.monotonic()]))], topic=b"cloud"))

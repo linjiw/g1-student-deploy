@@ -185,6 +185,36 @@ class LegOdomSource:
             time.sleep(0.005)
 
 
+class DdsCloudInput:
+    """The G1's own lidar topic (rt/utlidar/cloud_livox_mid360): raw sensor frame, per-point time, placeholders.
+    Frames are decoded on the DDS thread; header stamps are ignored (PC1 clock), points are timed on arrival."""
+
+    def __init__(self):
+        from unitree_sdk2py.core.channel import ChannelSubscriber
+        from unitree_sdk2py.idl.sensor_msgs.msg.dds_ import PointCloud2_
+
+        from g1deploy.perception.unitree_lidar import TOPIC_CLOUD
+
+        self.lock, self.queue, self.last = threading.Lock(), [], -1.0
+        self.sub = ChannelSubscriber(TOPIC_CLOUD, PointCloud2_)
+        self.sub.Init(self._on, 2)
+
+    def _on(self, msg):
+        from g1deploy.perception.unitree_lidar import decode_cloud
+
+        recv = time.monotonic()
+        pts, t_s, _ = decode_cloud(msg)
+        with self.lock:
+            self.queue.append(dict(raw=True, points=pts, t_s=t_s, wall=recv))
+            self.queue = self.queue[-3:]
+            self.last = recv
+
+    def poll(self):
+        with self.lock:
+            out, self.queue = self.queue, []
+        return out
+
+
 class CloudInput:
     def __init__(self, connect="tcp://localhost:5560"):
         import zmq
@@ -346,6 +376,10 @@ class StudentNode:
 
         self.memory = CloudMemory(xy, rng=np.random.default_rng(self.args.seed), **dict(self.pcfg.sensor))
         self.memory.latency = 0.0  # real latency is already in the data; fuse on arrival
+        from g1deploy.perception.unitree_lidar import CloudFromSensorFrame, Mount
+
+        mount = Mount.load(self.args.mount_calib) if self.args.mount_calib else Mount.nominal()
+        self.from_sensor = CloudFromSensorFrame(self.memory.body_filter, mount, transport_s=self.args.lidar_transport_s)
 
     def perception_loop(self, cloud, state, t0):
         """Clouds -> memory, and the route refresh (A* on the memory grid, up to ~0.2 s) - both off the 50 Hz loop."""
@@ -354,6 +388,11 @@ class StudentNode:
             snap = state.snapshot()
             if got and snap is not None:
                 for c in got:
+                    if c.get("raw"):  # sensor-frame frame from the robot's DDS topic: deskew + register ourselves
+                        pts, org = self.from_sensor(c["points"], c["t_s"], c["wall"], state.qpos_at)
+                        with self.mem_lock:
+                            self.memory.add_cloud(0.0, pts, org, None)
+                        continue
                     pts, org = c["points"], c["origins"] if c["origins"] is not None else c["origin"]
                     if c["dt"] is not None and len(pts):
                         # self filter per firing-time slice with the joint state of that instant (MID-360 points
@@ -553,7 +592,10 @@ def parse(argv=None):
     ap.add_argument("--goal-frame", choices=("odom", "start"), default="odom",
                     help="start: --goal is (ahead, left) metres from the robot's start pose")
     ap.add_argument("--odom-connect", default="tcp://localhost:5561")
-    ap.add_argument("--cloud", default="tcp://localhost:5560")
+    ap.add_argument("--cloud", default="tcp://localhost:5560",
+                    help="'dds': the G1's own rt/utlidar/cloud_livox_mid360; otherwise a ZMQ endpoint with world clouds")
+    ap.add_argument("--mount-calib", default=None, help="calibrated MID-360 mount JSON (tools/calibrate_mount.py)")
+    ap.add_argument("--lidar-transport-s", type=float, default=0.01, help="driver + network delay of the last point")
     ap.add_argument("--stream-bind", default="tcp://*:5556")
     ap.add_argument("--route", choices=("sensor", "privileged"), default="sensor")
     ap.add_argument("--boxes", default=None, help="JSON list of boxes for --route privileged (a measured course)")
@@ -601,7 +643,7 @@ def main(argv=None):
         ahead, left = args.goal
         node.goal = snap["qpos"][:2] + np.array([c * ahead - s_ * left, s_ * ahead + c * left])
         emit("goal", frame="start", goal_odom=node.goal.tolist())
-    cloud = CloudInput(args.cloud)
+    cloud = DdsCloudInput() if args.cloud == "dds" else CloudInput(args.cloud)
     start = threading.Event()
     if args.start_file:
         def wait_file():

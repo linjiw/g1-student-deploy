@@ -40,7 +40,7 @@ def _rpy(r, p, y):
 class Mid360Scanner:
     def __init__(self, model, data, *, points_per_s=200_000, frame_hz=10.0, range_m=4.0, range_noise_m=0.02,
                  dropout=0.0, mount_error=None, deskew="ideal", rng=None, table=TABLE, geomgroup=(1, 0, 0, 0, 0, 0),
-                 phase=0, body_filter=None):
+                 phase=0, body_filter=None, occlusion=None):
         import mujoco
 
         self.mujoco, self.model, self.data = mujoco, model, data
@@ -48,6 +48,14 @@ class Mid360Scanner:
         az, el = tab[:, 0], tab[:, 1]
         self.dirs = np.stack([np.cos(el) * np.cos(az), np.cos(el) * np.sin(az), np.sin(el)], -1)
         self.cursor = int(phase) % len(self.dirs)
+        # Head-shell occlusion (one G1 unit measured a front blind sector of +-45 deg azimuth): rays in the
+        # sensor-frame azimuth sector |az| <= az_deg and elevation band [el_lo_deg, el_hi_deg] never return.
+        self.occluded = np.zeros(len(self.dirs), dtype=bool)
+        if occlusion:
+            a = np.degrees(np.arctan2(np.sin(az), np.cos(az)))
+            e = np.degrees(el)
+            self.occluded = (np.abs(a) <= float(occlusion.get("az_deg", 45.0))) \
+                & (e >= float(occlusion.get("el_lo_deg", -90.0))) & (e <= float(occlusion.get("el_hi_deg", 90.0)))
         self.rate, self.frame_dt = float(points_per_s), 1.0 / frame_hz
         self.range_m, self.noise, self.dropout = range_m, range_noise_m, dropout
         self.deskew = deskew
@@ -70,6 +78,8 @@ class Mid360Scanner:
         # one pose per 0.1 s frame leaks swinging hands/shoulders into the memory as obstacles and ceilings).
         self.body_filter = body_filter
         self.self_removed = 0
+        self.keep_raw = False  # also keep unfiltered sensor-frame frames (Unitree DDS format, see unitree_lidar.py)
+        self.raw, self.raw_t, self.raw_frames = [], [], []
 
     def _torso_pose(self):
         d = self.data
@@ -93,11 +103,14 @@ class Mid360Scanner:
         dist = np.zeros(n)
         self.mujoco.mj_multiRay(self.model, self.data, o_true, d_world.reshape(-1), self.group, 1, -1, geom, dist,
                                 None, n, float(self.range_m))
-        hit = (geom >= 0) & (dist > mid360.MIN_RANGE_M) & (dist <= self.range_m)
+        hit = (geom >= 0) & (dist > mid360.MIN_RANGE_M) & (dist <= self.range_m) & ~self.occluded[idx]
         if self.dropout > 0:
             hit &= self.rng.random(n) >= self.dropout
         tt = dist[hit] + self.rng.normal(0.0, self.noise, int(hit.sum()))
         p_sensor = (self.dirs[idx][hit] * tt[:, None])  # sensor-frame returns
+        if self.keep_raw:
+            self.raw.append(p_sensor.copy())
+            self.raw_t.append(t)
         if self.believed_torso is not None:
             p_torso, r_torso = self.believed_torso(t)
         if self.body_filter is not None and len(p_sensor):
@@ -118,11 +131,21 @@ class Mid360Scanner:
             pts = [ps @ (r @ self.r_assumed).T + (p + r @ self.p_assumed) for ps, p, r, _ in self.buf]
             org = [np.repeat((p + r @ self.p_assumed)[None], len(ps), 0) for ps, p, r, _ in self.buf]
         times = [np.full(len(ps), ts) for ps, _, _, ts in self.buf]
+        if self.keep_raw:  # what the G1 driver publishes: sensor frame (true mount), time from frame start
+            t0 = t - self.frame_dt
+            self.raw_frames.append((np.concatenate(self.raw) if self.raw else np.zeros((0, 3)),
+                                    np.concatenate([np.full(len(r), ts - t0) for r, ts in zip(self.raw, self.raw_t)])
+                                    if self.raw else np.zeros(0), t0))
+            self.raw, self.raw_t = [], []
         self.frames.append((np.concatenate(pts) if pts else np.zeros((0, 3)),
                             np.concatenate(org) if org else np.zeros((0, 3)), t))
         self.frame_times.append(np.concatenate(times) if times else np.zeros(0))
         self.buf = []
         self.frame_end += self.frame_dt
+
+    def pop_raw_frames(self):
+        out, self.raw_frames = self.raw_frames, []
+        return out
 
     def pop_frames(self, with_times=False):
         out, times = self.frames, self.frame_times
