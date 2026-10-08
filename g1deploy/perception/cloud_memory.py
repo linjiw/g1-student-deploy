@@ -118,8 +118,13 @@ class BodyFilter:
         pos, mat = d.geom_xpos[self.geoms], d.geom_xmat[self.geoms].reshape(-1, 3, 3)
         return (pos + np.einsum("gij,gj->gi", mat, self.a), pos + np.einsum("gij,gj->gi", mat, self.b), self.rad)
 
-    def mask(self, points, qpos36, reach_m=1.3):
-        """True for points to keep (not on the robot). Only points within `reach_m` of the pelvis are tested."""
+    def mask(self, points, qpos36, reach_m=1.3, origins=None, along_m=0.06):
+        """True for points to keep (not on the robot). Only points within `reach_m` of the pelvis are tested.
+
+        With `origins` (sensor origin per point or one for all), a return is also tested `along_m` further along
+        its own ray: range noise (~2 cm sigma) puts ~7% of returns from the robot's arms more than 3 cm in front
+        of the surface, outside the capsule margin; with thousands of body hits per frame those leaks become
+        overhead "ceilings" along the robot's own path (seen in the realistic MID-360 memory)."""
         points = np.asarray(points, dtype=np.float64)
         keep = np.ones(len(points), dtype=bool)
         if len(points) == 0:
@@ -128,11 +133,21 @@ class BodyFilter:
         if len(near) == 0:
             return keep
         s, e, rad = self.capsules(qpos36)
-        p = points[near]
+        tests = [points[near]]
+        if origins is not None:
+            o = np.broadcast_to(np.asarray(origins, dtype=np.float64), points.shape)[near]
+            ray = points[near] - o
+            ray /= np.maximum(np.linalg.norm(ray, axis=1, keepdims=True), 1e-9)
+            tests += [points[near] + 0.5 * along_m * ray, points[near] + along_m * ray]
         d = e - s
-        t = np.clip(np.einsum("nkj,kj->nk", p[:, None] - s[None], d) / np.maximum((d * d).sum(1), 1e-12), 0, 1)
-        dist = np.linalg.norm(p[:, None] - (s[None] + t[..., None] * d[None]), axis=2)
-        keep[near] = (dist > (rad + self.margin)[None]).all(1)
+        dd = np.maximum((d * d).sum(1), 1e-12)
+        lim = (rad + self.margin)[None]
+        inside = np.zeros(len(near), dtype=bool)
+        for p in tests:
+            t = np.clip(np.einsum("nkj,kj->nk", p[:, None] - s[None], d) / dd, 0, 1)
+            dist = np.linalg.norm(p[:, None] - (s[None] + t[..., None] * d[None]), axis=2)
+            inside |= (dist <= lim).any(1)
+        keep[near] = ~inside
         return keep
 
 
@@ -152,7 +167,7 @@ class CloudMemory(RayCastMemory):
       ground    otherwise, if any ground return -> support 0
     """
 
-    def __init__(self, origin_xy, *, source=None, ground_tol_m=0.05, face_push_m=0.02, self_filter=True,
+    def __init__(self, origin_xy, *, source=None, ground_tol_m=0.05, face_push_m=0.035, self_filter=True,
                  self_margin_m=0.03, overhead_min_bottom_m=0.8, min_low_points=3, low_ratio=0.2,
                  free_band_m=(0.1, 0.8), carve_step_m=0.05, carve_stop_m=0.1, edge_cells=2, edge_dz_m=0.05,
                  carve_rays=4000, **kw):
@@ -224,7 +239,7 @@ class CloudMemory(RayCastMemory):
         keep = np.linalg.norm(pts - org, axis=1) <= self.range_m  # the evaluated memory saw 4 m
         self.stats["points"] += len(pts)
         if self.body_filter is not None and qpos36 is not None and len(pts):
-            body = self.body_filter.mask(pts, qpos36)
+            body = self.body_filter.mask(pts, qpos36, origins=org)
             self.stats["self_removed"] += int((~body & keep).sum())
             keep &= body
         self.pending.append((t_ready, self.evidence(pts[keep], org[keep])))

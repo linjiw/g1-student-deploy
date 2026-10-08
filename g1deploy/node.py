@@ -405,7 +405,8 @@ class StudentNode:
                             sel = c["dt"] == dt
                             q = state.qpos_at(c["wall"] + float(dt))
                             if q is not None:
-                                keep[sel] = self.memory.body_filter.mask(pts[sel], q)
+                                keep[sel] = self.memory.body_filter.mask(
+                                    pts[sel], q, origins=np.broadcast_to(org, (len(pts), 3))[sel])
                         pts = pts[keep]
                         org = np.broadcast_to(org, (len(keep), 3))[keep]
                         qf = None

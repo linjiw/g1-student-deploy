@@ -118,8 +118,9 @@ class Mid360Scanner:
         if self.believed_torso is not None:
             p_torso, r_torso = self.believed_torso(t)
         if self.body_filter is not None and len(p_sensor):
-            pw = p_sensor @ (r_torso @ self.r_assumed).T + (p_torso + r_torso @ self.p_assumed)
-            keep = self.body_filter.mask(pw, self.data.qpos)
+            o = p_torso + r_torso @ self.p_assumed
+            pw = p_sensor @ (r_torso @ self.r_assumed).T + o
+            keep = self.body_filter.mask(pw, self.data.qpos, origins=o)
             self.self_removed += int((~keep).sum())
             p_sensor = p_sensor[keep]
         self.buf.append((p_sensor, p_torso.copy(), r_torso.copy(), t))

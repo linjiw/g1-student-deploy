@@ -169,7 +169,7 @@ class CloudFromSensorFrame:
             p_t, r_t = self.fk(q)
             r_s, o = r_t @ self.mount.rot_torso, p_t + r_t @ self.mount.pos_torso
             pw = pts_s[sel] @ r_s.T + o
-            keep = self.bf.mask(pw, q)
+            keep = self.bf.mask(pw, q, origins=o)
             self.stats["self_removed"] += int((~keep).sum())
             out_p.append(pw[keep])
             out_o.append(np.repeat(o[None], int(keep.sum()), 0))
