@@ -82,7 +82,7 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
 def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mode="measured", inflight=1,
                 start="recorded",
                 route_source="privileged", lidar="analytic", odom_noise=None, prescan_s=None, lidar_cfg=None,
-                planner_overrides=None,
+                goal_lookahead=None, planner_overrides=None,
                 deadline_s=None, save_npz=True):
     import torch
 
@@ -100,6 +100,8 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
     pcfg = flow.planner.PlannerConfig(**pdict)
     planner = flow.planner.FlowPlanner(pcfg)
     ep = dict(cfg["episode"])
+    if goal_lookahead:
+        ep["goal_lookahead_m"] = float(goal_lookahead)  # the local goal distance sets the planner's walking speed
     replan, lookahead = int(ep["replan_ticks"]), float(ep["goal_lookahead_m"])
     variant = cfg["route_variants"][route_source]
     route_cfg = variant.get("route", {})
@@ -287,6 +289,7 @@ def main(argv=None):
                     help='mid360 options as JSON, e.g. {"mount_error": {"pitch_deg": 1.5}, "deskew": "none", "dropout": 0.1}')
     ap.add_argument("--odom-noise", default=None, help="JSON dict, e.g. '{\"xy_rw_m\": 0.02, \"yaw_rw_rad\": 0.01}'")
     ap.add_argument("--deadline-s", type=float, default=None)
+    ap.add_argument("--goal-lookahead", type=float, default=None, help="override (1.5 evaluated); sets walking speed")
     ap.add_argument("--prescan-s", type=float, default=None,
                     help="lidar captures before the first plan (default: the route variant's; Isaac privileged = 0)")
     args = ap.parse_args(argv)
@@ -295,7 +298,7 @@ def main(argv=None):
                     route_source=args.route, lidar=args.lidar,
                     lidar_cfg=json.loads(args.lidar_cfg) if args.lidar_cfg else None,
                     odom_noise=json.loads(args.odom_noise) if args.odom_noise else None, deadline_s=args.deadline_s,
-                    prescan_s=args.prescan_s)
+                    prescan_s=args.prescan_s, goal_lookahead=args.goal_lookahead)
     print(json.dumps({k: r[k] for k in ("task_id", "outcome", "elapsed_s", "replans", "plan_latency_s")}))
     return 0
 

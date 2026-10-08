@@ -80,6 +80,7 @@ def main(argv=None):
     ap.add_argument("--lidar-cfg", default=None)
     ap.add_argument("--odom-noise", default=None)
     ap.add_argument("--prescan-s", type=float, default=None)
+    ap.add_argument("--goal-lookahead", type=float, default=None)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
     jobs = episodes(Path(args.packet), args.families, args.limit)
@@ -87,7 +88,8 @@ def main(argv=None):
                 start=args.start,
                 route_source=args.route,
                 lidar=args.lidar, odom_noise=json.loads(args.odom_noise) if args.odom_noise else None,
-                prescan_s=args.prescan_s, lidar_cfg=json.loads(args.lidar_cfg) if args.lidar_cfg else None)
+                prescan_s=args.prescan_s, lidar_cfg=json.loads(args.lidar_cfg) if args.lidar_cfg else None,
+                goal_lookahead=args.goal_lookahead)
     out_dir = ROOT / "runs" / args.name
     print(f"{len(jobs)} episodes -> {out_dir}  condition {cond}  workers {args.workers}", flush=True)
     if args.dry_run:

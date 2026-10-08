@@ -22,7 +22,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from g1deploy import bundle, contract as C  # noqa: E402
-from g1deploy.node import CloudInput, DdsState, OdomInput, quat_tilt  # noqa: E402
+from g1deploy.node import CloudInput, DdsCloudInput, DdsState, LegOdomSource, OdomInput, quat_tilt  # noqa: E402
 
 
 def main(argv=None):
@@ -31,16 +31,20 @@ def main(argv=None):
     ap.add_argument("--domain", type=int, default=0)
     ap.add_argument("--seconds", type=float, default=5.0)
     ap.add_argument("--perception", action="store_true")
-    ap.add_argument("--cloud", default="tcp://localhost:5560")
-    ap.add_argument("--odom", choices=("dds", "zmq"), default="dds")
+    ap.add_argument("--cloud", default="dds", help="'dds' = the G1's rt/utlidar topic; or a ZMQ endpoint")
+    ap.add_argument("--odom", choices=("dds", "zmq", "leg"), default="dds")
+    ap.add_argument("--mount-calib", default=None)
     ap.add_argument("--odom-connect", default="tcp://localhost:5561")
     ap.add_argument("--png", default=None)
     args = ap.parse_args(argv)
     state = DdsState(args.iface, args.domain, args.odom)
     odom = OdomInput(state, args.odom_connect) if args.odom == "zmq" else None
+    if args.odom == "leg":
+        LegOdomSource(state)
     contract = json.loads((bundle.ROOT / "config/sonic_model_contract.json").read_text())
     limits = np.asarray([j["range_rad"] for j in contract["joints"] if j["type"] != "free"])
-    cloud = CloudInput(args.cloud) if args.perception else None
+    cloud = (DdsCloudInput() if args.cloud == "dds" else CloudInput(args.cloud)) if args.perception else None
+    converter = None
     memory = None
     n_low, t0, last, tilts, out_of_range = 0, time.monotonic(), None, [], set()
     near_after = clouds = 0
@@ -58,13 +62,24 @@ def main(argv=None):
         if cloud is not None:
             snap = state.snapshot()
             for c in cloud.poll():
-                pts, origin = c["points"], c["origin"]
                 if snap is None:
                     continue
                 if memory is None:
                     from g1deploy.perception.cloud_memory import CloudMemory
+                    from g1deploy.perception.unitree_lidar import CloudFromSensorFrame, Mount
 
                     memory = CloudMemory(snap["qpos"][:2], mounts=("mid360_inverted",), latency_s=0.0, range_m=4.0)
+                    converter = CloudFromSensorFrame(memory.body_filter,
+                                                     Mount.load(args.mount_calib) if args.mount_calib else Mount.nominal())
+                if c.get("raw"):  # sensor frame -> world with our own pose (deskew + registration)
+                    pts_all = c["points"]
+                    t_wall = c["wall"] - converter.transport - (c["t_s"].max() - c["t_s"])
+                    q_now = state.qpos_at(float(t_wall.mean())) if len(pts_all) else snap["qpos"]
+                    p_t, r_t = converter.fk(q_now)
+                    pts = pts_all @ (r_t @ converter.mount.rot_torso).T + (p_t + r_t @ converter.mount.pos_torso)
+                    origin = p_t + r_t @ converter.mount.pos_torso
+                else:
+                    pts, origin = c["points"], c["origin"]
                 memory.add_cloud(0.0, pts, origin, snap["qpos"])
                 memory.step(time.monotonic() - t0)
                 clouds += 1
