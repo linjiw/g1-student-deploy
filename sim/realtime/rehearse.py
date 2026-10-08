@@ -109,10 +109,14 @@ def main(argv=None):
     ap.add_argument("--task", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--route", choices=("sensor", "privileged"), default="sensor")
-    ap.add_argument("--inflight", type=int, default=2)
+    ap.add_argument("--inflight", type=int, default=1,
+                    help="2+ is harmful: a second in-flight plan is predicted from the landed plan, not the one "
+                         "running in between (G4: 32/98 vs 79/98)")
     ap.add_argument("--prescan-s", type=float, default=0.5)
     ap.add_argument("--boot-timeout", type=float, default=600.0, help="first run builds the TensorRT engine")
     ap.add_argument("--viewer", action="store_true")
+    ap.add_argument("--replay", default=None,
+                    help="H4 check: stream this recorded episode (closed_loop.npz) open-loop instead of running the node")
     args = ap.parse_args(argv)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=False)
@@ -153,34 +157,47 @@ def main(argv=None):
         time.sleep(1.0)
         release.touch()  # gantry released: SONIC balances the stand
         time.sleep(1.5)
-        node = Proc("node", [py, "-u", "g1deploy/node.py", "--goal", *map(str, task["goal_world_xy"]), "--route", args.route,
-                             "--boxes", str(boxes_file), "--inflight", str(args.inflight), "--prescan-s", str(args.prescan_s),
-                             "--start-file", str(start), "--log", str(out / "node_plans.json")], out / "node.log", env)
-        procs.append(node)
-        if not node.wait_for('"node_up"', 120):
-            raise RuntimeError("node did not start:\n" + node.text()[-3000:])
-        runner.key("\n")  # Enter: switch the runner to ZMQ streaming
-        time.sleep(0.3)
-        start.touch()
-        if not node.wait_for('"run"', 60):
-            raise RuntimeError("node never started streaming:\n" + node.text()[-3000:])
-        events = [json.loads(l) for l in node.text().splitlines() if l.startswith("{")]
-        t_run = next(e["t"] for e in events if e["event"] == "run")
-        t_end, arrived_at = t_run + task["deadline_s"], None
-        while time.monotonic() < t_end:
-            txt = node.text()
-            if '"estop"' in txt:
-                runner.key("o")
-                result["estop"] = True
-                time.sleep(1.0)
-                break
-            if '"arrived"' in txt and arrived_at is None:
-                arrived_at = time.monotonic()
-            if arrived_at is not None and time.monotonic() - arrived_at > 0.5:
-                break
-            if any(p.p.poll() is not None for p in procs):
-                break
-            time.sleep(0.05)
+        if args.replay:
+            runner.key("\n")  # Enter: ZMQ streaming
+            time.sleep(0.3)
+            node = Proc("node", [py, "-u", "tools/stream_replay.py", args.replay], out / "node.log", env)
+            procs.append(node)
+            if not node.wait_for("frames", 60):
+                raise RuntimeError("replay did not start:\n" + node.text()[-2000:])
+            t_run = time.monotonic() + 1.0  # stream_replay prefixes a 1 s settle from the stand
+            dur = float(node.text().split(" frames (")[1].split(" s)")[0])  # "<n> frames (<s> s)"
+            t_end, arrived_at = min(t_run + task["deadline_s"], t_run - 1.0 + dur + 1.0), None
+            while time.monotonic() < t_end:
+                time.sleep(0.05)
+        else:
+            node = Proc("node", [py, "-u", "g1deploy/node.py", "--goal", *map(str, task["goal_world_xy"]), "--route", args.route,
+                                 "--boxes", str(boxes_file), "--inflight", str(args.inflight), "--prescan-s", str(args.prescan_s),
+                                 "--start-file", str(start), "--log", str(out / "node_plans.json")], out / "node.log", env)
+            procs.append(node)
+            if not node.wait_for('"node_up"', 120):
+                raise RuntimeError("node did not start:\n" + node.text()[-3000:])
+            runner.key("\n")  # Enter: switch the runner to ZMQ streaming
+            time.sleep(0.3)
+            start.touch()
+            if not node.wait_for('"run"', 60):
+                raise RuntimeError("node never started streaming:\n" + node.text()[-3000:])
+            events = [json.loads(l) for l in node.text().splitlines() if l.startswith("{")]
+            t_run = next(e["t"] for e in events if e["event"] == "run")
+            t_end, arrived_at = t_run + task["deadline_s"], None
+            while time.monotonic() < t_end:
+                txt = node.text()
+                if '"estop"' in txt:
+                    runner.key("o")
+                    result["estop"] = True
+                    time.sleep(1.0)
+                    break
+                if '"arrived"' in txt and arrived_at is None:
+                    arrived_at = time.monotonic()
+                if arrived_at is not None and time.monotonic() - arrived_at > 0.5:
+                    break
+                if any(p.p.poll() is not None for p in procs):
+                    break
+                time.sleep(0.05)
         t_stop = time.monotonic()
     finally:
         for p in reversed(procs):

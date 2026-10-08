@@ -121,10 +121,16 @@ class PoseStreamer:
         self.sock.setsockopt(zmq.SNDHWM, 4)
         self.sock.bind(bind)
         self.sent = 0
+        self.last_end = None
 
     def send_plan(self, plan, anchor_tick, anchor_q, anchor_dq, start_tick, joint_limits=None, horizon_pad=LOOKAHEAD_FRAMES):
         """Stream from `start_tick` to the plan end + `horizon_pad` frames (clamped = Isaac semantics)."""
         end_tick = anchor_tick + len(plan["qpos"]) + horizon_pad
+        if self.last_end is not None and end_tick <= self.last_end:
+            # the runner treats a chunk that does not extend the window as stale: playback reset + heading
+            # re-capture ("incoming_frame_end <= stream_window_end - forcing catch-up")
+            end_tick = self.last_end + 1
+        self.last_end = end_tick
         ticks, q, dq, quat = stream_frames(plan, anchor_tick, anchor_q, anchor_dq, start_tick, end_tick, joint_limits)
         self.sock.send(pose_message(ticks, q, dq, quat, timestamp=time.monotonic()))
         self.sent += 1

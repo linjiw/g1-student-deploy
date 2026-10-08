@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 PY=.venv/bin/python
 ODOM='{"xy_rw_m": 0.04, "yaw_rw_rad": 0.02, "xy_white_m": 0.01, "yaw_white_rad": 0.005}'
 run() { name=$1; shift; [ -f runs/$name/results.json ] && [ "$(python3 -c "import json;print(len(json.load(open('runs/$name/results.json'))))")" = 98 ] && return; echo "=== $name $*"; $PY tools/eval_panel.py --name "$name" --workers 3 "$@" 2>&1 | grep -v Warn | tail -5; }
-run g4-prescan            --prescan-s 0.3
+# done: run g4-prescan            --prescan-s 0.3
 run g4-lat032-meas        --prescan-s 0.3 --latency-s 0.32
 run g4-lat032-pred        --prescan-s 0.3 --latency-s 0.32 --anchor predict
 run g4-lat032-pred-if2    --prescan-s 0.3 --latency-s 0.32 --anchor predict --inflight 2

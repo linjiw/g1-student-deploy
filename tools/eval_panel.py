@@ -14,11 +14,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import multiprocessing
 import os
+import subprocess
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +61,9 @@ def _run(job, cond, out_dir):
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["--worker"]:
+        return worker(argv[1], argv[argv.index("--out-dir") + 1])
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--name", required=True)
     ap.add_argument("--packet", default=str(DEFAULT_PACKET))
@@ -91,22 +93,45 @@ def main(argv=None):
         return 0
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "condition.json").write_text(json.dumps(dict(cond, packet=args.packet, jobs=jobs), indent=1) + "\n")
-    t0, rows = time.time(), []
-    pool = ProcessPoolExecutor(max_workers=args.workers, mp_context=multiprocessing.get_context("spawn"))
-    futs = {pool.submit(_run, j, cond, out_dir): j for j in jobs}
-    for i, f in enumerate(as_completed(futs), 1):
-        j, r = futs[f], f.result()
+    t0 = time.time()
+    # One plain subprocess per worker, each running every n-th episode and exiting hard: process pools left
+    # orphaned workers holding CUDA contexts (and the caller's stdout pipe) after the parent finished.
+    procs = [subprocess.Popen([sys.executable, __file__, "--worker", f"{k}/{args.workers}", "--out-dir", str(out_dir)],
+                              cwd=str(ROOT)) for k in range(args.workers)]
+    done = set()
+    while True:
+        alive = [p for p in procs if p.poll() is None]
+        for j in jobs:
+            if j["name"] not in done and (out_dir / j["name"] / "score.json").is_file():
+                done.add(j["name"])
+                r = json.loads((out_dir / j["name"] / "score.json").read_text())
+                print(f"[{len(done)}/{len(jobs)} {time.time() - t0:5.0f}s] {j['name']:28s} isaac={str(j['isaac_outcome']):20s} "
+                      f"mujoco={r.get('outcome')}", flush=True)
+        if not alive:
+            break
+        time.sleep(2)
+    rows = []
+    for j in jobs:
+        f = out_dir / j["name"] / "score.json"
+        r = json.loads(f.read_text()) if f.is_file() else {"outcome": "missing"}
         rows.append(dict(name=j["name"], family=j["family"], seed=j["seed"], isaac=j["isaac_outcome"],
                          mujoco=r.get("outcome"), elapsed_s=r.get("elapsed_s"), error=r.get("runtime_error")))
-        print(f"[{i}/{len(jobs)} {time.time() - t0:5.0f}s] {j['name']:28s} isaac={j['isaac_outcome']:20s} "
-              f"mujoco={r.get('outcome')}", flush=True)
-        (out_dir / "results.json").write_text(json.dumps(sorted(rows, key=lambda r: r["name"]), indent=1) + "\n")
+    (out_dir / "results.json").write_text(json.dumps(rows, indent=1) + "\n")
     from tools.compare import summarize
 
-    print(summarize(sorted(rows, key=lambda r: r["name"]), title=args.name), flush=True)
-    # Workers holding CUDA contexts can hang in interpreter teardown; results are on disk, so leave hard.
-    pool.shutdown(wait=False, cancel_futures=True)
-    os._exit(0)
+    print(summarize(rows, title=args.name), flush=True)
+    return 0
+
+
+def worker(spec, out_dir):
+    k, n = map(int, spec.split("/"))
+    c = json.loads((Path(out_dir) / "condition.json").read_text())
+    jobs, cond = c.pop("jobs"), {key: v for key, v in c.items() if key != "packet"}
+    for i, job in enumerate(jobs):
+        if i % n == k:
+            _run(job, cond, out_dir)
+    sys.stdout.flush()
+    os._exit(0)  # skip CUDA / onnxruntime teardown, which can hang
 
 
 if __name__ == "__main__":

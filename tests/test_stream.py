@@ -50,3 +50,16 @@ def test_runner_rows_equal_isaac_feed_rows():
         rows = [int(np.flatnonzero(ticks == g + 5 * k)[0]) for k in range(10)]
         assert np.allclose(q[rows], tgt[:, :29], atol=1e-6)
         assert np.allclose(dq[rows], tgt[:, 29:58], atol=1e-6)
+
+
+def test_streamer_always_extends_the_window():
+    """A chunk ending at or before the previous end makes the runner reset playback + heading."""
+    s = Z.PoseStreamer.__new__(Z.PoseStreamer)
+    sent = []
+    s.sock = type("S", (), {"send": lambda self, m: sent.append(Z.unpack(m)[1]["frame_index"])})()
+    s.sent, s.last_end = 0, None
+    plan = _plan(50)
+    q0 = np.zeros(36); q0[3] = 1
+    s.send_plan(plan, 100, q0, np.zeros(29), 100)
+    s.send_plan(_plan(10), 110, q0, np.zeros(29), 110)  # short plan would end earlier
+    assert sent[1][-1] > sent[0][-1]

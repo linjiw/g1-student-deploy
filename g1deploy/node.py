@@ -4,20 +4,24 @@
 This is the process that runs next to the SONIC C++ runner, in the MuJoCo rehearsal and on the robot:
 
   inputs   rt/lowstate (DDS: 29 joints, pelvis IMU)          via unitree_sdk2py
-           odometry: rt/odostate (DDS, sim ground truth) | `--odom zmq` (LIO adapter, docs/HARDWARE.md)
+           odometry: rt/odostate (DDS, sim ground truth) | `--odom zmq` (LIO bridge, docs/HARDWARE.md)
            cloud: ZMQ SUB topic `cloud` (points [N,3] in the odometry frame, origin [3], stamp)
   output   ZMQ PUB :5556 topic `pose`, SONIC protocol v1 (g1deploy/zmq_stream.py)
   events   JSON lines on stdout ({"event": ...}); `estop` asks the operator/orchestrator to stop the runner
 
-Loop at 50 Hz (tick = the stream's frame_index):
-  history <- odometry pose + joints;  cloud -> CloudMemory (self filter, label-free layers)
-  every replan_ticks, up to `inflight` planner jobs (one FlowPlanner per worker thread), each planned
-  from the predicted state at its landing tick (g1deploy/latency.py) and streamed from that tick on.
-Phases: WAIT (no stream) -> PRESCAN (fill memory while standing) -> RUN -> ARRIVED | STOPPED.
+Threads / processes (the first rehearsals showed one Python process cannot keep a 50 Hz loop while
+planning and fusing clouds; the GIL starved the loop for up to 1.1 s):
+  main thread        50 Hz: history (resampled at exact 20 ms steps from timestamped DDS samples),
+                     supervisor, plan requests, streaming
+  perception thread  cloud -> CloudMemory (self filter + carving, ~15 ms per cloud)
+  planner processes  `--inflight` workers, each its own FlowPlanner; a job carries the history, a route
+                     copy and a snapshot of the memory layers; plans are predictively anchored at their
+                     landing tick (g1deploy/latency.py)
+Phases: WAIT -> PRESCAN (fill memory while standing) -> RUN -> ARRIVED | STOPPED.
 
 Safety supervisor (never relaxes): tilt > --tilt-estop -> estop; state/odometry stale > 0.5 s -> estop;
-cloud stale > --cloud-timeout -> no new plans (the runner holds the last frames); planned pelvis
-height / speed / finiteness checks reject a plan (the previous one keeps playing).
+cloud stale > --cloud-timeout -> settle to stand; non-finite / out-of-range plans are rejected (the
+previous plan keeps playing); reference joint velocities are clipped to --max-joint-vel.
 """
 
 from __future__ import annotations
@@ -26,10 +30,11 @@ import argparse
 import copy
 import json
 import math
+import multiprocessing as mp
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -54,8 +59,9 @@ def quat_tilt(q):
     return math.acos(max(-1.0, min(1.0, 1 - 2 * (x * x + y * y))))
 
 
+# ---------------------------------------------------------------------------------------------- inputs
 class DdsState:
-    """Latest rt/lowstate + odometry snapshot (DDS callbacks run on the SDK's threads)."""
+    """rt/lowstate + odometry, kept as a 2 s ring of timestamped full-state samples."""
 
     def __init__(self, iface="lo", domain=0, odom="dds"):
         from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
@@ -64,9 +70,10 @@ class DdsState:
         ChannelFactoryInitialize(domain, iface)
         self.lock = threading.Lock()
         self.low, self.odo, self.t_low, self.t_odo = None, None, -1.0, -1.0
+        self.ring = deque(maxlen=1000)  # (t, qpos36, dq29)
         self.sub_low = ChannelSubscriber("rt/lowstate", LowState_)
         self.sub_low.Init(self._on_low, 1)
-        if odom == "dds":
+        if odom == "dds":  # "zmq"/"none": odometry arrives through set_odometry()
             self.sub_odo = ChannelSubscriber("rt/odostate", OdoState_)
             self.sub_odo.Init(self._on_odo, 1)
 
@@ -75,8 +82,11 @@ class DdsState:
         dq = np.array([msg.motor_state[i].dq for i in range(29)])
         imu = np.array(msg.imu_state.quaternion, dtype=float)  # w x y z
         gyro = np.array(msg.imu_state.gyroscope, dtype=float)
+        now = time.monotonic()
         with self.lock:
-            self.low, self.t_low = (q, dq, imu, gyro), time.monotonic()
+            self.low, self.t_low = (q, dq, imu, gyro), now
+            if self.odo is not None:
+                self.ring.append((now, np.r_[self.odo[0], self.odo[1], q], dq))
 
     def _on_odo(self, msg):
         with self.lock:
@@ -86,7 +96,7 @@ class DdsState:
             self.t_odo = time.monotonic()
 
     def set_odometry(self, pos, quat_wxyz, lin_w, ang_w):
-        """External odometry (LIO adapter) entry point."""
+        """External odometry (LIO bridge) entry point."""
         with self.lock:
             self.odo, self.t_odo = (np.asarray(pos), np.asarray(quat_wxyz), np.asarray(lin_w), np.asarray(ang_w)), time.monotonic()
 
@@ -98,6 +108,50 @@ class DdsState:
             now = time.monotonic()
             return dict(qpos=np.r_[pos, oq, q], dq=dq, imu=imu, gyro=gyro, lin_w=lin, ang_w=ang,
                         age_low=now - self.t_low, age_odo=now - self.t_odo)
+
+    def history(self, t_end, n):
+        """n world qpos frames at exactly 20 ms spacing ending at t_end (linear in time, quats renormalised)."""
+        with self.lock:
+            if len(self.ring) < 2:
+                return None
+            ts = np.array([r[0] for r in self.ring])
+            qs = np.stack([r[1] for r in self.ring])
+        out = []
+        for k in range(n):
+            t = t_end - (n - 1 - k) * DT
+            j = int(np.clip(np.searchsorted(ts, t), 1, len(ts) - 1))
+            a = float(np.clip((t - ts[j - 1]) / max(ts[j] - ts[j - 1], 1e-6), 0.0, 1.0))
+            q0, q1 = qs[j - 1], qs[j]
+            if np.dot(q0[3:7], q1[3:7]) < 0:
+                q1 = q1.copy()
+                q1[3:7] *= -1
+            q = (1 - a) * q0 + a * q1
+            q[3:7] /= np.linalg.norm(q[3:7])
+            out.append(q.astype(np.float32))
+        return out
+
+
+class OdomInput:
+    """ZMQ `odom` topic from the LIO bridge (g1deploy/adapters/ros2_lio_bridge.py) -> DdsState.set_odometry."""
+
+    def __init__(self, state, connect="tcp://localhost:5561"):
+        import zmq
+
+        self.state = state
+        self.sock = zmq.Context.instance().socket(zmq.SUB)
+        self.sock.setsockopt(zmq.CONFLATE, 1)
+        self.sock.setsockopt(zmq.SUBSCRIBE, b"odom")
+        self.sock.connect(connect)
+
+    def poll(self):
+        import zmq
+
+        try:
+            msg = self.sock.recv(zmq.NOBLOCK)
+        except zmq.Again:
+            return
+        _, f = unpack(msg, topic=b"odom")
+        self.state.set_odometry(f["pos"], f["quat_wxyz"], f["lin_w"], f["ang_w"])
 
 
 class CloudInput:
@@ -124,32 +178,121 @@ class CloudInput:
             out.append((f["points"].astype(np.float64), f["origin"], float(f["stamp"][0])))
 
 
-def frozen_memory(memory):
-    snap = copy.copy(memory)
-    snap.support, snap.ceiling = memory.support.copy(), memory.ceiling.copy()
-    snap.pending = []
-    return snap
+# ------------------------------------------------------------------------------------------ planners
+def memory_view(memory):
+    """Picklable snapshot of the memory layers with the parent class's ego_map()."""
+    flow = bundle.load_flow()
+    view = flow.sensor_map.SensorMapMemory.__new__(flow.sensor_map.SensorMapMemory)
+    view.support, view.ceiling = memory.support.copy(), memory.ceiling.copy()
+    view.lo, view.res, view.n = memory.lo.copy(), memory.res, memory.n
+    return view
 
 
+def route_copy(route):
+    r = copy.copy(route)
+    if hasattr(r, "memory"):
+        r.memory = None
+    return r
+
+
+def _worker(conn, pdict, episode, seed):
+    import os
+
+    os.environ.setdefault("OMP_NUM_THREADS", "4")
+    import torch
+
+    torch.set_num_threads(4)
+    flow = bundle.load_flow()
+    from sim.lockstep import make_goal_fn
+
+    planner = flow.planner.FlowPlanner(flow.planner.PlannerConfig(**dict(pdict, seed=seed)))
+    pc = planner.cfg
+    sm, cb = flow.sensor_map, flow.callback
+    conn.send("ready")
+    while True:
+        job = conn.recv()
+        if job is None:
+            break
+        hist, route, view = job["hist"], job["route"], job["memory"]
+        t0 = time.monotonic()
+        sel = sm.HeightFieldSelector(view, planner.certifier.tree, planner.certifier.bodies, planner.shapes)
+
+        def map_fn(xy, yaw):
+            m, _ = view.ego_map(xy, yaw, pc.datum_offset_m, pc.support_clip_m or 0.8)
+            return m
+
+        guide = sm.memory_boxes(view, grow_overhead_m=pc.guide_grow_overhead_m) if pc.guide_w > 0 else None
+        goal_fn = make_goal_fn(route, episode["goal_lookahead_m"], episode["goal_heading"], episode["steer_lookahead_m"],
+                               None, cb.goal_vector, cb.route_goal_heading)
+        try:
+            plan = planner.plan(np.asarray(hist), [], goal_fn, map_fn, sel, prev=None, guide_boxes=guide)
+            out = {k: plan[k] for k in ("qpos", "rotation", "joint_velocity", "rule", "chosen_clearance_m")}
+        except Exception as exc:  # reported, never fatal to the node
+            out = {"error": f"{type(exc).__name__}: {exc}"}
+        conn.send((job["id"], out, time.monotonic() - t0))
+
+
+class PlannerPool:
+    """`n` planner processes (spawn); each holds its own CUDA context (~0.4 GB) and model copy."""
+
+    def __init__(self, n, pdict, episode, seed):
+        ctx = mp.get_context("spawn")
+        self.workers = []
+        for i in range(n):
+            a, b = ctx.Pipe()
+            p = ctx.Process(target=_worker, args=(b, pdict, episode, seed + i), daemon=True)
+            p.start()
+            self.workers.append({"proc": p, "conn": a, "busy": None})
+        for w in self.workers:
+            if w["conn"].recv() != "ready":
+                raise RuntimeError("planner worker failed to start")
+
+    def free(self):
+        return [w for w in self.workers if w["busy"] is None]
+
+    def submit(self, w, job):
+        w["busy"] = job["id"]
+        w["conn"].send(job)
+
+    def poll(self):
+        done = []
+        for w in self.workers:
+            if w["busy"] is not None and w["conn"].poll():
+                jid, out, lat = w["conn"].recv()
+                w["busy"] = None
+                done.append((jid, out, lat))
+        return done
+
+    def close(self):
+        for w in self.workers:
+            try:
+                w["conn"].send(None)
+            except Exception:
+                pass
+        for w in self.workers:
+            w["proc"].join(timeout=2)
+            if w["proc"].is_alive():
+                w["proc"].kill()
+
+
+# ---------------------------------------------------------------------------------------------- node
 class StudentNode:
     def __init__(self, args):
         self.args = args
         self.flow = bundle.load_flow()
         cfg = bundle.student_config()
-        ep = cfg["episode"]
-        self.replan, self.lookahead = int(ep["replan_ticks"]), float(ep["goal_lookahead_m"])
-        self.heading_mode, self.steer = ep["goal_heading"], float(ep["steer_lookahead_m"])
+        self.episode = dict(cfg["episode"])
+        if args.goal_lookahead:
+            self.episode["goal_lookahead_m"] = args.goal_lookahead
+        self.replan = int(self.episode["replan_ticks"])
         variant = cfg["route_variants"][args.route]
         self.route_cfg = variant.get("route", {})
-        pdict = dict(cfg["planner"], device=args.device)
-        self.pcfg = self.flow.planner.PlannerConfig(**pdict)
-        self.planners = [self.flow.planner.FlowPlanner(self.flow.planner.PlannerConfig(**dict(pdict, seed=args.seed + i)))
-                         for i in range(args.inflight)]
-        self.free_planners = list(self.planners)
+        self.pdict = dict(cfg["planner"], device=args.device)
+        self.pcfg = self.flow.planner.PlannerConfig(**self.pdict)
         contract = json.loads((bundle.ROOT / "config/sonic_model_contract.json").read_text())
         self.limits = np.asarray([j["range_rad"] for j in contract["joints"] if j["type"] != "free"])
-        self.pool = ThreadPoolExecutor(max_workers=args.inflight)
-        self.jobs = []  # (future, planner, anchor_tick, anchor_q, anchor_dq, request_tick, t_request)
+        self.jobs = {}  # id -> (anchor_tick, anchor_q, anchor_dq, request_tick, first)
+        self.next_id = 0
         self.latency_est = args.latency_guess_s
         self.latencies = []
         self.goal = np.asarray(args.goal, dtype=float)
@@ -161,60 +304,107 @@ class StudentNode:
         self.stream_end = -1
         self.log = []
         self.stop_flag = threading.Event()
+        self.mem_lock = threading.Lock()
+        self.overruns, self.skipped, self.max_lag_s = 0, 0, 0.0
+        self.pool = PlannerPool(args.inflight, self.pdict, self.episode, args.seed)
 
-    # -- perception ------------------------------------------------------------------------
+    # -- perception ---------------------------------------------------------------------------
     def make_memory(self, xy):
         from g1deploy.perception.cloud_memory import CloudMemory
 
         self.memory = CloudMemory(xy, rng=np.random.default_rng(self.args.seed), **dict(self.pcfg.sensor))
         self.memory.latency = 0.0  # real latency is already in the data; fuse on arrival
 
+    def perception_loop(self, cloud, state, t0):
+        """Clouds -> memory, and the route refresh (A* on the memory grid, up to ~0.2 s) - both off the 50 Hz loop."""
+        while not self.stop_flag.is_set():
+            got = cloud.poll()
+            snap = state.snapshot()
+            if got and snap is not None:
+                with self.mem_lock:
+                    for pts, origin, stamp in got:
+                        self.memory.add_cloud(0.0, pts, origin, snap["qpos"])
+                    self.memory.step(time.monotonic() - t0)
+            if snap is not None and self.phase in ("PRESCAN", "RUN"):
+                xy, t = np.asarray(snap["qpos"][:2], dtype=float), time.monotonic() - t0
+                if not hasattr(self, "route"):
+                    if self.args.route == "sensor":
+                        with self.mem_lock:
+                            r = self.flow.route.SensorRoute(xy, self.goal, self.memory, **self.route_cfg)
+                            r.refresh(xy, t, force=True)
+                    else:
+                        boxes = json.loads(Path(self.args.boxes).read_text()) if self.args.boxes else []
+                        r = self.flow.route.Route(xy, self.goal, boxes, **self.route_cfg)
+                    self.route = r
+                elif self.args.route == "sensor" and t - self.route.last_refresh >= self.route.period_s:
+                    with self.mem_lock:
+                        fresh = copy.copy(self.route)
+                        fresh.refresh(xy, t, force=True)  # assigns new arrays on the copy; readers keep theirs
+                    self.route = fresh
+            time.sleep(0.005)
+
     def route_now(self, xy, t):
-        """A frozen copy of the route for one planner job (refresh swaps in new arrays)."""
-        if not hasattr(self, "route"):
-            if self.args.route == "sensor":
-                self.route = self.flow.route.SensorRoute(xy, self.goal, self.memory, **self.route_cfg)
-                self.route.refresh(xy, t, force=True)
-            else:
-                boxes = json.loads(Path(self.args.boxes).read_text()) if self.args.boxes else []
-                self.route = self.flow.route.Route(xy, self.goal, boxes, **self.route_cfg)
-        elif self.args.route == "sensor":
-            self.route.refresh(xy, t)
-        return copy.copy(self.route)
+        return route_copy(self.route)
 
-    def goal_fn_for(self, route):
-        from sim.lockstep import make_goal_fn
-
-        cb = self.flow.callback
-        return make_goal_fn(route, self.lookahead, self.heading_mode, self.steer, None, cb.goal_vector,
-                            cb.route_goal_heading)
-
-    # -- planning ------------------------------------------------------------------------------
-    def _plan_job(self, planner, hist, route, memory):
-        sm = self.flow.sensor_map
-        sel = sm.HeightFieldSelector(memory, planner.certifier.tree, planner.certifier.bodies, planner.shapes)
-
-        def map_fn(xy, yaw):
-            m, _ = memory.ego_map(xy, yaw, self.pcfg.datum_offset_m, self.pcfg.support_clip_m or 0.8)
-            return m
-
-        guide = sm.memory_boxes(memory, grow_overhead_m=self.pcfg.guide_grow_overhead_m) if self.pcfg.guide_w > 0 else None
-        t0 = time.monotonic()
-        plan = planner.plan(np.asarray(hist), [], self.goal_fn_for(route), map_fn, sel, prev=None, guide_boxes=guide)
-        return plan, time.monotonic() - t0
-
-    def request(self, now_tick):
-        planner = self.free_planners.pop(0)
-        lead = 0 if self.active is None else int(math.ceil(self.latency_est / DT)) + 1
-        hist = self.history if self.active is None or lead == 0 else predicted_history(
-            self.history, self.active, now_tick, lead, planner.history + 2)
-        anchor_tick = now_tick + lead
+    # -- planning --------------------------------------------------------------------------------
+    def request(self, now_tick, worker):
+        first = self.active is None
+        lead = 0 if first else int(math.ceil(self.latency_est / DT)) + 1
+        hist = self.history if lead == 0 else predicted_history(self.history, self.active, now_tick, lead, len(self.history))
         route = self.route_now(np.asarray(self.history[-1][:2], dtype=float), now_tick * DT)
-        fut = self.pool.submit(self._plan_job, planner, list(hist), route, frozen_memory(self.memory))
-        anchor_q = np.asarray(hist[-1], dtype=np.float64)
-        anchor_dq = self.flow.feed.finite_difference_dq(hist)
-        self.jobs.append((fut, planner, anchor_tick, anchor_q, anchor_dq, now_tick, time.monotonic()))
+        with self.mem_lock:
+            view = memory_view(self.memory)
+        jid = self.next_id
+        self.next_id += 1
+        self.pool.submit(worker, {"id": jid, "hist": [np.asarray(h) for h in hist], "route": route, "memory": view})
+        self.jobs[jid] = (now_tick + lead, np.asarray(hist[-1], dtype=np.float64),
+                          self.flow.feed.finite_difference_dq(hist), now_tick, first)
         self.last_request = now_tick
+
+    def sane(self, plan):
+        q = plan["qpos"]
+        if not np.isfinite(q).all() or not np.isfinite(plan["joint_velocity"]).all():
+            return "nonfinite"
+        if q[:, 2].min() < self.args.min_pelvis_z or q[:, 2].max() > 1.0:
+            return f"pelvis_z {q[:, 2].min():.2f}..{q[:, 2].max():.2f}"
+        # Planned pelvis xy sways (0.2 s-window peaks 1.7-2.1 m/s in Isaac-evaluated plans) and SONIC does not
+        # read root position; bound the plan's mean speed instead.
+        v = float(np.linalg.norm(q[-1, :2] - q[0, :2]) / (DT * (len(q) - 1)))
+        if v > self.args.max_speed:
+            return f"mean speed {v:.2f}"
+        return None
+
+    def collect(self, now_tick):
+        for jid, out, lat in self.pool.poll():
+            if jid not in self.jobs:
+                continue  # discarded (stand issued meanwhile)
+            anchor_tick, anchor_q, anchor_dq, req_tick, first = self.jobs.pop(jid)
+            if "error" in out:
+                emit("plan_error", error=out["error"])
+                continue
+            plan = out
+            if first:
+                anchor_tick = now_tick  # computed while standing still: start it when it lands
+            self.latencies.append(lat)
+            self.latency_est = float(np.quantile(self.latencies[-8:], 0.9))
+            reason = self.sane(plan)
+            self.log.append(dict(tick=now_tick, req_tick=req_tick, anchor_tick=anchor_tick, latency_s=lat,
+                                 late_ticks=now_tick - anchor_tick, rule=plan["rule"], rejected=reason))
+            if reason or anchor_tick <= self.last_streamed_anchor:
+                emit("plan_dropped", reason=reason or "stale", anchor_tick=anchor_tick)
+                continue
+            peak = float(np.abs(plan["joint_velocity"]).max())
+            if peak > self.args.max_joint_vel:
+                plan = dict(plan, joint_velocity=np.clip(plan["joint_velocity"], -self.args.max_joint_vel,
+                                                         self.args.max_joint_vel))
+                emit("dq_clipped", max_rad_s=peak, anchor_tick=anchor_tick)
+            self.active = (plan, anchor_tick, anchor_q, anchor_dq)
+            self.last_streamed_anchor = anchor_tick
+            if self.streamer is not None:
+                start = max(anchor_tick, now_tick - 2)  # never before the runner's window start (playback - 5)
+                self.stream_end = self.streamer.send_plan(plan, anchor_tick, anchor_q, anchor_dq, start, self.limits)[1]
+            if first:
+                emit("run", tick=now_tick, first_plan_s=lat)
 
     def stand(self, now_tick, reason, settle_s=1.0, hold_s=3.0):
         """Stream a settle-to-stand chunk from the measured pose: joints -> SONIC default pose over
@@ -230,69 +420,36 @@ class StudentNode:
         rot = np.array([[math.cos(yaw), -math.sin(yaw), 0], [math.sin(yaw), math.cos(yaw), 0], [0, 0, 1]])
         plan = {"qpos": frames, "rotation": np.repeat(rot[None], n, 0),
                 "joint_velocity": np.vstack([np.zeros((1, 29)), np.diff(frames[:, 7:], axis=0) / DT])}
-        self.jobs = []  # results of in-flight plans are discarded from now on
+        self.jobs = {}  # results of in-flight plans are discarded from now on
         self.active = (plan, now_tick, q, np.zeros(29))
         self.last_streamed_anchor = now_tick + 10**6
         if self.streamer is not None:
             self.stream_end = self.streamer.send_plan(plan, now_tick, q, np.zeros(29), now_tick, self.limits)[1]
         emit("stand", reason=reason, tick=now_tick)
 
-    def sane(self, plan):
-        q = plan["qpos"]
-        if not np.isfinite(q).all() or not np.isfinite(plan["joint_velocity"]).all():
-            return "nonfinite"
-        if q[:, 2].min() < self.args.min_pelvis_z or q[:, 2].max() > 1.0:
-            return f"pelvis_z {q[:, 2].min():.2f}..{q[:, 2].max():.2f}"
-        # Planned pelvis xy sways (0.2 s-window peaks 1.7-2.1 m/s in Isaac-evaluated plans) and SONIC does not
-        # read root position; bound the plan's mean speed and the joint velocities SONIC will be asked to track.
-        v = float(np.linalg.norm(q[-1, :2] - q[0, :2]) / (DT * (len(q) - 1)))
-        if v > self.args.max_speed:
-            return f"mean speed {v:.2f}"
-        return None
-
-    def collect(self, now_tick):
-        keep = []
-        for job in self.jobs:
-            fut, planner, anchor_tick, anchor_q, anchor_dq, req_tick, t_req = job
-            if not fut.done():
-                keep.append(job)
-                continue
-            self.free_planners.append(planner)
-            plan, lat = fut.result()
-            self.latencies.append(lat)
-            self.latency_est = float(np.quantile(self.latencies[-8:], 0.9))
-            reason = self.sane(plan)
-            late = now_tick - anchor_tick
-            self.log.append(dict(tick=now_tick, req_tick=req_tick, anchor_tick=anchor_tick, latency_s=lat,
-                                 late_ticks=late, rule=plan["rule"], rejected=reason))
-            if reason or anchor_tick <= self.last_streamed_anchor:
-                emit("plan_dropped", reason=reason or "stale", anchor_tick=anchor_tick)
-                continue
-            clipped = float(np.abs(plan["joint_velocity"]).max())
-            if clipped > self.args.max_joint_vel:
-                plan = dict(plan, joint_velocity=np.clip(plan["joint_velocity"], -self.args.max_joint_vel,
-                                                         self.args.max_joint_vel))
-                emit("dq_clipped", max_rad_s=clipped, anchor_tick=anchor_tick)
-            self.active = (plan, anchor_tick, anchor_q, anchor_dq)
-            self.last_streamed_anchor = anchor_tick
-            if self.streamer is not None:
-                start = max(anchor_tick, now_tick - 2)  # never before the runner's window start (playback - 5)
-                s0, s1 = self.streamer.send_plan(plan, anchor_tick, anchor_q, anchor_dq, start, self.limits)
-                self.stream_end = s1
-        self.jobs = keep
-
     # -- main loop -------------------------------------------------------------------------------
-    def run(self, state: DdsState, cloud: CloudInput, start_event: threading.Event | None = None):
+    def run(self, state: DdsState, cloud: CloudInput, start_event: threading.Event | None = None, odom=None):
         a = self.args
         t0 = time.monotonic()
-        prescan_until, last_hist = None, None
+        prescan_until = None
         emit("node_up", inflight=a.inflight, route=a.route, goal=self.goal.tolist())
         while not self.stop_flag.is_set():
             tick_t = t0 + self.tick * DT
             if (rest := tick_t - time.monotonic()) > 0:
                 time.sleep(rest)
+            lag = time.monotonic() - tick_t
+            self.max_lag_s = max(self.max_lag_s, lag)
+            if lag > DT:
+                self.overruns += 1
+                if lag > 3 * DT:  # fell behind: jump to the wall clock (history is resampled by time anyway)
+                    skip = int(lag / DT)
+                    self.tick += skip
+                    self.skipped += skip
+            if odom is not None:
+                odom.poll()
             snap = state.snapshot()
-            if snap is None:
+            hist = state.history(time.monotonic(), 6) if snap is not None else None
+            if snap is None or hist is None:
                 self.tick += 1
                 continue
             q = snap["qpos"]
@@ -304,43 +461,33 @@ class StudentNode:
                 emit("estop", reason="tilt", tilt=tilt)
                 self.phase = "STOPPED"
                 return "estop_tilt"
-            if last_hist is None:
-                self.history = self.flow.callback.backfill_history(q, snap["dq"], snap["lin_w"], snap["ang_w"], 4)
-            self.history.append(q.astype(np.float32))
-            self.history = self.history[-8:]
-            last_hist = q
+            self.history = hist
             if not hasattr(self, "memory"):
                 self.make_memory(q[:2])
-            for pts, origin, stamp in cloud.poll():
-                self.memory.add_cloud(0.0, pts, origin, q)
-            self.memory.step(self.tick * DT)
+                threading.Thread(target=self.perception_loop, args=(cloud, state, t0), daemon=True).start()
             cloud_age = time.monotonic() - cloud.last if cloud.last > 0 else 1e9
 
             if self.phase == "WAIT" and (start_event is None or start_event.is_set()):
                 self.phase, prescan_until = "PRESCAN", self.tick + int(a.prescan_s / DT)
                 emit("prescan")
-            elif self.phase == "PRESCAN" and self.tick >= prescan_until and cloud_age < a.cloud_timeout:
+            elif (self.phase == "PRESCAN" and self.tick >= prescan_until and cloud_age < a.cloud_timeout
+                  and hasattr(self, "route")):
                 self.phase = "RUN"
-                self.request(self.tick)
-                self.jobs[0][0].result()  # first plan synchronously, while standing
-                self.collect(self.tick)
-                emit("run", tick=self.tick, first_plan_s=self.log[-1]["latency_s"] if self.log else None)
+                self.request(self.tick, self.pool.free()[0])
             elif self.phase == "RUN":
                 self.collect(self.tick)
                 dist = float(np.linalg.norm(q[:2] - self.goal))
-                if dist <= a.goal_radius:
+                if dist <= a.goal_radius and self.active is not None:
                     self.phase = "ARRIVED"
                     emit("arrived", tick=self.tick, dist=dist)
                     self.stand(self.tick, "arrived")
                 elif cloud_age > a.cloud_timeout:
                     self.phase = "STOPPED"
                     self.stand(self.tick, f"cloud stale {cloud_age:.2f}s")
-                elif self.free_planners and self.tick - self.last_request >= self.replan:
-                    self.request(self.tick)
-                if self.stream_end >= 0 and self.stream_end - self.tick < LOOKAHEAD_FRAMES:
+                elif self.active is not None and self.pool.free() and self.tick - self.last_request >= self.replan:
+                    self.request(self.tick, self.pool.free()[0])
+                if self.active is not None and 0 <= self.stream_end - self.tick < LOOKAHEAD_FRAMES:
                     emit("stall_risk", ahead=self.stream_end - self.tick)
-            if self.phase == "ARRIVED" and self.tick % 50 == 0:
-                pass  # the last plan ends standing near the goal; the orchestrator ends the episode
             if a.max_ticks and self.tick >= a.max_ticks:
                 return "max_ticks"
             self.tick += 1
@@ -352,13 +499,18 @@ def parse(argv=None):
     ap.add_argument("--goal", type=float, nargs=2, required=True, help="goal xy in the odometry frame")
     ap.add_argument("--iface", default="lo")
     ap.add_argument("--domain", type=int, default=0)
-    ap.add_argument("--odom", choices=("dds", "zmq"), default="dds")
+    ap.add_argument("--odom", choices=("dds", "zmq"), default="dds",
+                    help="dds: rt/odostate (simulator ground truth); zmq: LIO bridge topic `odom`")
+    ap.add_argument("--odom-connect", default="tcp://localhost:5561")
     ap.add_argument("--cloud", default="tcp://localhost:5560")
     ap.add_argument("--stream-bind", default="tcp://*:5556")
     ap.add_argument("--route", choices=("sensor", "privileged"), default="sensor")
     ap.add_argument("--boxes", default=None, help="JSON list of boxes for --route privileged (a measured course)")
+    ap.add_argument("--goal-lookahead", type=float, default=None, help="override (sets walking speed; 1.5 evaluated)")
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--inflight", type=int, default=2)
+    ap.add_argument("--inflight", type=int, default=1,
+                    help="2+ is harmful: a second in-flight plan is predicted from the landed plan, not the one "
+                         "running in between (G4: 32/98 vs 79/98)")
     ap.add_argument("--latency-guess-s", type=float, default=0.3)
     ap.add_argument("--prescan-s", type=float, default=0.5)
     ap.add_argument("--tilt-estop", type=float, default=0.75)
@@ -378,6 +530,8 @@ def parse(argv=None):
 
 
 def main(argv=None):
+    import signal
+
     args = parse(argv)
     node = StudentNode(args)
     state = DdsState(args.iface, args.domain, args.odom)
@@ -392,18 +546,20 @@ def main(argv=None):
         threading.Thread(target=wait_file, daemon=True).start()
     else:
         start.set()
-    import signal
-
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: node.stop_flag.set())
     result = "interrupted"
     try:
-        result = node.run(state, cloud, start)
+        result = node.run(state, cloud, start, OdomInput(state, args.odom_connect) if args.odom == "zmq" else None)
     finally:
-        node.pool.shutdown(wait=False, cancel_futures=True)
-        emit("node_exit", result=result, plans=len(node.log))
+        node.stop_flag.set()
+        emit("node_exit", result=result, plans=len(node.log), overruns=node.overruns, skipped=node.skipped,
+             ticks=node.tick, max_lag_s=round(node.max_lag_s, 4))
         if args.log:
-            Path(args.log).write_text(json.dumps(dict(result=result, plans=node.log), indent=1, default=float) + "\n")
+            Path(args.log).write_text(json.dumps(dict(result=result, plans=node.log, overruns=node.overruns,
+                                                      skipped=node.skipped, ticks=node.tick, max_lag_s=node.max_lag_s),
+                                                 indent=1, default=float) + "\n")
+        node.pool.close()
         if node.streamer is not None:
             node.streamer.close()
     return 0
