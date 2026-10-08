@@ -34,8 +34,15 @@ Status: simulation only. Nothing has run on a robot. See [docs/DESIGN.md](docs/D
 ## Quick start
 
 ```bash
-source env.sh
-.venv/bin/python -m pytest -q                                   # 15 tests
-.venv/bin/python tools/eval_panel.py --name g3-base --workers 3 # student in MuJoCo vs Isaac, 98 episodes
-$PYTHON sim/realtime/rehearse.py --task ~/flow/artifacts/panels/test-v1/empty-100/task.json --out runs/rt/demo
+./g1 test                                  # 22 tests (bundle, SONIC parity, stream, perception, node safety)
+./g1 sim --layout beams2-100               # operator console + MuJoCo G1 + C++ SONIC runner + student node
+                                           # keys: s start SONIC, g GO, h stand, t takeover, n goal, o E-STOP, q quit
+./g1 robot --iface eth0 --goal 3 0 --odom leg --mount-calib mount.json      # the same chain on the G1
+./g1 check | calibrate | bench | replay    # robot checks, lidar mount calibration, planner latency, stream replay
 ```
+
+Guides: [docs/OPERATOR_GUIDE.md](docs/OPERATOR_GUIDE.md) (setup, keys, procedure, logs) ·
+[docs/HARDWARE.md](docs/HARDWARE.md) (bring-up ladder) · [docs/G1_PERCEPTION.md](docs/G1_PERCEPTION.md) (the robot's
+lidar, odometry, calibration) · [docs/READINESS.md](docs/READINESS.md) (what is established, what is not) ·
+[docs/RUNBOOK.md](docs/RUNBOOK.md) (simulation gates and results).
+Video: `runs/video/g1_deploy_tutorial.mp4` (built by `tools/make_tutorial.py` from recorded `g1 sim` sessions).

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# g1 — operator console and tools for the student planner on the G1. See docs/OPERATOR_GUIDE.md.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$HERE/env.sh" >/dev/null 2>&1
+exec "$HERE/.venv/bin/python" "$HERE/g1deploy/console.py" "$@"

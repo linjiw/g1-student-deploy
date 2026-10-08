@@ -340,6 +340,40 @@ class PlannerPool:
                 w["proc"].kill()
 
 
+# ---------------------------------------------------------------------------------------------- control
+class ControlServer:
+    """Operator commands over ZMQ REP (`--control`, default tcp://*:5562), JSON in / JSON out:
+      {"cmd": "status"}                       -> live status (phase, goal distance, tilt, latency, ...)
+      {"cmd": "go"}                           -> start (or restart after a stand/arrival) towards the goal
+      {"cmd": "stand"}                        -> settle to stand (deferred near ceilings)
+      {"cmd": "goal", "ahead": x, "left": y}  -> new goal relative to the current pose (then "go")
+      {"cmd": "quit"}                         -> stand, then exit
+    Used by the operator console (g1deploy/console.py) in simulation and on the robot."""
+
+    def __init__(self, node, bind):
+        import zmq
+
+        self.node = node
+        self.sock = zmq.Context.instance().socket(zmq.REP)
+        self.sock.bind(bind)
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def loop(self):
+        while not self.node.stop_flag.is_set():
+            if not self.sock.poll(100):
+                continue
+            try:
+                msg = json.loads(self.sock.recv())
+            except Exception as exc:  # malformed request: answer, never die
+                self.sock.send_string(json.dumps({"ok": False, "error": str(exc)}))
+                continue
+            if msg.get("cmd") == "status":
+                self.sock.send_string(json.dumps(self.node.status, default=float))
+            else:
+                self.node.commands.append(msg)
+                self.sock.send_string(json.dumps({"ok": True, "queued": msg.get("cmd")}))
+
+
 # ---------------------------------------------------------------------------------------------- node
 class StudentNode:
     def __init__(self, args):
@@ -371,6 +405,8 @@ class StudentNode:
         self.stop_flag = threading.Event()
         self.mem_lock = threading.Lock()
         self.overruns, self.skipped, self.max_lag_s = 0, 0, 0.0
+        self.commands, self.status = [], {"phase": "BOOT"}
+        self.go_event = threading.Event()
         self.pool = PlannerPool(args.inflight, self.pdict, self.episode, args.seed)
 
     # -- perception ---------------------------------------------------------------------------
@@ -542,11 +578,46 @@ class StudentNode:
         emit("stand", reason=reason, tick=now_tick)
 
     # -- main loop -------------------------------------------------------------------------------
+    def handle_commands(self, q, prescan_until):
+        """Operator commands (ControlServer). Returns the (possibly new) prescan deadline."""
+        while self.commands:
+            c = self.commands.pop(0)
+            cmd = c.get("cmd")
+            emit("command", cmd=cmd, args={k: v for k, v in c.items() if k != "cmd"})
+            if cmd == "go":
+                self.go_event.set()
+                if self.phase in ("ARRIVED", "STOPPED"):  # walk again from the stand
+                    self.phase, prescan_until = "PRESCAN", self.tick + int(self.args.prescan_s / DT)
+                    self.pending_stand, self.jobs = None, {}
+                    self.last_streamed_anchor = self.tick
+                    if self.streamer is not None:
+                        self.streamer.last_end = None  # after a takeover the runner starts a new stream window
+                    emit("prescan")
+            elif cmd == "stand" and self.phase in ("RUN", "PRESCAN"):
+                self.phase = "STOPPED"
+                if self.active is not None:
+                    self.stand(self.tick, "operator")
+            elif cmd == "goal":
+                w, x, y, z = q[3:7]
+                yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+                ahead, left = float(c.get("ahead", 0.0)), float(c.get("left", 0.0))
+                self.goal = q[:2] + np.array([math.cos(yaw) * ahead - math.sin(yaw) * left,
+                                              math.sin(yaw) * ahead + math.cos(yaw) * left])
+                if hasattr(self, "route"):
+                    del self.route  # re-planned from the memory on the next refresh
+                emit("goal", frame="current", goal_odom=self.goal.tolist())
+            elif cmd == "quit":
+                if self.active is not None and self.phase == "RUN":
+                    self.stand(self.tick, "quit")
+                self.commands_quit = True
+        return prescan_until
+
     def reset_run_state(self):
         """Everything one run accumulates; a restarted run (after a stop or stand) must not inherit it - e.g. a
         stand pushes last_streamed_anchor far ahead, which would reject every later plan as stale."""
         self.tick, self.phase, self.active, self.jobs = 0, "WAIT", None, {}
         self.pending_stand = None
+        self.commands_quit = False
         self.last_streamed_anchor, self.last_request, self.stream_end = -10**9, -10**9, -1
         if self.streamer is not None:
             self.streamer.last_end = None  # the runner resets playback on the new run's first chunk anyway
@@ -601,6 +672,17 @@ class StudentNode:
                                                     daemon=True)
                 self.perc_thread.start()
             cloud_age = time.monotonic() - cloud.last if cloud.last > 0 else 1e9
+            prescan_until = self.handle_commands(q, prescan_until)
+            if self.commands_quit:
+                return "quit"
+            self.status = dict(phase=self.phase, tick=self.tick, goal=self.goal.tolist(),
+                               goal_dist_m=float(np.linalg.norm(q[:2] - self.goal)), pelvis_z_m=float(q[2]),
+                               tilt_rad=float(tilt), xy=q[:2].tolist(), plans=len(self.log),
+                               latency_s=self.log[-1]["latency_s"] if self.log else None, latency_est_s=self.latency_est,
+                               cloud_age_s=float(cloud_age), lidar_frames=getattr(self.from_sensor, "stats", {}).get("frames"),
+                               overruns=self.overruns, rule=self.log[-1]["rule"] if self.log else None,
+                               stream_ahead=int(self.stream_end - self.tick) if self.stream_end >= 0 else None,
+                               standing=self.pending_stand is None and self.phase in ("ARRIVED", "STOPPED"))
 
             if self.phase == "WAIT" and (start_event is None or start_event.is_set()):
                 self.phase, prescan_until = "PRESCAN", self.tick + int(a.prescan_s / DT)
@@ -673,6 +755,8 @@ def parse(argv=None):
     ap.add_argument("--dry-run", action="store_true", help="plan but do not open the stream socket")
     ap.add_argument("--dump-memory", default=None, help="write the lidar memory layers + boxes here at exit (npz)")
     ap.add_argument("--start-file", default=None, help="wait until this file exists before the prescan")
+    ap.add_argument("--control", default="tcp://*:5562", help="operator command socket (ZMQ REP); '' disables")
+    ap.add_argument("--wait-go", action="store_true", help="do nothing until the operator sends 'go'")
     return ap.parse_args(argv)
 
 
@@ -698,8 +782,12 @@ def main(argv=None):
         node.goal = snap["qpos"][:2] + np.array([c * ahead - s_ * left, s_ * ahead + c * left])
         emit("goal", frame="start", goal_odom=node.goal.tolist())
     cloud = DdsCloudInput() if args.cloud == "dds" else CloudInput(args.cloud)
+    if args.control:
+        ControlServer(node, args.control)
     start = threading.Event()
-    if args.start_file:
+    if args.wait_go:
+        start = node.go_event
+    elif args.start_file:
         def wait_file():
             while not Path(args.start_file).exists():
                 time.sleep(0.05)
