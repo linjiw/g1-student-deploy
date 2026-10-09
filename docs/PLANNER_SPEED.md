@@ -79,6 +79,35 @@ Tests: `tests/test_fastplan.py`
 - plans from `graph` and `fused` against eager: same choice, rule and clearances;
 - cached velocity against `model.forward` < 1e-4 relative.
 
+## 2b. Reduced precision for the denoiser (tested 2026-10-09)
+
+`--planner-precision tf32|bf16` (node, console, lockstep, eval_panel; bench `--impl fused-tf32|fused-bf16`).
+- It applies only to the DiT forward: TF32 matmuls, or bf16 autocast with norms and softmax kept in fp32.
+- The guidance geometry stays fp32: FK, capsules, box distances and their gradient.
+- cuDNN convs already ran in TF32 in the evaluated planner, which is PyTorch's default.
+
+| | fp32 (default) | tf32 | bf16 |
+|---|---|---|---|
+| denoiser velocity error vs eager (relative, per step) | 3–5e-7 | 4–5e-4 | 4–7e-3 |
+| p50 / p95 per plan (37 recorded states, interleaved, loaded GPU; eager 0.377 / 0.425 s) | 0.119 / 0.167 s | 0.093 / 0.142 s | 0.083 / 0.125 s |
+| same candidate + rule as eager (same random state) | 37/37 | 34/37 | 34/37 |
+| plan difference vs eager, median / max | 1e-6 / 1.5e-5 | 1.5e-3 / 1.0 | 1.5e-2 / 1.6 |
+| realistic panel at 0.18 s (98 eps, Isaac 83) | 82 (`g4w-fused-real-lat018`) | 82 (`g4x-tf32-real-lat018`) | 85 (`g4x-bf16-real-lat018`) |
+| same per-episode outcome as fp32 | — | 88/98 (5 : 5) | 87/98 (4 : 7, p = 0.55) |
+
+**Reading.**
+- Both are genuinely different planners: they pick another candidate in ~1 of 12 plans and agree with fp32 on
+  87–88/98 episodes, where fused fp32 agrees with eager on 97/98.
+- Neither loses on the panel. bf16 is +3 (not significant); per family it gains on slalom and corridor and
+  loses 2 on beam.
+- They save 25–40 ms per plan (15–25 %). The latency curve is flat below 0.32 s, so that buys margin, not
+  success.
+
+**Decision.**
+- Keep fp32, the evaluated arithmetic, as the default.
+- bf16 is the validated fallback if the robot-day GPU is so loaded that `./g1 bench` p95 approaches 0.32 s.
+- One panel resolves only large differences (about ±5 episodes). Re-run a panel before making bf16 the default.
+
 ## 3. How to measure on any machine
 
 ```bash
@@ -96,7 +125,7 @@ So a faster planner gets earlier anchors without configuration.
 | lever | expected | why not (yet) |
 |---|---|---|
 | free the GPU (pause training on the deploy PC) | largest real-world effect; kernel time is ~25 ms of a fused plan | operational, not code: do it before robot runs |
-| TF32 / bf16 tensor cores for the DiT | ~2× on the model's matmuls | changes numerics at 1e-3: needs its own panel |
+| TF32 / bf16 tensor cores for the DiT | tested: see §2b | available as `--planner-precision`; default stays fp32 |
 | 6 ODE steps | −40 % sampler time; 81/98 at 0.28 s (`g4v-k16s6-lat028`) | a different planner; not needed at 0.17 s |
 | K = 8 | −40 % GPU work | loses: 70/98 at 0.32 s (`g4v-k8s10-lat032`) |
 | resample + stop pools in one batch | worst case −30 % | changes the order of random draws (statistically equal, not the same plans) |

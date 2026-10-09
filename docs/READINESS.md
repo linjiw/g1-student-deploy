@@ -56,6 +56,12 @@ planner (`--planner-impl fused`, g1deploy/fastplan.py) plans the same and measur
 - worst case (all three candidate pools unsafe, 4 % of plans): p95 0.38–0.59 s, vs 1.05–1.25 s eager;
 - end to end in the real-time rehearsal (node + C++ runner + DDS sim): p50 0.083 s, p95 0.12 s.
 
+Reduced precision for the denoiser (`--planner-precision`) was also tested on the realistic panel at 0.18 s:
+- TF32: 82/98, p95 0.142 s;
+- bf16: 85/98, p95 0.125 s;
+- fp32: 82/98, p95 0.167 s.
+
+Neither loses; fp32 stays the default and bf16 is the fallback for a heavily loaded GPU (docs/PLANNER_SPEED.md §2b).
 Configuration trade-offs are no longer needed. For reference: 6 ODE steps → 81/98 at 0.28 s; K 8 → 70/98 at 0.32 s
 (a loss); both → 80/98 at 0.24 s. Before robot runs, still keep the GPU free of training jobs and re-run
 `./g1 bench`.
