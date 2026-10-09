@@ -36,6 +36,7 @@ from . import bundle
 
 PAD_ROW = (1.0e4, 1.0e4, -1.0e4, 0.0, 0.1, 0.1, 0.1, 0.0, 0.0)  # far, finite, masked off
 BUCKETS = (8, 16, 32)  # guidance obstacles per graph; benchmark scenes have <= 7 (median 1)
+PRECISIONS = ("fp32", "tf32", "bf16")  # denoiser forward only; fp32 = the evaluated arithmetic
 MAX_PAIRS = 1536  # candidates x padded obstacles per graph; all graphs fused: < 1 GB in one shared pool
 
 
@@ -229,6 +230,18 @@ def make_planner(pcfg, fast=True, **kw):
     return fast_planner_class()(pcfg, **kw) if fast else _planner_module().FlowPlanner(pcfg)
 
 
+def build_planner(pcfg, impl="fused", precision="fp32", warm=True):
+    """`impl` eager | graph | fused, `precision` fp32 | tf32 | bf16 (fast planner only); compiled + captured."""
+    if impl == "eager":
+        if precision != "fp32":
+            raise ValueError("the eager planner runs fp32 only")
+        return make_planner(pcfg, fast=False)
+    planner = make_planner(pcfg, fuse=impl == "fused", precision=precision)
+    if warm and planner.device.type == "cuda":
+        planner.warmup()  # compile + capture now (~25 s warm cache), not on the first plan of a walk
+    return planner
+
+
 def __getattr__(name):
     if name == "FastFlowPlanner":
         return fast_planner_class()
@@ -248,8 +261,11 @@ def _build_class():
     class FastFlowPlanner(base.FlowPlanner):
         """See the module docstring. `graphs=False` runs the same loop eagerly (debugging, CPU)."""
 
-        def __init__(self, cfg, graphs=True, fuse=True, buckets=BUCKETS, max_pairs=MAX_PAIRS):
+        def __init__(self, cfg, graphs=True, fuse=True, buckets=BUCKETS, max_pairs=MAX_PAIRS, precision="fp32"):
             super().__init__(cfg)
+            if precision not in PRECISIONS:
+                raise ValueError(f"precision must be one of {PRECISIONS}")
+            self.precision = precision if self.device.type == "cuda" else "fp32"
             self.use_graphs = bool(graphs) and self.device.type == "cuda"
             self.fuse = bool(fuse) and self.device.type == "cuda"
             self.buckets, self.max_pairs = tuple(buckets), int(max_pairs)
@@ -265,6 +281,17 @@ def _build_class():
             if self.fuse:
                 self._vel = torch.compile(self._velocity_tokens, dynamic=False)
                 self._loss = torch.compile(self._guide_loss, dynamic=False)
+
+        def _model_precision(self):
+            """Context for the denoiser's forward only; guidance geometry (FK, capsules, distances) stays fp32.
+
+            tf32: matmuls on tensor cores with a 10-bit mantissa (cuDNN convs already use TF32 by default, also
+            in the evaluated planner). bf16: autocast (matmuls/attention in bfloat16, norms and softmax fp32)."""
+            if self.precision == "bf16":
+                return torch.autocast("cuda", dtype=torch.bfloat16)
+            if self.precision == "tf32":
+                return _flag(torch.backends.cuda.matmul, "allow_tf32", True)
+            return contextlib.nullcontext()
 
         # ----- guided sampler ------------------------------------------------------------------
         def _loop(self, *a):
@@ -282,7 +309,9 @@ def _build_class():
             for i in range(steps):
                 t = 1.0 - i / steps
                 t_in = torch.full((b, h, 1), t, device=self.device)
-                v = self.model(x, t_in, prior, committed, cond)
+                with self._model_precision():
+                    v = self.model(x, t_in, prior, committed, cond)
+                v = v.float()
                 if guided and lo <= t <= hi:
                     with torch.enable_grad():
                         xg = x.detach().requires_grad_(True)
@@ -381,12 +410,15 @@ def _build_class():
             prior = torch.zeros_like(x)
             committed = torch.zeros(b, h, dtype=torch.bool, device=self.device)
             temb, t0emb, tts = self._time_embeddings()
-            mods, kvs = self._consts(cond)
+            with self._model_precision():
+                mods, kvs = self._consts(cond)
             steps = self.cfg.ode_steps
             lo, hi = self.cfg.guide_interval or (0.0, 1.0)
             for i in range(steps):
                 t = 1.0 - i / steps
-                v = self._vel(x, temb[i], t0emb, prior, committed, cond["prior_mask"], cond["history"], mods, kvs)
+                with self._model_precision():
+                    v = self._vel(x, temb[i], t0emb, prior, committed, cond["prior_mask"], cond["history"], mods, kvs)
+                v = v.float()
                 if guided and lo <= t <= hi:
                     with torch.enable_grad():
                         xg = x.detach().requires_grad_(True)
@@ -604,6 +636,16 @@ def _build_class():
                 return super().plan(*a, **kw)
 
     return FastFlowPlanner
+
+
+@contextlib.contextmanager
+def _flag(obj, name, value):
+    old = getattr(obj, name)
+    setattr(obj, name, value)
+    try:
+        yield
+    finally:
+        setattr(obj, name, old)
 
 
 @contextlib.contextmanager

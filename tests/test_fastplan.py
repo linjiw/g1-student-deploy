@@ -127,3 +127,27 @@ def test_fused_velocity_equals_model_forward():
             ref = p.model(x, torch.full((k, 25, 1), 1.0 - i / 10, device="cuda"), zeros, com, cond)
             out = p._velocity_tokens(x, temb[i], t0, zeros, com, cond["prior_mask"], cond["history"], mods, kvs)
             assert (out - ref).abs().max().item() < 1e-4 * max(1.0, ref.abs().max().item())
+
+
+@pytest.mark.parametrize("precision", ["tf32", "bf16"])
+def test_reduced_precision_plans_are_valid(precision):
+    """tf32/bf16 change the arithmetic (not bitwise or choice-equal: judged by the panel, jobs/g4x.sh);
+    here only: the precision path runs, keeps the guidance in fp32 and returns a finite, well-formed plan."""
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("needs a GPU")
+    from g1deploy.fastplan import build_planner
+    from g1deploy.node import memory_view
+
+    flow, cfg, mem, hist, goal_fn = _scene()
+    sm = flow.sensor_map
+    pc = flow.planner.PlannerConfig(**dict(cfg["planner"], device="cuda", seed=3))
+    p = build_planner(pc, "fused", precision, warm=False)
+    p.warmup(ks=(16,), buckets=(8,))
+    view = memory_view(mem)
+    sel = sm.HeightFieldSelector(view, p.certifier.tree, p.certifier.bodies, p.shapes)
+    out = p.plan(hist, [], goal_fn, lambda xy, yaw: view.ego_map(xy, yaw, pc.datum_offset_m, 0.8)[0], sel,
+                 guide_boxes=sm.memory_boxes(view, grow_overhead_m=pc.guide_grow_overhead_m))
+    assert out["qpos"].shape == (50, 36) and np.isfinite(out["qpos"]).all() and np.isfinite(out["joint_velocity"]).all()
+    assert not torch.backends.cuda.matmul.allow_tf32  # the flag is scoped to the denoiser forward

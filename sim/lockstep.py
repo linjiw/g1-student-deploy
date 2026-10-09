@@ -82,22 +82,19 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
 _PLANNERS = {}
 
 
-def cached_planner(flow, pcfg, impl="fused"):
+def cached_planner(flow, pcfg, impl="fused", precision="fp32"):
     """One planner per (config, implementation) per process, re-seeded for each episode.
 
     Equal to a fresh `FlowPlanner(pcfg)`: its only per-run state is the generator (re-seeded here) and the
     call counter; the fast planner's compiled graphs are then built once per worker, not per episode."""
     import dataclasses
 
-    key = (impl, json.dumps({k: v for k, v in dataclasses.asdict(pcfg).items() if k != "seed"}, sort_keys=True, default=str))
+    key = (impl, precision, json.dumps({k: v for k, v in dataclasses.asdict(pcfg).items() if k != "seed"}, sort_keys=True, default=str))
     planner = _PLANNERS.get(key)
     if planner is None:
-        from g1deploy.fastplan import make_planner
+        from g1deploy.fastplan import build_planner
 
-        planner = make_planner(pcfg, fast=False) if impl == "eager" else make_planner(pcfg, fuse=impl == "fused")
-        if impl != "eager" and planner.device.type == "cuda":
-            planner.warmup()
-        _PLANNERS[key] = planner
+        planner = _PLANNERS[key] = build_planner(pcfg, impl, precision)
     planner.cfg = pcfg
     planner.generator.manual_seed(int(pcfg.seed))
     planner.calls = 0
@@ -107,7 +104,7 @@ def cached_planner(flow, pcfg, impl="fused"):
 def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mode="measured", inflight=1,
                 start="recorded",
                 route_source="privileged", lidar="analytic", odom_noise=None, prescan_s=None, lidar_cfg=None,
-                goal_lookahead=None, planner_overrides=None, planner_impl="fused",
+                goal_lookahead=None, planner_overrides=None, planner_impl="fused", planner_precision="fp32",
                 deadline_s=None, save_npz=True):
     import torch
 
@@ -123,7 +120,7 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
 
     pdict = dict(cfg["planner"], device=device, seed=int(seed), **(planner_overrides or {}))
     pcfg = flow.planner.PlannerConfig(**pdict)
-    planner = cached_planner(flow, pcfg, planner_impl)
+    planner = cached_planner(flow, pcfg, planner_impl, planner_precision)
     ep = dict(cfg["episode"])
     if goal_lookahead:
         ep["goal_lookahead_m"] = float(goal_lookahead)  # the local goal distance sets the planner's walking speed
@@ -137,7 +134,8 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
                    route=route_cfg, sensor_prescan_s=prescan, latency_s=latency_s, anchor_mode=anchor_mode, inflight=inflight,
                    start=start,
                    lidar=lidar,
-                   odom_noise=odom_noise, engine="mujoco", sonic_onnx=str(bundle.sonic_onnx()), planner_impl=planner_impl)
+                   odom_noise=odom_noise, engine="mujoco", sonic_onnx=str(bundle.sonic_onnx()), planner_impl=planner_impl,
+                   planner_precision=planner_precision)
     write_json(out / "run_config.json", run_cfg)
     np.random.seed(int(seed))
     torch.manual_seed(int(seed))

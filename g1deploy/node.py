@@ -257,7 +257,7 @@ def route_copy(route):
     return r
 
 
-def _worker(conn, pdict, episode, seed, impl="fused"):
+def _worker(conn, pdict, episode, seed, impl="fused", precision="fp32"):
     import os
     import signal
 
@@ -270,12 +270,10 @@ def _worker(conn, pdict, episode, seed, impl="fused"):
     flow = bundle.load_flow()
     from sim.lockstep import make_goal_fn
 
-    from g1deploy.fastplan import make_planner
+    from g1deploy.fastplan import build_planner
 
-    pcfg = flow.planner.PlannerConfig(**dict(pdict, seed=seed))
-    planner = make_planner(pcfg, fast=False) if impl == "eager" else make_planner(pcfg, fuse=impl == "fused")
-    if impl != "eager" and planner.device.type == "cuda":
-        planner.warmup()  # compile + capture now (~10-60 s), not on the first plan of a walk
+    # compiled + captured now (~25 s with a warm cache), not on the first plan of a walk
+    planner = build_planner(flow.planner.PlannerConfig(**dict(pdict, seed=seed)), impl, precision)
     pc = planner.cfg
     sm, cb = flow.sensor_map, flow.callback
     conn.send("ready")
@@ -305,12 +303,12 @@ def _worker(conn, pdict, episode, seed, impl="fused"):
 class PlannerPool:
     """`n` planner processes (spawn); each holds its own CUDA context (~0.4 GB) and model copy."""
 
-    def __init__(self, n, pdict, episode, seed, impl="fused"):
+    def __init__(self, n, pdict, episode, seed, impl="fused", precision="fp32"):
         ctx = mp.get_context("spawn")
         self.workers = []
         for i in range(n):
             a, b = ctx.Pipe()
-            p = ctx.Process(target=_worker, args=(b, pdict, episode, seed + i, impl), daemon=True)
+            p = ctx.Process(target=_worker, args=(b, pdict, episode, seed + i, impl, precision), daemon=True)
             p.start()
             self.workers.append({"proc": p, "conn": a, "busy": None})
         for w in self.workers:
@@ -416,7 +414,8 @@ class StudentNode:
         self.overruns, self.skipped, self.max_lag_s = 0, 0, 0.0
         self.commands, self.status = [], {"phase": "BOOT"}
         self.go_event = threading.Event()
-        self.pool = PlannerPool(args.inflight, self.pdict, self.episode, args.seed, args.planner_impl)
+        self.pool = PlannerPool(args.inflight, self.pdict, self.episode, args.seed, args.planner_impl,
+                                args.planner_precision)
 
     # -- perception ---------------------------------------------------------------------------
     def make_memory(self, xy):
@@ -749,6 +748,8 @@ def parse(argv=None):
     ap.add_argument("--planner-impl", choices=("fused", "graph", "eager"), default="fused",
                     help="fused (default): CUDA graphs + per-chunk constants + compiled steps, same plans as the evaluated "
                          "eager planner (docs/PLANNER_SPEED.md); eager: the bundle's FlowPlanner unchanged")
+    ap.add_argument("--planner-precision", choices=("fp32", "tf32", "bf16"), default="fp32",
+                    help="denoiser precision (fast planner): fp32 = the evaluated arithmetic; tf32 / bf16 = tensor cores (docs/PLANNER_SPEED.md)")
     ap.add_argument("--inflight", type=int, default=1,
                     help="2+ is harmful: a second in-flight plan is predicted from the landed plan, not the one "
                          "running in between (G4: 32/98 vs 79/98)")

@@ -37,15 +37,12 @@ GATE_S = 0.32  # tested with predictive anchoring; the success cliff starts righ
 
 
 def make(flow, cfg, impl, device, seed, over):
-    pc = flow.planner.PlannerConfig(**dict(cfg["planner"], device=device, seed=seed, **over))
-    if impl == "eager":
-        return flow.planner.FlowPlanner(pc)
-    from g1deploy.fastplan import fast_planner_class
+    """`impl` = eager | graph | fused, optionally with a denoiser precision suffix: fused-tf32, fused-bf16."""
+    from g1deploy.fastplan import build_planner
 
-    planner = fast_planner_class()(pc, graphs=True, fuse=(impl == "fused"))
-    if device.startswith("cuda"):
-        planner.warmup()
-    return planner
+    pc = flow.planner.PlannerConfig(**dict(cfg["planner"], device=device, seed=seed, **over))
+    name, _, precision = impl.partition("-")
+    return build_planner(pc, name, precision or "fp32")
 
 
 def episode_states(flow, cfg, ep, every, device):
@@ -89,7 +86,8 @@ def stats(ts):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--impl", action="append", choices=("eager", "graph", "fused"),
+    ap.add_argument("--impl", action="append",
+                    choices=("eager", "graph", "fused", "graph-tf32", "graph-bf16", "fused-tf32", "fused-bf16"),
                     help="planner implementation(s); repeat to compare interleaved (default: fused)")
     ap.add_argument("--n", type=int, default=20, help="timed plans per implementation (fixed state)")
     ap.add_argument("--sequence", action="store_true", help="replan along recorded episodes instead of one state")
