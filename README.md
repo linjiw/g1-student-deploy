@@ -23,6 +23,7 @@ Status: simulation only. Nothing has run on a robot. See [docs/DESIGN.md](docs/D
 |---|---|
 | `tools/freeze_bundle.py` → `bundle/` | byte-identical planner source, student checkpoint, SONIC ONNX, mounts, contract; sha256 manifest checked against the evaluated artifacts |
 | `g1deploy/sonic.py` | SONIC 1570-observation tracker in Python (ONNX parity) |
+| `g1deploy/route_compat.py` | deployment correction for same-cell start/goal routes, applied by `bundle.load_flow()` without changing frozen files |
 | `sim/lockstep.py`, `tools/eval_panel.py` | Path A: MuJoCo counterpart of the Isaac callback; switches for latency (+ predictive anchoring), standing start, lidar route, ray-cast lidar, odometry drift |
 | `g1deploy/perception/` | MID-360 pattern/mount, MuJoCo ray casting incl. self-hits, mesh-capsule self filter, label-free evidence memory |
 | `g1deploy/node.py` | the deployable node: DDS state + odometry + cloud → planner processes → SONIC stream; supervisor |
@@ -33,6 +34,13 @@ Status: simulation only. Nothing has run on a robot. See [docs/DESIGN.md](docs/D
 | `tools/check_robot.py`, `tools/stream_replay.py` | hardware ladder H1–H2 (read-only checks) and H4 (stream without the planner) |
 
 ## Quick start
+
+Near-goal routing preserves both physical endpoints when A* returns a single
+grid cell. This prevents an empty-segment projection in both `Route` and
+`SensorRoute`; coincident endpoints remain a valid zero-length segment. The
+frozen bundle/manifest, normal routes, occupancy rules, and goal distance/speed/
+hold scoring are unchanged. CPU regression check (no DDS or hardware):
+`CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 .venv/bin/python -m pytest tests/test_route.py -q`.
 
 ```bash
 ./g1 test                                  # 26 tests (bundle, SONIC parity, stream, perception, node safety, fast planner)

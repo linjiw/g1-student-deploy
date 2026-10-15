@@ -4,6 +4,9 @@
 absolute paths the vendored source hard-codes (`planner.FLOW_ROOT`,
 `sensor_map.NEWTON`) into the bundle, so the source itself stays byte-identical
 to what was evaluated in Isaac.
+
+Deployment-only route corrections are installed in memory by route_compat;
+the frozen files and their historical manifest remain unchanged.
 """
 
 from __future__ import annotations
@@ -74,6 +77,9 @@ def load_flow(root: Path = ROOT):
     sys.dont_write_bytecode = True  # never write into the frozen tree
     from motion2scene_flow.closed_loop import callback, feed, planner, route, sensor_map
     from motion2scene_flow.wholebody import fk
+    from g1deploy.route_compat import install as install_route_compat
+
+    install_route_compat(route)
 
     planner.FLOW_ROOT = root / "flow"
     sensor_map.NEWTON = str(root / "newton")
