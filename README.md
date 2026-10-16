@@ -65,6 +65,17 @@ convention, not whole-body safety or observed free-space certification. Plan
 diagnostics include the actual first requested/returned local goal and adjustment
 counts (`tests/test_goal_guard.py`).
 
+Sensor routing now defaults to a **0.10 m uncertainty buffer** around observed
+obstacles, grown only into adjacent unknown support cells using the existing
+`SensorRoute.grow_unknown_m` mechanism. Partial wall surfaces otherwise suggested
+short gaps that later scans closed, forcing long detours. Observed free support
+cells block this growth; the existing robot-radius inflation remains separate.
+This buffer is a planning assumption, not measured occupancy: CloudMemory,
+LiDAR returns and observed/unknown masks are unchanged. `student_config()` returns
+the effective value for both the node and rehearsal, and native run configuration
+records it. An explicit `grow_unknown_m: 0` in the bundle configuration retains
+the previous behavior. The frozen bundle itself is never rewritten.
+
 ```bash
 ./g1 test                                  # 26 tests (bundle, SONIC parity, stream, perception, node safety, fast planner)
 ./g1 sim --layout beams2-100               # operator console + MuJoCo G1 + C++ SONIC runner + student node

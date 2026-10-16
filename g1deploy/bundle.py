@@ -53,6 +53,12 @@ def verify(root: Path = ROOT, quick: bool = True) -> list[str]:
 def student_config(root: Path = ROOT) -> dict:
     cfg = json.loads((root / "config/student.json").read_text())
     cfg["planner"]["run"] = str(root / cfg["planner"]["run"])
+    # A partially observed wall is a surface, not a complete obstacle extent.
+    # Reuse SensorRoute's masked uncertainty growth so short unobserved gaps
+    # beside known obstacles are not immediately treated as reliable corridors.
+    # This changes only the routing grid; raw support/ceiling/observed masks stay
+    # untouched. Return the effective value so node and rehearsal record it.
+    cfg["route_variants"]["sensor"].setdefault("route", {}).setdefault("grow_unknown_m", 0.1)
     return cfg
 
 
