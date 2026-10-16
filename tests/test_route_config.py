@@ -52,3 +52,27 @@ def test_shared_effective_config_is_accepted_by_actual_sensor_route():
     # Both callers obtain route_cfg from student_config() and pass it through;
     # rollout acceptance additionally checks native/run_config.json provenance.
     assert route.found
+
+
+@pytest.mark.parametrize("growth,res", [(.01, .05), (.025, .05), (.1, .25)])
+def test_sub_half_cell_positive_growth_fails_closed_at_actual_constructor(growth, res):
+    flow = bundle.load_flow()
+    support = np.full((21, 21), np.nan)
+    support[8, 10] = 1.9
+    before = support.copy()
+    mem = SimpleNamespace(support=support, n=21, lo=np.array([0., 0.]), res=res)
+    with pytest.raises(ValueError, match="must round to at least one support-grid cell"):
+        flow.route.SensorRoute([0, 0], [.9, 0], mem, grow_unknown_m=growth)
+    np.testing.assert_array_equal(mem.support, before)
+
+
+def test_explicit_zero_and_resolved_cell_growth_still_work_on_coarse_grid():
+    flow = bundle.load_flow()
+    mem = SimpleNamespace(support=np.zeros((21, 21)), n=21, lo=np.array([0., 0.]), res=.25)
+    for growth in (0., .25):
+        route = flow.route.SensorRoute([0, 0], [.9, 0], mem, grow_unknown_m=growth)
+        assert route.found and route.grow_unknown_m == growth
+    from g1deploy.route_compat import install
+    method = flow.route.SensorRoute.__init__
+    install(flow.route)
+    assert flow.route.SensorRoute.__init__ is method

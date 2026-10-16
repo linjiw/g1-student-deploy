@@ -5,7 +5,8 @@ absolute paths the vendored source hard-codes (`planner.FLOW_ROOT`,
 `sensor_map.NEWTON`) into the bundle, so the source itself stays byte-identical
 to what was evaluated in Isaac.
 
-Deployment-only route corrections are installed in memory by route_compat;
+Deployment route/selection corrections are installed in memory by route_compat
+and planner_compat. student_config returns effective deployment defaults;
 the frozen files and their historical manifest remain unchanged.
 """
 

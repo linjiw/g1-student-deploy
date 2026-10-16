@@ -6,7 +6,7 @@ It does not establish whole-body clearance or certify unobserved space.
 
 import numpy as np
 
-REVISION = "route-visible-goal-v2"
+REVISION = "route-visible-goal-v3"
 
 
 def _ray(route, xy, target):

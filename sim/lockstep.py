@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Path A: lock-step closed-loop episode of the student planner + SONIC in MuJoCo.
 
-A line-by-line counterpart of the Isaac callback (`closed_loop/callback.py`, frozen in the
-bundle): same history buffer, sensor memory, route + goal function, planner call, feed target,
-SONIC input and TaskScorer rules; only the physics engine and the SONIC runtime (fused ONNX)
-differ. Deployment effects can be switched on one at a time:
+A counterpart of the Isaac callback (`closed_loop/callback.py`, frozen in the
+bundle): same history buffer, sensor memory, planner call, feed target, SONIC
+input and TaskScorer rules, with tracked deployment route, goal and selection
+adapters described in README.md. The physics engine and SONIC runtime are
+MuJoCo and fused ONNX. Deployment effects can be switched on one at a time:
 
   --latency-s L   a plan requested at tick t becomes usable at t + L (physics keeps running on
                   the previous plan, exactly what the real-time streamer will do); the next
@@ -73,7 +74,7 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
     def reset_diagnostics():
         diagnostics.clear()
         diagnostics.update(revision=REVISION, queries=0, limited=0, redirected=0,
-                           occupied_starts=0, first=None)
+                           occupied_starts=0, arrival_heading_held=0, first=None)
 
     def goal_fn(xy, yaw):
         w, h, rem = route.waypoint(xy, lookahead, update=False)
@@ -90,9 +91,18 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
         else:
             heading = route_goal_heading(w, h, rem, xy, heading_mode, lookahead)
         guarded, status = limit_goal(route, xy, w, lookahead)
-        if status == "redirected_to_visible_route":
+        if status == "redirected_to_visible_route" and heading_mode != "path":
             delta = guarded - np.asarray(xy)
             heading = math.atan2(delta[1], delta[0])
+        # A position-only goal does not request a final orientation. SensorRoute
+        # refreshes its final segment from the current pose, so using that
+        # segment near arrival can demand a sudden turn as the goal is crossed.
+        # Keep each candidate's present yaw inside the existing near-goal region;
+        # retain its actual XY goal and all source speed/hold scoring.
+        hold_heading = heading_mode == "bearing_near" and rem < 0.5 * lookahead
+        if hold_heading:
+            heading = yaw
+        diagnostics["arrival_heading_held"] += hold_heading
         diagnostics["queries"] += 1
         diagnostics["limited"] += status == "limited_at_occupied_grid"
         diagnostics["redirected"] += status == "redirected_to_visible_route"
@@ -100,7 +110,9 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
         if diagnostics["first"] is None:
             diagnostics["first"] = dict(origin_xy=np.asarray(xy).tolist(),
                                         requested_xy=np.asarray(w).tolist(),
-                                        returned_xy=guarded.tolist(), status=status)
+                                        returned_xy=guarded.tolist(), status=status,
+                                        candidate_yaw_rad=float(yaw), heading_rad=float(heading),
+                                        heading_policy="hold_candidate_yaw" if hold_heading else "route_pursuit")
         return goal_vector(guarded, heading, xy, yaw)
 
     reset_diagnostics()

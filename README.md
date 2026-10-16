@@ -89,3 +89,19 @@ Guides: [docs/OPERATOR_GUIDE.md](docs/OPERATOR_GUIDE.md) (setup, keys, procedure
 lidar, odometry, calibration) · [docs/READINESS.md](docs/READINESS.md) (what is established, what is not) ·
 [docs/RUNBOOK.md](docs/RUNBOOK.md) (simulation gates and results).
 Video: `runs/video/g1_deploy_tutorial.mp4` (built by `tools/make_tutorial.py` from recorded `g1 sim` sessions).
+
+
+For position-only navigation (`bearing_near`), the existing near-goal region
+(remaining route distance below half the configured lookahead) now preserves
+each candidate's current yaw while still targeting the requested XY point.
+This avoids chasing the final segment heading when sensor-route refresh flips
+that heading around a nearly reached point. Explicit `path` heading mode keeps
+its configured path orientation, including after route-goal redirection. Goal
+radius, speed and continuous-hold criteria remain unchanged.
+
+Positive uncertainty buffers that round to zero support-grid cells are rejected
+at `SensorRoute` construction: SciPy otherwise interprets zero dilation
+iterations as unbounded growth. For example, 0.01 m with a 0.05 m support grid,
+or 0.10 m with a 0.25 m grid, is unsupported; choose an explicit buffer that
+rounds to at least one cell, or explicit zero to disable growth. The default
+0.10 m buffer with the deployed 0.05 m grid remains two iterations.

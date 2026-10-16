@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from g1deploy import bundle
 from g1deploy.goal_guard import limit_goal
@@ -100,3 +101,49 @@ def test_zero_length_route_and_occupied_start_do_not_invent_progress():
     goal, status = limit_goal(route, [0, 0], [.5, 0], lookahead=1.5)
     np.testing.assert_array_equal(goal, [.5, 0])
     assert status == "occupied_start_uncertified" and route.progress == 0
+
+
+@pytest.mark.parametrize("xy", [[.2, 0], [-.2, 0], [0, .2], [0, -.2]])
+@pytest.mark.parametrize("yaw", [-3.13, .9, 3.13])
+def test_position_only_arrival_keeps_candidate_yaw_on_every_side(xy, yaw):
+    flow = bundle.load_flow()
+    mem = SimpleNamespace(support=np.zeros((241, 241)), n=241, lo=np.array([-6., -6.]), res=.05)
+    route = flow.route.SensorRoute(xy, [0, 0], mem)
+    goal = make_goal_fn(route, 1.5, "bearing_near", .5, None,
+                        flow.callback.goal_vector, flow.callback.route_goal_heading)
+    expected = flow.callback.goal_vector([0, 0], yaw, np.array(xy), yaw).numpy()
+    np.testing.assert_array_equal(goal(xy, yaw).numpy(), expected)
+    assert goal.diagnostics["arrival_heading_held"] == 1
+    assert goal.diagnostics["first"]["heading_policy"] == "hold_candidate_yaw"
+    # Refresh can flip the route's final segment; each predicted candidate yaw
+    # remains its own reference, including across quaternion/yaw wrap.
+    other = -np.array(xy)
+    route.refresh(other, .2, force=True)
+    np.testing.assert_array_equal(goal(other, -yaw).numpy()[2:], [1, 0])
+
+
+def test_arrival_heading_condition_preserves_non_near_and_explicit_path_modes():
+    flow = bundle.load_flow()
+    route = flow.route.Route([0, 0], [2, 0], [])
+    goal = make_goal_fn(route, 1.5, "bearing_near", .5, None,
+                        flow.callback.goal_vector, flow.callback.route_goal_heading)
+    np.testing.assert_allclose(goal([0, 0], .9).numpy(),
+                               flow.callback.goal_vector([1.5, 0], 0., np.array([0, 0]), .9).numpy())
+    assert goal.diagnostics["arrival_heading_held"] == 0
+    near = flow.route.Route([.2, 0], [0, 0], [])
+    explicit = make_goal_fn(near, 1.5, "path", .5, None,
+                            flow.callback.goal_vector, flow.callback.route_goal_heading)
+    np.testing.assert_allclose(explicit([.2, 0], 0).numpy()[2:], [-1, 0], atol=1e-7)
+    assert explicit.diagnostics["arrival_heading_held"] == 0
+
+
+def test_explicit_path_heading_survives_visible_route_redirection():
+    flow = bundle.load_flow()
+    boxes = [dict(center_xy=[1., 0.], half_xy=[.15, .4], yaw=0., z_bottom=0., z_top=1.9)]
+    route = flow.route.Route([0, 0], [2, 0], boxes)
+    _, heading, _ = route.waypoint([0, 0], 2., update=False)
+    goal = make_goal_fn(route, 2., "path", .5, None,
+                        flow.callback.goal_vector, flow.callback.route_goal_heading)
+    output = goal([0, 0], 0).numpy()
+    assert goal.diagnostics["redirected"] == 1
+    np.testing.assert_allclose(output[2:], [np.cos(heading), np.sin(heading)], atol=1e-7)
