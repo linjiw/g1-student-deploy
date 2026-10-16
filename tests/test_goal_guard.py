@@ -70,6 +70,33 @@ def test_fixture_route_bend_does_not_send_goal_through_occupied_ray():
                         flow.callback.goal_vector, flow.callback.route_goal_heading)
     out = goal([0, 0], 0).numpy()
     assert 0.9 <= out[0] < 0.975 and out[1] == 0
-    assert goal.diagnostics["limited"] == 1
+    assert goal.diagnostics["redirected"] == 1
     assert goal.diagnostics["first"]["requested_xy"] == [1.5, 0.0]
     assert route.free_line(np.array([0, 0]), out[:2])
+
+
+def test_visible_route_redirect_advances_around_wall_within_existing_lookahead():
+    flow = bundle.load_flow()
+    boxes = [dict(center_xy=[1., 0.], half_xy=[0.15, 0.4], yaw=0., z_bottom=0., z_top=1.9)]
+    route = flow.route.Route([0, 0], [2, 0], boxes)
+    xy = np.array([0., 0.])
+    before, _ = limit_goal(route, xy, [1.5, 0])
+    goal, status = limit_goal(route, xy, [1.5, 0], lookahead=1.5)
+    assert status == "redirected_to_visible_route"
+    assert abs(goal[1]) > 0.2  # follows the actual detour, not wall-facing creep
+    assert np.linalg.norm(goal - xy) > np.linalg.norm(before - xy)
+    assert route.free_line(xy, goal)
+    assert 0 <= route.project(goal) <= 1.5 + 1e-8
+    assert route.progress == 0  # candidate queries cannot advance measured progress
+
+
+def test_zero_length_route_and_occupied_start_do_not_invent_progress():
+    flow = bundle.load_flow()
+    route = flow.route.Route([0, 0], [0, 0], [])
+    goal, status = limit_goal(route, [0, 0], [0, 0], lookahead=1.5)
+    np.testing.assert_array_equal(goal, [0, 0])
+    assert status == "grid_line_free" and route.progress == 0
+    route.occupied[route.cell([0, 0])] = True
+    goal, status = limit_goal(route, [0, 0], [.5, 0], lookahead=1.5)
+    np.testing.assert_array_equal(goal, [.5, 0])
+    assert status == "occupied_start_uncertified" and route.progress == 0

@@ -54,13 +54,16 @@ weights, sampler, scorer and frozen manifest are unchanged. The optional
 execution verifier retains its own selection. CPU source-selector checks:
 `CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 .venv/bin/python -m pytest tests/test_route.py tests/test_planner_selection.py -q`.
 
-The shared node/rehearsal local-goal function also caps a pursuit ray before its
-first occupied route-grid cell when starting in free space. The old 1.5 m
-extrapolation could cross a bend despite a valid route. Occupied starts retain
-the existing escape behavior and are marked uncertified. This is a route-grid
-check using its existing unknown-as-free convention, not whole-body safety or
-observed free-space certification. Plan diagnostics include the actual first
-requested/returned local goal and adjustment counts (`tests/test_goal_guard.py`).
+The shared node/rehearsal local-goal function also redirects an obstructed
+pursuit ray to the furthest visible point on the existing local route. The old
+1.5 m extrapolation could cross a bend despite a valid route; just capping that
+bearing at the wall could then leave a tiny goal and stall. The visible point
+stays within the existing route arc lookahead; if none exists, the free ray
+prefix is used. Occupied starts retain the existing escape behavior and are
+marked uncertified. This is a route-grid check using its existing unknown-as-free
+convention, not whole-body safety or observed free-space certification. Plan
+diagnostics include the actual first requested/returned local goal and adjustment
+counts (`tests/test_goal_guard.py`).
 
 ```bash
 ./g1 test                                  # 26 tests (bundle, SONIC parity, stream, perception, node safety, fast planner)

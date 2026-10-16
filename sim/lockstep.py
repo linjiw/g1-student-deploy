@@ -63,7 +63,8 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
     """Source pursuit semantics with a deployment occupancy-prefix guard.
 
     Shared by this rehearsal and g1deploy.node's planner workers. The long
-    pursuit ray can overshoot a route bend; cap it before occupied route cells.
+    pursuit ray can overshoot a route bend; return to the visible route when
+    that ray enters occupied cells, falling back to its free prefix if needed.
     """
     from g1deploy.goal_guard import REVISION, limit_goal
 
@@ -71,7 +72,7 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
 
     def reset_diagnostics():
         diagnostics.clear()
-        diagnostics.update(revision=REVISION, queries=0, limited=0,
+        diagnostics.update(revision=REVISION, queries=0, limited=0, redirected=0,
                            occupied_starts=0, first=None)
 
     def goal_fn(xy, yaw):
@@ -88,9 +89,13 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
             heading = b
         else:
             heading = route_goal_heading(w, h, rem, xy, heading_mode, lookahead)
-        guarded, status = limit_goal(route, xy, w)
+        guarded, status = limit_goal(route, xy, w, lookahead)
+        if status == "redirected_to_visible_route":
+            delta = guarded - np.asarray(xy)
+            heading = math.atan2(delta[1], delta[0])
         diagnostics["queries"] += 1
         diagnostics["limited"] += status == "limited_at_occupied_grid"
+        diagnostics["redirected"] += status == "redirected_to_visible_route"
         diagnostics["occupied_starts"] += status == "occupied_start_uncertified"
         if diagnostics["first"] is None:
             diagnostics["first"] = dict(origin_xy=np.asarray(xy).tolist(),
