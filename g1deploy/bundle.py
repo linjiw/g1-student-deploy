@@ -78,8 +78,10 @@ def load_flow(root: Path = ROOT):
     from motion2scene_flow.closed_loop import callback, feed, planner, route, sensor_map
     from motion2scene_flow.wholebody import fk
     from g1deploy.route_compat import install as install_route_compat
+    from g1deploy.planner_compat import install as install_planner_compat
 
     install_route_compat(route)
+    install_planner_compat(planner)
 
     planner.FLOW_ROOT = root / "flow"
     sensor_map.NEWTON = str(root / "newton")

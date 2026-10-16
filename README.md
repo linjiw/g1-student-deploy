@@ -24,6 +24,7 @@ Status: simulation only. Nothing has run on a robot. See [docs/DESIGN.md](docs/D
 | `tools/freeze_bundle.py` → `bundle/` | byte-identical planner source, student checkpoint, SONIC ONNX, mounts, contract; sha256 manifest checked against the evaluated artifacts |
 | `g1deploy/sonic.py` | SONIC 1570-observation tracker in Python (ONNX parity) |
 | `g1deploy/route_compat.py` | deployment correction for same-cell start/goal routes, applied by `bundle.load_flow()` without changing frozen files |
+| `g1deploy/planner_compat.py` | preserves maximum candidate clearance, prefers actual stop-conditioned candidates on fallback ties, and reports the selected pool |
 | `sim/lockstep.py`, `tools/eval_panel.py` | Path A: MuJoCo counterpart of the Isaac callback; switches for latency (+ predictive anchoring), standing start, lidar route, ray-cast lidar, odometry drift |
 | `g1deploy/perception/` | MID-360 pattern/mount, MuJoCo ray casting incl. self-hits, mesh-capsule self filter, label-free evidence memory |
 | `g1deploy/node.py` | the deployable node: DDS state + odometry + cloud → planner processes → SONIC stream; supervisor |
@@ -41,6 +42,25 @@ grid cell. This prevents an empty-segment projection in both `Route` and
 frozen bundle/manifest, normal routes, occupancy rules, and goal distance/speed/
 hold scoring are unchanged. CPU regression check (no DDS or hardware):
 `CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 .venv/bin/python -m pytest tests/test_route.py -q`.
+
+Fallback selection also resolves discrete clearance ties explicitly. Previously
+`stop_max_clearance` could select the first moving GO candidate when GO and STOP
+pools shared the same clearance. The deployment adapter prefers the STOP pool on
+an equal-clearance tie, then the candidate with least mean squared translation.
+Higher-clearance GO candidates remain eligible and are labelled
+`fallback_go_max_clearance`. `no_safe_candidate` reports when every candidate
+misses the existing margin; neither fallback label certifies safety. Model
+weights, sampler, scorer and frozen manifest are unchanged. The optional
+execution verifier retains its own selection. CPU source-selector checks:
+`CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 .venv/bin/python -m pytest tests/test_route.py tests/test_planner_selection.py -q`.
+
+The shared node/rehearsal local-goal function also caps a pursuit ray before its
+first occupied route-grid cell when starting in free space. The old 1.5 m
+extrapolation could cross a bend despite a valid route. Occupied starts retain
+the existing escape behavior and are marked uncertified. This is a route-grid
+check using its existing unknown-as-free convention, not whole-body safety or
+observed free-space certification. Plan diagnostics include the actual first
+requested/returned local goal and adjustment counts (`tests/test_goal_guard.py`).
 
 ```bash
 ./g1 test                                  # 26 tests (bundle, SONIC parity, stream, perception, node safety, fast planner)

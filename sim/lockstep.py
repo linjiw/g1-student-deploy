@@ -60,7 +60,19 @@ def write_json(path, value):
 
 
 def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac, goal_vector, route_goal_heading):
-    """callback.py:385-401, verbatim semantics."""
+    """Source pursuit semantics with a deployment occupancy-prefix guard.
+
+    Shared by this rehearsal and g1deploy.node's planner workers. The long
+    pursuit ray can overshoot a route bend; cap it before occupied route cells.
+    """
+    from g1deploy.goal_guard import REVISION, limit_goal
+
+    diagnostics = {}
+
+    def reset_diagnostics():
+        diagnostics.clear()
+        diagnostics.update(revision=REVISION, queries=0, limited=0,
+                           occupied_starts=0, first=None)
 
     def goal_fn(xy, yaw):
         w, h, rem = route.waypoint(xy, lookahead, update=False)
@@ -73,9 +85,22 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
                 err = abs(math.atan2(math.sin(b - yaw), math.cos(b - yaw)))
                 dist = lookahead * max(float(turn_min_frac), 1.0 - err / (0.5 * math.pi))
             w = np.asarray(xy) + min(dist, rem) * np.array([math.cos(b), math.sin(b)])
-            return goal_vector(w, b, xy, yaw)
-        return goal_vector(w, route_goal_heading(w, h, rem, xy, heading_mode, lookahead), xy, yaw)
+            heading = b
+        else:
+            heading = route_goal_heading(w, h, rem, xy, heading_mode, lookahead)
+        guarded, status = limit_goal(route, xy, w)
+        diagnostics["queries"] += 1
+        diagnostics["limited"] += status == "limited_at_occupied_grid"
+        diagnostics["occupied_starts"] += status == "occupied_start_uncertified"
+        if diagnostics["first"] is None:
+            diagnostics["first"] = dict(origin_xy=np.asarray(xy).tolist(),
+                                        requested_xy=np.asarray(w).tolist(),
+                                        returned_xy=guarded.tolist(), status=status)
+        return goal_vector(guarded, heading, xy, yaw)
 
+    reset_diagnostics()
+    goal_fn.reset_diagnostics = reset_diagnostics
+    goal_fn.diagnostics = diagnostics
     return goal_fn
 
 
