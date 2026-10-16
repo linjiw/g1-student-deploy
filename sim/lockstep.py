@@ -79,8 +79,13 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
     def set_anchor(anchor, state):
         nonlocal arrival_state
         radius = arrival_radius_m if heading_mode == "bearing_near" else None
+        entry_heading = None
+        if radius is not None and np.linalg.norm(np.asarray(anchor)[:2] - route.goal) <= radius:
+            w, x, y, z = anchor[3:7]
+            yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+            _, _, entry_heading, _ = pursuit_goal(anchor[:2], yaw)
         arrival_state = update_arrival_latch(state, anchor, route.goal, radius,
-                                            max(radius or 0.0, 0.5 * lookahead), arrival_scope)
+                                            max(radius or 0.0, 0.5 * lookahead), arrival_scope, entry_heading)
         return arrival_state
 
     def reset_diagnostics():
@@ -89,7 +94,7 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
                            occupied_starts=0, arrival_heading_held=0, first=None,
                            arrival_radius_m=arrival_radius_m, arrival_latch=arrival_state)
 
-    def goal_fn(xy, yaw):
+    def pursuit_goal(xy, yaw):
         w, h, rem = route.waypoint(xy, lookahead, update=False)
         if heading_mode == "bearing_near" and rem >= 0.5 * lookahead:
             wn, _, _ = route.waypoint(xy, steer_lookahead, update=False)
@@ -107,9 +112,14 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
         if status == "redirected_to_visible_route" and heading_mode != "path":
             delta = guarded - np.asarray(xy)
             heading = math.atan2(delta[1], delta[0])
+        return w, guarded, heading, status
+
+    def goal_fn(xy, yaw):
+        w, guarded, heading, status = pursuit_goal(xy, yaw)
         # Arrival is entered only by the plan request's anchor, not by whichever
-        # sampled candidate first predicts a nearby point. A fixed WORLD yaw
-        # supplies a restoring orientation throughout the reference window.
+        # sampled candidate first predicts a nearby point. Preserve the source
+        # approach heading, not measured execution that may lag a requested turn.
+        # A fixed WORLD yaw restores orientation throughout the reference window.
         hold_heading = arrival_state is not None
         if hold_heading:
             heading = arrival_state["heading_rad"]

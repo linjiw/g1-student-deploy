@@ -91,13 +91,15 @@ lidar, odometry, calibration) · [docs/READINESS.md](docs/READINESS.md) (what is
 Video: `runs/video/g1_deploy_tutorial.mp4` (built by `tools/make_tutorial.py` from recorded `g1 sim` sessions).
 
 
-For position-only navigation (`bearing_near`), arrival heading latches from the
-observed robot pose once it enters the existing navigation position tolerance:
+For position-only navigation (`bearing_near`), arrival heading latches the existing
+route/guard approach direction at the observed robot pose once it enters the navigation position tolerance:
 the task's `goal_radius_m` in lockstep, or the node's `--goal-radius`. All future
-candidates then target this fixed world yaw while retaining their requested XY
+candidates then target this fixed world heading while retaining their requested XY
 point. This avoids chasing a final segment that flips around a nearly reached
 point, without suppressing approach turns before arrival or allowing a sampled
-future to activate arrival. The latch survives fresh worker callbacks, releases
+future to activate arrival. The source approach direction is retained rather than
+replaced by measured yaw that may still lag a requested turn. Diagnostics record
+both the requested heading basis and the measured entry yaw. The latch survives fresh worker callbacks, releases
 outside the existing half-lookahead region (or radius, if larger), and resets
 for new goals and independent runs. Node jobs retain the observed pose separately
 from latency-predicted history. Explicit `path` mode keeps its path orientation,

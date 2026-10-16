@@ -34,14 +34,15 @@ def test_candidate_queries_cannot_enter_arrival_before_actual_anchor():
 
 def test_tolerance_entry_hysteresis_goal_and_run_reset():
     fn = lambda state, xy, yaw, goal=(0, 0), scope="a": update_arrival_latch(
-        state, anchor(xy, yaw), goal, .3, .75, scope)
+        state, anchor(xy, yaw), goal, .3, .75, scope, yaw - .1)
     assert fn(None, [.301, 0], .2) is None
     state = fn(None, [.3, 0], .2)
-    assert state["heading_rad"] == pytest.approx(.2)
+    assert state["heading_rad"] == pytest.approx(.1)
+    assert state["entry_measured_yaw_rad"] == pytest.approx(.2)
     # Hold a fixed WORLD yaw while drifting just beyond position tolerance.
     assert fn(state, [.5, 0], 1.1) is state
     assert fn(state, [.751, 0], 1.1) is None
-    assert fn(state, [.2, 0], -.4, scope="b")["heading_rad"] == pytest.approx(-.4)
+    assert fn(state, [.2, 0], -.4, scope="b")["heading_rad"] == pytest.approx(-.5)
     assert fn(state, [.2, 0], -.4, goal=[2, 0]) is None
 
 
@@ -57,10 +58,39 @@ def test_fresh_worker_goal_closures_share_only_explicit_planner_state():
     second.set_anchor(anchor([.2, 0], .9), state)
     for yaw in (-2., .1, 1.7):
         output = second([.1, 0], yaw).numpy()
-        np.testing.assert_allclose(output[2:], [np.cos(.4-yaw), np.sin(.4-yaw)], atol=1e-7)
+        np.testing.assert_allclose(output[2:], [np.cos(np.pi-yaw), np.sin(np.pi-yaw)], atol=1e-7)
     third = build(2)
     fresh = third.set_anchor(anchor([.2, 0], -.8), state)
-    assert fresh["heading_rad"] == pytest.approx(-.8)
+    assert fresh["heading_rad"] == pytest.approx(np.pi)
+    assert fresh["entry_measured_yaw_rad"] == pytest.approx(-.8)
+
+
+def test_arrival_entry_preserves_requested_approach_turn_despite_execution_lag():
+    # Actual corridor-intermediate job-a82988440555 anchor at t=4.8s.
+    # This fixture rebuilds only a straight final segment; no simulation/model.
+    f = bundle.load_flow()
+    xy, destination, measured_yaw = [2.906034765757067, -.016377092397980388], [3.1, -.2], .25838052505376224
+    route = f.route.Route(xy, destination, [])
+    goal = make_goal_fn(route, 1.5, "bearing_near", .5, None,
+                        f.callback.goal_vector, f.callback.route_goal_heading,
+                        arrival_radius_m=.3, arrival_scope="recorded-fixture")
+    original = goal(xy, measured_yaw).numpy()
+    previous_heading = goal.diagnostics["first"]["heading_rad"]
+    assert previous_heading == pytest.approx(-.7580145137218708)
+    state = goal.set_anchor(anchor(xy, measured_yaw), None)
+    goal.reset_diagnostics()
+    np.testing.assert_array_equal(goal(xy, measured_yaw).numpy(), original)
+    assert state["heading_rad"] == previous_heading
+    assert state["heading_basis"] == "source_route_goal_at_observed_anchor"
+    # Route refresh after crossing the point cannot flip the arrival heading.
+    route.start = np.array([3.2, -.2])
+    route.path = route._plan()
+    route.arc = np.r_[0., np.cumsum(np.linalg.norm(np.diff(route.path, axis=0), axis=1))]
+    assert goal.set_anchor(anchor([3.2, -.2], -.1), state) is state
+    for candidate_yaw in (-2.7, .1, 2.8):
+        result = goal([3.2, -.2], candidate_yaw).numpy()
+        np.testing.assert_allclose(result[2:], [np.cos(previous_heading-candidate_yaw),
+                                               np.sin(previous_heading-candidate_yaw)], atol=1e-7)
 
 
 def test_cached_planner_resets_state_even_for_identical_repeated_episode(monkeypatch):

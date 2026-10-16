@@ -105,7 +105,7 @@ def test_zero_length_route_and_occupied_start_do_not_invent_progress():
 
 @pytest.mark.parametrize("xy", [[.2, 0], [-.2, 0], [0, .2], [0, -.2]])
 @pytest.mark.parametrize("yaw", [-3.13, .9, 3.13])
-def test_position_only_arrival_latches_anchor_world_yaw_on_every_side(xy, yaw):
+def test_position_only_arrival_latches_approach_heading_on_every_side(xy, yaw):
     flow = bundle.load_flow()
     mem = SimpleNamespace(support=np.zeros((241, 241)), n=241, lo=np.array([-6., -6.]), res=.05)
     route = flow.route.SensorRoute(xy, [0, 0], mem)
@@ -113,19 +113,21 @@ def test_position_only_arrival_latches_anchor_world_yaw_on_every_side(xy, yaw):
                         flow.callback.goal_vector, flow.callback.route_goal_heading,
                         arrival_radius_m=.3, arrival_scope="episode-a")
     anchor = np.r_[xy, .8, np.cos(yaw / 2), 0, 0, np.sin(yaw / 2), np.zeros(29)]
+    _, approach_heading, _ = route.waypoint(xy, 1.5, update=False)
     state = goal.set_anchor(anchor, None)
-    expected = flow.callback.goal_vector([0, 0], yaw, np.array(xy), yaw).numpy()
+    expected = flow.callback.goal_vector([0, 0], approach_heading, np.array(xy), yaw).numpy()
     np.testing.assert_allclose(goal(xy, yaw).numpy(), expected, atol=1e-7)
     assert goal.diagnostics["arrival_heading_held"] == 1
     assert goal.diagnostics["first"]["heading_policy"] == "latched_arrival_world_yaw"
-    # Refresh can flip the route's final segment; each predicted candidate yaw
-    # remains its own reference, including across quaternion/yaw wrap.
+    # Refresh can flip the route's final segment; the arrival approach heading
+    # remains fixed, including across quaternion/yaw wrap.
     other = -np.array(xy)
     route.refresh(other, .2, force=True)
     anchor[:2] = other
     anchor[3:7] = [np.cos(-yaw / 2), 0, 0, np.sin(-yaw / 2)]
     assert goal.set_anchor(anchor, state) is state
-    np.testing.assert_allclose(goal(other, -yaw).numpy()[2:], [np.cos(2 * yaw), np.sin(2 * yaw)], atol=1e-7)
+    np.testing.assert_allclose(goal(other, -yaw).numpy()[2:],
+                               [np.cos(approach_heading + yaw), np.sin(approach_heading + yaw)], atol=1e-7)
 
 
 def test_arrival_heading_condition_preserves_non_near_and_explicit_path_modes():

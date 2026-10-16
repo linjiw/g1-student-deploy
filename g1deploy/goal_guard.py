@@ -6,11 +6,11 @@ It does not establish whole-body clearance or certify unobserved space.
 
 import numpy as np
 
-REVISION = "route-visible-goal-v4-anchor-arrival"
+REVISION = "route-visible-goal-v5-approach-arrival"
 
 
-def update_arrival_latch(state, anchor, goal, radius, release_distance, scope):
-    """Latch a world yaw from a real plan request, never candidate iteration.
+def update_arrival_latch(state, anchor, goal, radius, release_distance, scope, entry_heading):
+    """Latch the requested approach heading at a real plan request's anchor.
 
     Entry uses the existing navigation position tolerance. Release uses the
     existing near-goal lookahead region for hysteresis; a new goal/run resets it.
@@ -26,7 +26,8 @@ def update_arrival_latch(state, anchor, goal, radius, release_distance, scope):
     if state is None and distance <= radius:
         w, x, y, z = anchor[3:7]
         state = dict(scope=scope, goal_xy=goal.tolist(), radius_m=float(radius),
-                     heading_rad=float(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))),
+                     heading_rad=float(entry_heading), heading_basis="source_route_goal_at_observed_anchor",
+                     entry_measured_yaw_rad=float(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))),
                      entry_anchor_xy=anchor[:2].tolist(), release_distance_m=float(release_distance))
     return state
 
