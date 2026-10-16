@@ -60,21 +60,34 @@ def write_json(path, value):
     Path(path).write_text(json.dumps(_finite(value), indent=1, allow_nan=False, default=float) + "\n")
 
 
-def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac, goal_vector, route_goal_heading):
+def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac, goal_vector, route_goal_heading,
+                 *, arrival_radius_m=None, arrival_scope=None):
     """Source pursuit semantics with a deployment occupancy-prefix guard.
 
     Shared by this rehearsal and g1deploy.node's planner workers. The long
     pursuit ray can overshoot a route bend; return to the visible route when
     that ray enters occupied cells, falling back to its free prefix if needed.
     """
-    from g1deploy.goal_guard import REVISION, limit_goal
+    from g1deploy.goal_guard import REVISION, limit_goal, update_arrival_latch
+
+    if arrival_radius_m is not None and (not math.isfinite(arrival_radius_m) or arrival_radius_m < 0):
+        raise ValueError("arrival_radius_m must be finite and nonnegative")
 
     diagnostics = {}
+    arrival_state = None
+
+    def set_anchor(anchor, state):
+        nonlocal arrival_state
+        radius = arrival_radius_m if heading_mode == "bearing_near" else None
+        arrival_state = update_arrival_latch(state, anchor, route.goal, radius,
+                                            max(radius or 0.0, 0.5 * lookahead), arrival_scope)
+        return arrival_state
 
     def reset_diagnostics():
         diagnostics.clear()
         diagnostics.update(revision=REVISION, queries=0, limited=0, redirected=0,
-                           occupied_starts=0, arrival_heading_held=0, first=None)
+                           occupied_starts=0, arrival_heading_held=0, first=None,
+                           arrival_radius_m=arrival_radius_m, arrival_latch=arrival_state)
 
     def goal_fn(xy, yaw):
         w, h, rem = route.waypoint(xy, lookahead, update=False)
@@ -94,14 +107,12 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
         if status == "redirected_to_visible_route" and heading_mode != "path":
             delta = guarded - np.asarray(xy)
             heading = math.atan2(delta[1], delta[0])
-        # A position-only goal does not request a final orientation. SensorRoute
-        # refreshes its final segment from the current pose, so using that
-        # segment near arrival can demand a sudden turn as the goal is crossed.
-        # Keep each candidate's present yaw inside the existing near-goal region;
-        # retain its actual XY goal and all source speed/hold scoring.
-        hold_heading = heading_mode == "bearing_near" and rem < 0.5 * lookahead
+        # Arrival is entered only by the plan request's anchor, not by whichever
+        # sampled candidate first predicts a nearby point. A fixed WORLD yaw
+        # supplies a restoring orientation throughout the reference window.
+        hold_heading = arrival_state is not None
         if hold_heading:
-            heading = yaw
+            heading = arrival_state["heading_rad"]
         diagnostics["arrival_heading_held"] += hold_heading
         diagnostics["queries"] += 1
         diagnostics["limited"] += status == "limited_at_occupied_grid"
@@ -112,11 +123,12 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
                                         requested_xy=np.asarray(w).tolist(),
                                         returned_xy=guarded.tolist(), status=status,
                                         candidate_yaw_rad=float(yaw), heading_rad=float(heading),
-                                        heading_policy="hold_candidate_yaw" if hold_heading else "route_pursuit")
+                                        heading_policy="latched_arrival_world_yaw" if hold_heading else "route_pursuit")
         return goal_vector(guarded, heading, xy, yaw)
 
     reset_diagnostics()
     goal_fn.reset_diagnostics = reset_diagnostics
+    goal_fn.set_anchor = set_anchor
     goal_fn.diagnostics = diagnostics
     return goal_fn
 
@@ -140,6 +152,7 @@ def cached_planner(flow, pcfg, impl="fused", precision="fp32"):
     planner.cfg = pcfg
     planner.generator.manual_seed(int(pcfg.seed))
     planner.calls = 0
+    planner._g1_arrival_heading = None  # repeated independent episodes must not share an arrival latch
     return planner
 
 
@@ -164,6 +177,7 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
     pcfg = flow.planner.PlannerConfig(**pdict)
     planner = cached_planner(flow, pcfg, planner_impl, planner_precision)
     ep = dict(cfg["episode"])
+    ep["arrival_radius_m"] = float(task["goal_radius_m"])
     if goal_lookahead:
         ep["goal_lookahead_m"] = float(goal_lookahead)  # the local goal distance sets the planner's walking speed
     replan, lookahead = int(ep["replan_ticks"]), float(ep["goal_lookahead_m"])
@@ -250,7 +264,8 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
     else:
         route = flow.route.Route(start_q[:2], goal_xy, boxes, **route_cfg)
     goal_fn = make_goal_fn(route, lookahead, ep["goal_heading"], float(ep["steer_lookahead_m"]), ep.get("turn_min_frac"),
-                           flow.callback.goal_vector, flow.callback.route_goal_heading)
+                           flow.callback.goal_vector, flow.callback.route_goal_heading,
+                           arrival_radius_m=ep["arrival_radius_m"], arrival_scope=str(out.resolve()))
     scorer = TaskScorer(task)
     lat_ticks = int(round(latency_s / 0.02))
 
@@ -288,6 +303,7 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
                 anchor_at = tick + lat_ticks if predictive else tick
                 prev = None if active is None else (active[0], anchor_at - active[1])
                 tp = time.perf_counter()
+                goal_fn.arrival_anchor = qpos.copy()  # observed estimate, not latency-predicted history
                 plan = planner.plan(np.asarray(plan_hist), boxes, goal_fn, map_fn, clearance_fn, prev=prev,
                                     guide_boxes=guide_boxes)
                 latency = time.perf_counter() - tp

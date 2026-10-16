@@ -291,7 +291,10 @@ def _worker(conn, pdict, episode, seed, impl="fused", precision="fp32"):
 
         guide = sm.memory_boxes(view, grow_overhead_m=pc.guide_grow_overhead_m) if pc.guide_w > 0 else None
         goal_fn = make_goal_fn(route, episode["goal_lookahead_m"], episode["goal_heading"], episode["steer_lookahead_m"],
-                               None, cb.goal_vector, cb.route_goal_heading)
+                               None, cb.goal_vector, cb.route_goal_heading,
+                               arrival_radius_m=episode["arrival_radius_m"],
+                               arrival_scope=job["navigation_generation"])
+        goal_fn.arrival_anchor = job["arrival_anchor"]
         try:
             plan = planner.plan(np.asarray(hist), [], goal_fn, map_fn, sel, prev=None, guide_boxes=guide)
             out = {k: plan[k] for k in ("qpos", "rotation", "joint_velocity", "rule", "chosen_clearance_m")}
@@ -384,6 +387,8 @@ class StudentNode:
         self.flow = bundle.load_flow()
         cfg = bundle.student_config()
         self.episode = dict(cfg["episode"])
+        self.episode["arrival_radius_m"] = float(args.goal_radius)
+        self.navigation_generation = 0
         if args.goal_lookahead:
             self.episode["goal_lookahead_m"] = args.goal_lookahead
         self.replan = int(self.episode["replan_ticks"])
@@ -491,7 +496,9 @@ class StudentNode:
             view = memory_view(self.memory)
         jid = self.next_id
         self.next_id += 1
-        self.pool.submit(worker, {"id": jid, "hist": [np.asarray(h) for h in hist], "route": route, "memory": view})
+        self.pool.submit(worker, {"id": jid, "hist": [np.asarray(h) for h in hist], "route": route, "memory": view,
+                                  "arrival_anchor": np.asarray(self.history[-1]).copy(),
+                                  "navigation_generation": self.navigation_generation})
         self.jobs[jid] = (now_tick + lead, np.asarray(hist[-1], dtype=np.float64),
                           self.flow.feed.finite_difference_dq(hist), now_tick, first)
         self.last_request = now_tick
@@ -595,6 +602,7 @@ class StudentNode:
             if cmd == "go":
                 self.go_event.set()
                 if self.phase in ("ARRIVED", "STOPPED"):  # walk again from the stand
+                    self.navigation_generation += 1
                     self.phase, prescan_until = "PRESCAN", self.tick + int(self.args.prescan_s / DT)
                     self.pending_stand, self.jobs = None, {}
                     self.last_streamed_anchor = self.tick
@@ -606,6 +614,7 @@ class StudentNode:
                 if self.active is not None:
                     self.stand(self.tick, "operator")
             elif cmd == "goal":
+                self.navigation_generation += 1
                 w, x, y, z = q[3:7]
                 yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
                 ahead, left = float(c.get("ahead", 0.0)), float(c.get("left", 0.0))
@@ -624,6 +633,7 @@ class StudentNode:
         """Everything one run accumulates; a restarted run (after a stop or stand) must not inherit it - e.g. a
         stand pushes last_streamed_anchor far ahead, which would reject every later plan as stale."""
         self.tick, self.phase, self.active, self.jobs = 0, "WAIT", None, {}
+        self.navigation_generation += 1
         self.pending_stand = None
         self.commands_quit = False
         self.last_streamed_anchor, self.last_request, self.stream_end = -10**9, -10**9, -1

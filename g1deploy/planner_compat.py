@@ -42,6 +42,9 @@ own selection: this adapter never substitutes a candidate after that verifier.
     @wraps(original)
     def plan(self, qpos_hist, *args, **kwargs):
         goal_fn = args[1] if len(args) > 1 else kwargs.get("goal_fn")
+        if hasattr(goal_fn, "set_anchor"):
+            anchor = getattr(goal_fn, "arrival_anchor", np.asarray(qpos_hist)[-1])
+            self._g1_arrival_heading = goal_fn.set_anchor(anchor, getattr(self, "_g1_arrival_heading", None))
         if hasattr(goal_fn, "reset_diagnostics"):
             goal_fn.reset_diagnostics()
         out = original(self, qpos_hist, *args, **kwargs)

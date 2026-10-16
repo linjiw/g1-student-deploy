@@ -104,3 +104,20 @@ def test_installer_idempotent_for_existing_class_and_fast_subclasses():
     fast.__dict__.update(p.__dict__)
     result = fast.plan(np.zeros((2, 36)), [], lambda xy, yaw: None)
     assert result["candidate_pool"] == "stop" and result["choice"] == 4
+
+
+def test_arrival_uses_explicit_observed_anchor_not_predicted_planner_history():
+    p = planner([[.08]])
+    observed = np.arange(36, dtype=float)
+    goal = lambda xy, yaw: None
+    goal.arrival_anchor = observed
+    calls = []
+    def set_anchor(anchor, state):
+        calls.append((np.asarray(anchor).copy(), state))
+        return {"heading_rad": .7}
+    goal.set_anchor = set_anchor
+    p._g1_arrival_heading = {"heading_rad": .3}
+    p.plan(np.zeros((2, 36)), [], goal)
+    np.testing.assert_array_equal(calls[0][0], observed)
+    assert calls[0][1] == {"heading_rad": .3}
+    assert p._g1_arrival_heading == {"heading_rad": .7}

@@ -91,13 +91,21 @@ lidar, odometry, calibration) · [docs/READINESS.md](docs/READINESS.md) (what is
 Video: `runs/video/g1_deploy_tutorial.mp4` (built by `tools/make_tutorial.py` from recorded `g1 sim` sessions).
 
 
-For position-only navigation (`bearing_near`), the existing near-goal region
-(remaining route distance below half the configured lookahead) now preserves
-each candidate's current yaw while still targeting the requested XY point.
-This avoids chasing the final segment heading when sensor-route refresh flips
-that heading around a nearly reached point. Explicit `path` heading mode keeps
-its configured path orientation, including after route-goal redirection. Goal
-radius, speed and continuous-hold criteria remain unchanged.
+For position-only navigation (`bearing_near`), arrival heading latches from the
+observed robot pose once it enters the existing navigation position tolerance:
+the task's `goal_radius_m` in lockstep, or the node's `--goal-radius`. All future
+candidates then target this fixed world yaw while retaining their requested XY
+point. This avoids chasing a final segment that flips around a nearly reached
+point, without suppressing approach turns before arrival or allowing a sampled
+future to activate arrival. The latch survives fresh worker callbacks, releases
+outside the existing half-lookahead region (or radius, if larger), and resets
+for new goals and independent runs. Node jobs retain the observed pose separately
+from latency-predicted history. Explicit `path` mode keeps its path orientation,
+including after route-goal redirection. Goal radius, speed and continuous-hold
+scoring remain unchanged; heading latching does not declare goal completion.
+
+Focused adapter tests (no model inference):
+`CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 .venv/bin/python -m pytest tests/test_route.py tests/test_planner_selection.py tests/test_goal_guard.py tests/test_route_config.py tests/test_arrival_latch.py -q`.
 
 Positive uncertainty buffers that round to zero support-grid cells are rejected
 at `SensorRoute` construction: SciPy otherwise interprets zero dilation
