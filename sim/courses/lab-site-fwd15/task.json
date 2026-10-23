@@ -1,0 +1,706 @@
+{
+ "task_id": "site-lab-site-fwd15",
+ "family": "site",
+ "description": "lab-site-2m twin, robot started 1.5 m further forward (same heading), 2 m walk",
+ "scene_boxes_world": [
+  {
+   "center_xy": [
+    -1.492,
+    -1.567
+   ],
+   "half_xy": [
+    0.82,
+    1.17
+   ],
+   "z_bottom": 0.0,
+   "z_top": 1.72,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    -1.677,
+    1.581
+   ],
+   "half_xy": [
+    0.72,
+    1.98
+   ],
+   "z_bottom": 0.0,
+   "z_top": 1.66,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    -1.566,
+    2.428
+   ],
+   "half_xy": [
+    0.12,
+    0.15
+   ],
+   "z_bottom": 0.0,
+   "z_top": 0.68,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    -0.48,
+    -2.284
+   ],
+   "half_xy": [
+    0.6,
+    0.6
+   ],
+   "z_bottom": 0.0,
+   "z_top": 1.6,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    -1.282,
+    3.061
+   ],
+   "half_xy": [
+    0.33,
+    0.25
+   ],
+   "z_bottom": 0.0,
+   "z_top": 0.82,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    -1.226,
+    2.534
+   ],
+   "half_xy": [
+    0.22,
+    0.27
+   ],
+   "z_bottom": 0.0,
+   "z_top": 0.69,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    -1.023,
+    -0.029
+   ],
+   "half_xy": [
+    0.05,
+    0.05
+   ],
+   "z_bottom": 0.0,
+   "z_top": 0.56,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    -1.272,
+    2.781
+   ],
+   "half_xy": [
+    0.05,
+    0.02
+   ],
+   "z_bottom": 0.0,
+   "z_top": 0.68,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    -0.744,
+    -0.099
+   ],
+   "half_xy": [
+    0.22,
+    0.1
+   ],
+   "z_bottom": 0.0,
+   "z_top": 1.32,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    -0.695,
+    -0.275
+   ],
+   "half_xy": [
+    0.05,
+    0.08
+   ],
+   "z_bottom": 0.0,
+   "z_top": 0.64,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    -0.406,
+    3.808
+   ],
+   "half_xy": [
+    0.33,
+    0.15
+   ],
+   "z_bottom": 0.0,
+   "z_top": 0.64,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    -0.297,
+    3.538
+   ],
+   "half_xy": [
+    0.2,
+    0.12
+   ],
+   "z_bottom": 0.0,
+   "z_top": 1.35,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    0.257,
+    -1.934
+   ],
+   "half_xy": [
+    0.13,
+    0.12
+   ],
+   "z_bottom": 0.0,
+   "z_top": 1.42,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    0.914,
+    -2.437
+   ],
+   "half_xy": [
+    0.57,
+    0.45
+   ],
+   "z_bottom": 0.0,
+   "z_top": 1.51,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    -0.036,
+    3.446
+   ],
+   "half_xy": [
+    0.05,
+    0.1
+   ],
+   "z_bottom": 0.0,
+   "z_top": 1.4,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    0.674,
+    3.391
+   ],
+   "half_xy": [
+    0.35,
+    0.27
+   ],
+   "z_bottom": 0.0,
+   "z_top": 0.8,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    1.714,
+    -2.583
+   ],
+   "half_xy": [
+    0.05,
+    0.02
+   ],
+   "z_bottom": 0.0,
+   "z_top": 0.13,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    2.961,
+    -2.017
+   ],
+   "half_xy": [
+    0.6,
+    0.6
+   ],
+   "z_bottom": 0.0,
+   "z_top": 1.04,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    3.027,
+    2.264
+   ],
+   "half_xy": [
+    0.23,
+    0.2
+   ],
+   "z_bottom": 0.0,
+   "z_top": 0.28,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    3.537,
+    1.534
+   ],
+   "half_xy": [
+    0.2,
+    0.32
+   ],
+   "z_bottom": 0.0,
+   "z_top": 0.84,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    -1.854,
+    -0.248
+   ],
+   "half_xy": [
+    0.75,
+    0.73
+   ],
+   "z_bottom": 0.84,
+   "z_top": 0.94,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    -1.81,
+    2.351
+   ],
+   "half_xy": [
+    0.63,
+    0.65
+   ],
+   "z_bottom": 1.39,
+   "z_top": 1.49,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    -1.675,
+    2.034
+   ],
+   "half_xy": [
+    0.67,
+    0.82
+   ],
+   "z_bottom": 1.1,
+   "z_top": 1.2,
+   "yaw": 0.1063
+  },
+  {
+   "center_xy": [
+    -0.316,
+    3.436
+   ],
+   "half_xy": [
+    0.83,
+    0.73
+   ],
+   "z_bottom": 0.85,
+   "z_top": 0.95,
+   "yaw": 0.1063
+  }
+ ],
+ "initial_state_record": "sim/courses/stand_start.npz",
+ "initial_frame": 0,
+ "initial_root_xy": [
+  1.5,
+  0.0
+ ],
+ "goal_world_xy": [
+  3.5,
+  0.0
+ ],
+ "deadline_s": 25.0,
+ "goal_radius_m": 0.4,
+ "goal_speed_m_s": 2.0,
+ "goal_hold_s": 0.1,
+ "fall_height_m": 0.38,
+ "fall_tilt_rad": 0.8,
+ "obstacle_contact_threshold_n": 5.0,
+ "source_site": {
+  "verdict": "NO-GO",
+  "reasons": [
+   "start inside a 0.3 x 0.1 m obstacle box (centre [-0.25, 0.0]): connected walls/furniture around the robot",
+   "merged box 1.4 x 4.0 m at [-1.5, 1.75]: the planner treats it as one solid block",
+   "67 % of the route crosses never-seen cells",
+   "5 ceiling cells below 1.35 m within 0.8 m of the start (closest 0.4 m at 1.22 m high): the node defers its stand there"
+  ],
+  "frames": 46,
+  "start_xy": [
+   0.0,
+   0.0
+  ],
+  "start_yaw": -0.1063,
+  "goal_xy": [
+   1.989,
+   -0.212
+  ],
+  "goal_ahead_left": [
+   2.0,
+   0.0
+  ],
+  "route": {
+   "found": true,
+   "length_m": 2.0,
+   "unseen_fraction": 0.67
+  },
+  "boxes": [
+   {
+    "center_xy": [
+     -1.65,
+     -1.4
+    ],
+    "half_xy": [
+     0.82,
+     1.17
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 1.72
+   },
+   {
+    "center_xy": [
+     -1.5,
+     1.75
+    ],
+    "half_xy": [
+     0.72,
+     1.98
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 1.66
+   },
+   {
+    "center_xy": [
+     -1.3,
+     2.58
+    ],
+    "half_xy": [
+     0.12,
+     0.15
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 0.68
+   },
+   {
+    "center_xy": [
+     -0.72,
+     -2.22
+    ],
+    "half_xy": [
+     0.6,
+     0.6
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 1.6
+   },
+   {
+    "center_xy": [
+     -0.95,
+     3.18
+    ],
+    "half_xy": [
+     0.33,
+     0.25
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 0.82
+   },
+   {
+    "center_xy": [
+     -0.95,
+     2.65
+    ],
+    "half_xy": [
+     0.22,
+     0.27
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 0.69
+   },
+   {
+    "center_xy": [
+     -1.02,
+     0.08
+    ],
+    "half_xy": [
+     0.05,
+     0.05
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 0.56
+   },
+   {
+    "center_xy": [
+     -0.97,
+     2.9
+    ],
+    "half_xy": [
+     0.05,
+     0.02
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 0.68
+   },
+   {
+    "center_xy": [
+     -0.75,
+     -0.02
+    ],
+    "half_xy": [
+     0.22,
+     0.1
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 1.32
+   },
+   {
+    "center_xy": [
+     -0.72,
+     -0.2
+    ],
+    "half_xy": [
+     0.05,
+     0.08
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 0.64
+   },
+   {
+    "center_xy": [
+     -0.25,
+     0.0
+    ],
+    "half_xy": [
+     0.13,
+     0.02
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 1.23
+   },
+   {
+    "center_xy": [
+     0.0,
+     3.83
+    ],
+    "half_xy": [
+     0.33,
+     0.15
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 0.64
+   },
+   {
+    "center_xy": [
+     0.08,
+     3.55
+    ],
+    "half_xy": [
+     0.2,
+     0.12
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 1.35
+   },
+   {
+    "center_xy": [
+     0.05,
+     -1.95
+    ],
+    "half_xy": [
+     0.13,
+     0.12
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 1.42
+   },
+   {
+    "center_xy": [
+     0.65,
+     -2.52
+    ],
+    "half_xy": [
+     0.57,
+     0.45
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 1.51
+   },
+   {
+    "center_xy": [
+     0.33,
+     3.43
+    ],
+    "half_xy": [
+     0.05,
+     0.1
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 1.4
+   },
+   {
+    "center_xy": [
+     1.03,
+     3.3
+    ],
+    "half_xy": [
+     0.35,
+     0.27
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 0.8
+   },
+   {
+    "center_xy": [
+     1.43,
+     -2.75
+    ],
+    "half_xy": [
+     0.05,
+     0.02
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 0.13
+   },
+   {
+    "center_xy": [
+     2.73,
+     -2.32
+    ],
+    "half_xy": [
+     0.6,
+     0.6
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 1.04
+   },
+   {
+    "center_xy": [
+     3.25,
+     1.93
+    ],
+    "half_xy": [
+     0.23,
+     0.2
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 0.28
+   },
+   {
+    "center_xy": [
+     3.68,
+     1.15
+    ],
+    "half_xy": [
+     0.2,
+     0.32
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.0,
+    "z_top": 0.84
+   },
+   {
+    "center_xy": [
+     -1.87,
+     -0.05
+    ],
+    "half_xy": [
+     0.75,
+     0.73
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.84,
+    "z_top": 0.94
+   },
+   {
+    "center_xy": [
+     -1.55,
+     2.53
+    ],
+    "half_xy": [
+     0.63,
+     0.65
+    ],
+    "yaw": 0.0,
+    "z_bottom": 1.39,
+    "z_top": 1.49
+   },
+   {
+    "center_xy": [
+     -1.45,
+     2.2
+    ],
+    "half_xy": [
+     0.67,
+     0.82
+    ],
+    "yaw": 0.0,
+    "z_bottom": 1.1,
+    "z_top": 1.2
+   },
+   {
+    "center_xy": [
+     -0.45,
+     -0.05
+    ],
+    "half_xy": [
+     0.67,
+     0.68
+    ],
+    "yaw": 0.0,
+    "z_bottom": 1.22,
+    "z_top": 1.32
+   },
+   {
+    "center_xy": [
+     0.05,
+     3.45
+    ],
+    "half_xy": [
+     0.83,
+     0.73
+    ],
+    "yaw": 0.0,
+    "z_bottom": 0.85,
+    "z_top": 0.95
+   }
+  ],
+  "mount": "/home/robotixx/g1-student-deploy/robots/lab-g1/mount.json",
+  "odom": "leg"
+ }
+}

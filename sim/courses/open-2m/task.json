@@ -1,0 +1,23 @@
+{
+ "task_id": "course-open-2m",
+ "family": "course",
+ "description": "H5 first walk: open floor, 2 m ahead",
+ "scene_boxes_world": [],
+ "initial_state_record": "sim/courses/stand_start.npz",
+ "initial_frame": 0,
+ "initial_root_xy": [
+  0.0,
+  0.0
+ ],
+ "goal_world_xy": [
+  2.0,
+  0.0
+ ],
+ "deadline_s": 25.0,
+ "goal_radius_m": 0.4,
+ "goal_speed_m_s": 2.0,
+ "goal_hold_s": 0.1,
+ "fall_height_m": 0.38,
+ "fall_tilt_rad": 0.8,
+ "obstacle_contact_threshold_n": 5.0
+}

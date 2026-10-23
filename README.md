@@ -34,6 +34,13 @@ Status: simulation only. Nothing has run on a robot. See [docs/DESIGN.md](docs/D
 | `g1deploy/adapters/` | LIO frame math through the waist + 50 Hz pose filter (tested), ROS 2 FAST-LIO bridge (untested) |
 | `tools/check_robot.py`, `tools/stream_replay.py` | hardware ladder H1–H2 (read-only checks) and H4 (stream without the planner) |
 
+## Deployment kit
+
+[docs/DEPLOY_KIT.md](docs/DEPLOY_KIT.md) is the robot-day runbook: `./g1 doctor` (pre-flight), robot profiles
+(`robots/`), every session recorded by `g1deploy/recorder.py` (lowstate, lowcmd, raw lidar, streams, node status)
+with a report at exit, the simulation course library (`sim/courses`, `./g1 courses`), multi-goal missions, the
+Livox adapter for G1s without Unitree's lidar service, and `jobs/dress_rehearsal.sh` (the whole ladder in simulation).
+
 ## Quick start
 
 Near-goal routing preserves both physical endpoints when A* returns a single

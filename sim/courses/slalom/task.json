@@ -1,0 +1,50 @@
+{
+ "task_id": "course-slalom",
+ "family": "course",
+ "description": "H6: two columns, left then right",
+ "scene_boxes_world": [
+  {
+   "center_xy": [
+    1.2,
+    0.35
+   ],
+   "half_xy": [
+    0.15,
+    0.15
+   ],
+   "z_bottom": 0.0,
+   "z_top": 1.8,
+   "yaw": 0.0
+  },
+  {
+   "center_xy": [
+    2.4,
+    -0.35
+   ],
+   "half_xy": [
+    0.15,
+    0.15
+   ],
+   "z_bottom": 0.0,
+   "z_top": 1.8,
+   "yaw": 0.0
+  }
+ ],
+ "initial_state_record": "sim/courses/stand_start.npz",
+ "initial_frame": 0,
+ "initial_root_xy": [
+  0.0,
+  0.0
+ ],
+ "goal_world_xy": [
+  3.4,
+  0.0
+ ],
+ "deadline_s": 25.0,
+ "goal_radius_m": 0.4,
+ "goal_speed_m_s": 2.0,
+ "goal_hold_s": 0.1,
+ "fall_height_m": 0.38,
+ "fall_tilt_rad": 0.8,
+ "obstacle_contact_threshold_n": 5.0
+}
