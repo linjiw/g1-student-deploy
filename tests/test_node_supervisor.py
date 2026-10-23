@@ -132,3 +132,22 @@ def test_soft_stop_is_deferred_under_a_beam(node):
     threading.Timer(8.0, lambda: setattr(st, "xy", np.array([-2.0, 0.0]))).start()  # walks clear of the beam
     ev, _ = _run(node, st, cl, lambda e: "stand" in e, timeout=25.0)
     assert "stand_deferred" in ev and "stand" in ev and ev.index("stand_deferred") < ev.index("stand")
+
+
+def test_rejected_first_plan_is_replanned(node):
+    """A first plan dropped by the sanity check (e.g. a crouch under a phantom ceiling) must not deadlock RUN: with no
+    active plan the node has to ask again (rehearsal 2026-10-23: one dropped first plan left the robot standing in
+    RUN for 90 s)."""
+    st, cl = FakeState(), FakeCloud()
+    orig, calls = node.sane, []
+
+    def reject_first(plan):
+        calls.append(1)
+        return "test: rejected first plan" if len(calls) == 1 else orig(plan)
+
+    node.sane = reject_first
+    try:
+        ev, _ = _run(node, st, cl, lambda e: "run" in e, timeout=30.0)
+    finally:
+        node.sane = orig
+    assert "plan_dropped" in ev and "run" in ev and ev.index("plan_dropped") < ev.index("run")

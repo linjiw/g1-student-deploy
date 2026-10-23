@@ -496,6 +496,16 @@ class StudentNode:
             view = memory_view(self.memory)
         jid = self.next_id
         self.next_id += 1
+        dump = getattr(getattr(self, "args", None), "debug_dump", None)
+        if dump:  # opt-in: the planner's exact inputs, for tools/debug_plan.py (off on deploy runs)
+            path = getattr(route, "path", None)
+            np.savez_compressed(Path(dump) / f"plan_{jid:04d}_in.npz", hist=np.asarray(hist),
+                                support=view.support.astype(np.float32), ceiling=view.ceiling.astype(np.float32),
+                                lo=view.lo, res=view.res, n=view.n, goal=self.goal, tick=now_tick, lead=lead,
+                                t=time.monotonic(), route_path=np.zeros((0, 2)) if path is None else np.asarray(path),
+                                route_found=bool(getattr(route, "found", False)),
+                                navigation_generation=self.navigation_generation,
+                                arrival_anchor=np.asarray(self.history[-1]))
         self.pool.submit(worker, {"id": jid, "hist": [np.asarray(h) for h in hist], "route": route, "memory": view,
                                   "arrival_anchor": np.asarray(self.history[-1]).copy(),
                                   "navigation_generation": self.navigation_generation})
@@ -532,6 +542,11 @@ class StudentNode:
             reason = self.sane(plan)
             self.log.append(dict(tick=now_tick, req_tick=req_tick, anchor_tick=anchor_tick, latency_s=lat,
                                  late_ticks=now_tick - anchor_tick, rule=plan["rule"], rejected=reason))
+            dump = getattr(getattr(self, "args", None), "debug_dump", None)
+            if dump:
+                np.savez_compressed(Path(dump) / f"plan_{jid:04d}_out.npz", qpos=plan["qpos"],
+                                    rule=plan["rule"], rejected=str(reason), latency_s=lat, landed_tick=now_tick,
+                                    anchor_tick=anchor_tick)
             if reason or anchor_tick <= self.last_streamed_anchor:
                 emit("plan_dropped", reason=reason or "stale", anchor_tick=anchor_tick)
                 continue
@@ -721,7 +736,9 @@ class StudentNode:
                 elif cloud_age > a.cloud_timeout:
                     self.phase = "STOPPED"
                     self.stand(self.tick, f"cloud stale {cloud_age:.2f}s")
-                elif self.active is not None and self.pool.free() and self.tick - self.last_request >= self.replan:
+                elif self.pool.free() and self.tick - self.last_request >= self.replan:
+                    # also with no active plan: a first plan dropped by sane() must be asked for again (it used to
+                    # leave the robot standing in RUN forever; tests/test_node_supervisor.py)
                     self.request(self.tick, self.pool.free()[0])
                 if self.active is not None and 0 <= self.stream_end - self.tick < LOOKAHEAD_FRAMES:
                     emit("stall_risk", ahead=self.stream_end - self.tick)
@@ -782,6 +799,7 @@ def parse(argv=None):
     ap.add_argument("--start-file", default=None, help="wait until this file exists before the prescan")
     ap.add_argument("--control", default="tcp://*:5562", help="operator command socket (ZMQ REP); '' disables")
     ap.add_argument("--wait-go", action="store_true", help="do nothing until the operator sends 'go'")
+    ap.add_argument("--debug-dump", default=None, help="write every plan's inputs and result here (debugging only)")
     return ap.parse_args(argv)
 
 
@@ -789,13 +807,20 @@ def main(argv=None):
     import signal
 
     args = parse(argv)
+    if args.debug_dump:
+        Path(args.debug_dump).mkdir(parents=True, exist_ok=True)
     node = StudentNode(args)
     state = DdsState(args.iface, args.domain, args.odom)
     if args.odom == "leg":
         LegOdomSource(state)
+    # created before the goal is anchored: with --odom zmq nothing else feeds the state until run() (the start-frame
+    # wait below used to time out and the node died with "no robot state to anchor the goal")
+    odom = OdomInput(state, args.odom_connect) if args.odom == "zmq" else None
     if args.goal_frame == "start":
         t0 = time.monotonic()
         while state.snapshot() is None and time.monotonic() - t0 < 10:
+            if odom is not None:
+                odom.poll()
             time.sleep(0.02)
         snap = state.snapshot()
         if snap is None:
@@ -825,7 +850,7 @@ def main(argv=None):
         signal.signal(sig, lambda *_: node.stop_flag.set())
     result = "interrupted"
     try:
-        result = node.run(state, cloud, start, OdomInput(state, args.odom_connect) if args.odom == "zmq" else None)
+        result = node.run(state, cloud, start, odom)
     finally:
         node.stop_flag.set()
         emit("node_exit", result=result, plans=len(node.log), overruns=node.overruns, skipped=node.skipped,
