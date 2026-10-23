@@ -1,0 +1,39 @@
+{
+ "name": "lab-g1",
+ "iface": "eno1",
+ "lidar": "livox",
+ "body": "dex3",
+ "odom": "leg",
+ "mount_calib": "robots/lab-g1/mount.json",
+ "facts": {
+  "measured": "2026-10-23 on this deploy PC (read-only bring-up)",
+  "lowstate_hz": 1000,
+  "lowstate_duplicates_pct": 5,
+  "controller_mode_at_boot": "ai: Unitree's 'humanoid' service writes rt/lowcmd at 1 kHz until the runner releases it; seen limp (all gains 0) at 17:58 and holding a stand (kp 40-200) from ~18:08 on 2026-10-23. ReleaseMode drops that hold, so the gantry must carry the weight when the runner starts",
+  "hands": "Dex3 (g1_dex_protocol_v2.0 on PC1)",
+  "lidar": "MID-360 at 192.168.123.120 streams to this PC (host_net_info 192.168.123.222); no Unitree lidar_driver service on this firmware; livox_ros_driver2 -> g1deploy/adapters/livox_to_utlidar.py",
+  "lidar_blocked_azimuth_deg": [
+   [
+    -45,
+    -35
+   ],
+   [
+    40,
+    50
+   ],
+   [
+    85,
+    90
+   ],
+   [
+    155,
+    160
+   ]
+  ],
+  "mount_calib_status": "PRELIMINARY: robot hanging limp in the gantry (height from FK may be off). Re-run `g1 calibrate` with SONIC holding the stand (H3) and overwrite robots/lab-g1/mount.json",
+  "lidar_clock": "Livox frame stamps = frame start, within a few ms of this PC's clock (header - receive = -0.104 s at 10 Hz)",
+  "link_drop": "2026-10-23 ~18:30: eno1 lost carrier (robot powered down or cable out on the robot side)",
+  "site_check_2026_10_23": "current gantry spot, goal 2 m ahead: NO-GO (harness/gantry box behind the pelvis, merged furniture boxes 2 m behind/left, ceiling cells near the start). Twin: student crouched and fell 3/3 in real time. Pick a start in the open area ahead (front sector clear ~3.5 m) and re-run g1 site there",
+  "lidar_driver_mode": "after the 18:30 power cycle livox_ros_driver2 publishes ~10 full frames/s (before: ~2 kHz single packets); the adapter handles both"
+ }
+}
