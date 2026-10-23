@@ -42,7 +42,12 @@ class BodyFilter:
     the joint state. `margin_m` covers mesh-vs-capsule slack, timing skew and range noise.
     """
 
-    def __init__(self, xml=None, margin_m=0.03, hand_margin_m=0.04):
+    # 5 cm (was 3): the shoulder-pitch links are a sphere (r 3.9 cm) in this model and a cylinder in gear_sonic_sim's
+    # scene_43dof.xml (and a mesh on the robot); with 2 cm range noise the cylinder's rim leaked ~1 point per 5 frames
+    # past a 3 cm margin, always into the same two cells beside the right shoulder at 1.06 m. The memory keeps them, so
+    # after ~15 s of standing the robot had a 1.06 m "pillar" against its own side and the planner found no safe
+    # forward candidate (lab twin rehearsals 2026-10-23, tools/debug_plan.py). 4 cm: 0 leaks in 170 noisy frames.
+    def __init__(self, xml=None, margin_m=0.05, hand_margin_m=0.04):
         """`xml`: the robot's MJCF - rubber hands (sim/assets/g1_29dof.xml, default) or Dex3
         (sim/assets/g1_29dof_dex3.xml; env G1_BODY_MODEL=dex3). Body joints are set by name; hand joints stay
         at zero (open) and hand links get `hand_margin_m` extra, since the finger state is not streamed."""
@@ -168,7 +173,7 @@ class CloudMemory(RayCastMemory):
     """
 
     def __init__(self, origin_xy, *, source=None, ground_tol_m=0.05, face_push_m=0.035, self_filter=True,
-                 self_margin_m=0.03, overhead_min_bottom_m=0.8, min_low_points=3, low_ratio=0.2,
+                 self_margin_m=0.05, overhead_min_bottom_m=0.8, min_low_points=3, low_ratio=0.2,
                  free_band_m=(0.1, 0.8), carve_step_m=0.05, carve_stop_m=0.1, edge_cells=2, edge_dz_m=0.05,
                  carve_rays=4000, **kw):
         kw.pop("boxes", None)
