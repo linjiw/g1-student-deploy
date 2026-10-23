@@ -35,9 +35,14 @@ import numpy as np
 from . import bundle
 
 PAD_ROW = (1.0e4, 1.0e4, -1.0e4, 0.0, 0.1, 0.1, 0.1, 0.0, 0.0)  # far, finite, masked off
-BUCKETS = (8, 16, 32)  # guidance obstacles per graph; benchmark scenes have <= 7 (median 1)
+# guidance obstacles per graph. Benchmark scenes have <= 7 (median 1); a real room's lidar memory has 20-40 boxes
+# (lab-g1 2026-10-23: 29 boxes after 5 s standing). Above the largest bucket the planner used to leave the graphs and
+# hand torch.compile a new shape per box count: seconds per recompile, then the recompile limit (an 11 s plan in a
+# rehearsal of that room). Padded slots are masked (+inf distance), so the bucket never changes a plan.
+BUCKETS = (8, 16, 32, 64, 128)
 PRECISIONS = ("fp32", "tf32", "bf16")  # denoiser forward only; fp32 = the evaluated arithmetic
-MAX_PAIRS = 1536  # candidates x padded obstacles per graph; all graphs fused: < 1 GB in one shared pool
+MAX_PAIRS = 6144  # candidates x padded obstacles per graph (48 x 128); one shared pool sized by the largest graph
+RECOMPILE_LIMIT = 64  # torch.compile'd pieces see one shape per (candidates, bucket): 2 x 6 here, default limit is 8
 
 
 # ---------------------------------------------------------------------------------------- numpy geometry
@@ -279,6 +284,11 @@ def _build_class():
             self.model.eval()
             self._temb = None
             if self.fuse:
+                import torch._dynamo.config as dynamo_cfg
+
+                for name in ("recompile_limit", "cache_size_limit"):  # name differs across torch versions
+                    if hasattr(dynamo_cfg, name):
+                        setattr(dynamo_cfg, name, max(getattr(dynamo_cfg, name), RECOMPILE_LIMIT))
                 self._vel = torch.compile(self._velocity_tokens, dynamic=False)
                 self._loss = torch.compile(self._guide_loss, dynamic=False)
 
@@ -447,7 +457,8 @@ def _build_class():
             guided = n > 0  # the eager sampler skips guidance without obstacles (incl. the tilt term)
             n_pad = next((s for s in self.buckets if s >= n), None) if guided else 0
             if not self.use_graphs or n_pad is None or b * max(n_pad, 1) > self.max_pairs:
-                packed, valid = self._pack(guide_obs, n if guided else 0)
+                # off the graphs: still pad to a power of two so compiled pieces see few distinct shapes
+                packed, valid = self._pack(guide_obs, (1 << max(n - 1, 0).bit_length()) if guided else 0)
                 return self._loop(x, cond, anchor_raw, xy0, yaw0, packed, valid, guided)
             key = (b, n_pad, tuple(sorted((k_, tuple(v_.shape)) for k_, v_ in cond.items())))
             gr = self._graphs.get(key)
