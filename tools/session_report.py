@@ -272,6 +272,9 @@ def flags(rep):
     n, r, rec, tr = rep["node"], rep["runner"], rep.get("recording") or {}, rep.get("truth") or {}
     if n["events"].get("estop"):
         out.append("node supervisor E-STOP fired: read the timeline")
+    if n["events"].get("prescan_blocked"):
+        out.append(f"walk could not start after the pre-scan ({n['events']['prescan_blocked']} prescan_blocked events: "
+                   "no lidar, stale lidar or no route; see the timeline)")
     if r["emergency_stop"]:
         out.append("runner reached EMERGENCY STOP / damping")
     if tr.get("fell"):
