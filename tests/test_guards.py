@@ -124,6 +124,34 @@ def test_self_mask_refuses_an_object_hugging_the_robot(geometry_planner):
     assert masked is v and info == {"self_mask_refused": int(ring.sum())}
 
 
+def test_self_mask_ignores_evidence_the_planner_does_not_see(geometry_planner):
+    """Sub-threshold near-only returns (no support, no ceiling) neither get hidden nor count toward the cap."""
+    v = empty_view()
+    v.support[:] = 0.0
+    q = standing_q()
+    band = G.body_cells(geometry_planner, q, v, G.DEPLOY.self_mask_band_m)
+    v.near_only[band] = True  # a ring of 1-2 stray returns per cell, below every threshold
+    leak = tuple(np.argwhere(band)[0])
+    v.support[leak] = 1.06
+    masked, info = G.self_mask(v, geometry_planner, q, G.DEPLOY)
+    assert info == {"self_masked_cells": 1} and masked.support[leak] == 0.0
+
+
+def test_standing_means_no_turning_either():
+    still = [standing_q() for _ in range(6)]
+    turning = [standing_q(yaw=0.02 * k) for k in range(6)]  # 1 rad/s in place
+    walking = [standing_q(xy=(0.02 * k, 0.0)) for k in range(6)]
+    assert G.is_standing(still, G.DEPLOY)
+    assert not G.is_standing(turning, G.DEPLOY) and not G.is_standing(walking, G.DEPLOY)
+
+
+def test_walking_drop_needs_the_budget():
+    p = shell_planner()
+    out = frozen_plan(p, [candidate_batch([(1.2, 0.0), (0.9, 0.0)], z=0.55 + 0.075)], [[0.08, 0.08]])
+    got = G.guard_selection(p, out, [standing_q()], empty_view(), G.DEPLOY, standing=False, allow_drop=False)
+    assert not got.get("rejected") and got["rule"] in G.CALM_RULES  # out of drops: the calm path, never a gap
+
+
 def test_overhead_walls():
     v = empty_view()
     v.ceiling[cell(v, (1.0, 0.0))] = 0.95  # a table top
@@ -244,6 +272,7 @@ def test_materialize_equals_the_frozen_planner_with_leg_grounding():
     p = shell_planner(ground_legs=True)
     batch = candidate_batch([(1.0, 0.0), (0.8, 0.3)], z=0.875 - 0.12)  # pelvis low enough to need grounding
     out = frozen_plan(p, [batch], [[0.08, 0.08]])
+    assert out["ground_lift_max_m"] > 0.01  # grounding did move the legs
     for i in (0, 1):
         got = G.materialize(p, p.last_pools, i)
         if i == out["choice"]:
@@ -324,7 +353,10 @@ def test_envelope_is_waived_under_a_ceiling():
     got = G.guard_selection(p, out, [standing_q()], v, G.DEPLOY, standing=False)
     assert got["choice"] == out["choice"] and not got["guard"]["envelope"]
     got = G.guard_selection(p, out, [standing_q()], empty_view(), G.DEPLOY, standing=False)
-    assert got["rule"] in G.CALM_RULES  # open floor: a 0.55 m pelvis crouch is outside the envelope
+    # open floor: a 0.55 m pelvis crouch is outside the envelope; walking, it is dropped (the current plan plays on)
+    assert got["guard"]["action"] == "envelope_drop" and "pelvis 0.55" in got["rejected"]
+    got = G.guard_selection(p, out, [standing_q()], empty_view(), G.DEPLOY, standing=True)
+    assert got["rule"] in G.CALM_RULES and not got.get("rejected")  # from a standstill: calm
 
 
 def test_plan_guarded_gives_the_planner_the_masked_view(geometry_planner):

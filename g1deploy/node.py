@@ -24,9 +24,10 @@ cloud stale > --cloud-timeout -> settle to stand; non-finite / out-of-range plan
 previous plan keeps playing); reference joint velocities are clipped to --max-joint-vel.
 
 `--guards deploy` (g1deploy/guards.py, docs/ROBUSTNESS.md) adds, between the memory and SONIC: the self mask,
-guidance boxes that never cover free cells, the walk envelope, the calm fallback (no safe candidate -> a near
-stop-pool candidate or a settle-to-stand, never a max-clearance lunge) and the anchor check (measured anchoring
-after a fallback or a missed prediction). `--guards walls` also turns low overheads into walls (H5-H6).
+guidance boxes that never wrap the robot, the walk envelope (an untrackable plan is dropped while walking, at most
+`max_drops` in a row), the calm fallback (from a standstill with nothing safe: a near stop-pool candidate or a
+settle-to-stand, never a max-clearance lunge) and the anchor check (measured anchoring after a fallback or a missed
+prediction). `--guards walls` also turns low overheads into walls (H5-H6).
 """
 
 from __future__ import annotations
@@ -300,7 +301,8 @@ def _worker(conn, pdict, episode, seed, impl="fused", precision="fp32", guards=N
         try:
             if gcfg.any():
                 plan = G.plan_guarded(planner, hist, [], goal_fn, view, gcfg, measured_q=job.get("measured"),
-                                      standing=bool(job.get("standing")), guide_grow_overhead_m=pc.guide_grow_overhead_m)
+                                      standing=bool(job.get("standing")), guide_grow_overhead_m=pc.guide_grow_overhead_m,
+                                      allow_drop=bool(job.get("allow_drop", True)))
             else:
                 plan = planner.plan(np.asarray(hist), [], goal_fn, map_fn, sel, prev=None, guide_boxes=guide)
             out = {k: plan[k] for k in ("qpos", "rotation", "joint_velocity", "rule", "chosen_clearance_m")}
@@ -435,6 +437,7 @@ class StudentNode:
         self.measured_until, self.anchor_checks = -1, []  # anchor check: measured anchoring until this tick
         self.measured_jobs, self.last_streamed_req = {}, -10**9  # measured job id -> requested while standing
         self.self_mask_plans, self.self_mask_max = 0, 0
+        self.consecutive_drops = 0
         self.goal_seq = None
         self.pool = PlannerPool(args.inflight, self.pdict, self.episode, args.seed, args.planner_impl,
                                 args.planner_precision, self.guards.describe() if self.guards.any() else None)
@@ -518,7 +521,13 @@ class StudentNode:
                 or self.active[0].get("no_safe_candidate")):
             lead, measured = 0, True  # never extrapolate a fallback or a plan the robot did not follow
         hist = self.history if lead == 0 else predicted_history(self.history, self.active, now_tick, lead, len(self.history))
-        standing = first or G.speed_xy(self.history) < self.guards.still_speed_m_s
+        standing, allow_drop = first, not first
+        if self.guards.any():
+            standing = first or G.is_standing(self.history, self.guards)
+            # a walking drop keeps the current plan playing: only while it has stream left to cover the next plan
+            ahead = self.stream_end - now_tick if self.stream_end >= 0 else 0
+            allow_drop = (not first and self.consecutive_drops < self.guards.max_drops
+                          and ahead > lead + int(math.ceil(self.latency_est / DT)) + LOOKAHEAD_FRAMES)
         route = self.route_now(np.asarray(self.history[-1][:2], dtype=float), now_tick * DT)
         with self.mem_lock:
             view = memory_view(self.memory, True) if self.guards.self_mask else memory_view(self.memory)
@@ -528,7 +537,7 @@ class StudentNode:
                                   "arrival_anchor": np.asarray(self.history[-1]).copy(),
                                   "navigation_generation": self.navigation_generation,
                                   "measured": np.asarray(self.history[-1], dtype=np.float64).copy(),
-                                  "standing": standing})
+                                  "standing": standing, "allow_drop": allow_drop})
         self.jobs[jid] = (now_tick + lead, np.asarray(hist[-1], dtype=np.float64),
                           self.flow.feed.finite_difference_dq(hist), now_tick, first)
         if lead and self.guards.anchor_check_m is not None:
@@ -592,8 +601,11 @@ class StudentNode:
                 if self.guards.any():  # a newer measured plan is never replaced by an older predicted one
                     stale = stale or req_tick <= self.last_streamed_req
             if reason or stale:
+                if plan.get("rejected"):
+                    self.consecutive_drops += 1
                 emit("plan_dropped", reason=reason or "stale", anchor_tick=anchor_tick)
                 continue
+            self.consecutive_drops = 0
             peak = float(np.abs(plan["joint_velocity"]).max())
             if peak > self.args.max_joint_vel:
                 plan = dict(plan, joint_velocity=np.clip(plan["joint_velocity"], -self.args.max_joint_vel,
@@ -714,6 +726,7 @@ class StudentNode:
         self.last_streamed_anchor, self.last_request, self.stream_end = -10**9, -10**9, -1
         self.measured_until, self.anchor_checks = -1, []
         self.measured_jobs, self.last_streamed_req = {}, -10**9
+        self.consecutive_drops = 0
         if self.streamer is not None:
             self.streamer.last_end = None  # the runner resets playback on the new run's first chunk anyway
         for jid, _, _ in self.pool.poll():  # results of the previous run are dropped

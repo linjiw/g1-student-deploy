@@ -292,6 +292,7 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
     active = None  # (plan, anchor_tick, anchor_q, anchor_dq)
     pending = []  # [(ready_tick, plan, anchor_tick, anchor_q, anchor_dq)], oldest first
     measured_until = -1  # anchor check: plan from the measured state until this tick
+    drops = dropped_total = 0  # walking envelope drops in a row / in all
     last_request = -10**9
     plans, references, realized, pre_q, est_q, wall = [], [], [], [], [], []
     outcome, error = None, None
@@ -311,7 +312,10 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
                 drain_scanner()
             memory.step(tick * 0.02, true_q[:3], true_q[3:7])
             while pending and tick >= pending[0][0]:
-                active = pending.pop(0)[1:]
+                landed = pending.pop(0)[1:]
+                if landed[0] is None:  # a dropped plan: the node learns of it when it lands; the active plan plays on
+                    continue
+                active = landed
                 if active[0].get("predicted"):  # the predicted anchor vs the measured pose it was meant for
                     miss = float(np.linalg.norm(np.asarray(active[2][:2]) - qpos[:2]))
                     active[0]["_log"]["anchor_miss_m"] = miss
@@ -324,7 +328,7 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
                 guide_boxes = sm.memory_boxes(memory, grow_overhead_m=pcfg.guide_grow_overhead_m) \
                     if pcfg.guide_w > 0 and pcfg.guide_source == "sensor" and not gcfg.any() else None
                 predictive = anchor_mode == "predict" and lat_ticks > 0 and active is not None
-                standing = active is None or G.speed_xy(history[-6:]) < gcfg.still_speed_m_s
+                standing = active is None or G.is_standing(history[-6:], gcfg)
                 forced = False
                 if predictive and gcfg.anchor_check_m is not None and (
                         tick < measured_until or active[0]["rule"] in G.FALLBACK_RULES or active[0].get("no_safe_candidate")):
@@ -339,34 +343,50 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
                 if gcfg.any():
                     plan = G.plan_guarded(planner, plan_hist, boxes, goal_fn, G.memory_view(memory, gcfg.self_mask), gcfg,
                                           measured_q=qpos, standing=standing, prev=prev,
-                                          guide_grow_overhead_m=pcfg.guide_grow_overhead_m)
+                                          guide_grow_overhead_m=pcfg.guide_grow_overhead_m,
+                                          allow_drop=active is not None and drops < gcfg.max_drops)
                     if plan.get("rejected") and active is None:
                         plan = dict(plan, **G.stand_plan(plan_hist[-1], len(plan["qpos"])), rule="stand_rejected")
+                    elif plan.get("rejected"):  # dropped, as by the node: the active plan keeps playing
+                        plans.append(dict(tick=tick, rule="dropped", rejected=plan["rejected"], guard=plan.get("guard"),
+                                          latency_s=time.perf_counter() - tp, chosen_clearance_m=None,
+                                          plan_xy=plan["qpos"][:, :2].tolist(), plan_root_z=plan["qpos"][:, 2].tolist(),
+                                          predicted=bool(predictive), no_safe_candidate=plan.get("no_safe_candidate"),
+                                          candidate_pool=plan.get("candidate_pool"),
+                                          plan_knee_max_rad=float(plan["qpos"][:, [7 + k for k in G.KNEES]].max()),
+                                          plan_tilt_max_rad=G.plan_metrics(plan)["tilt"]))
+                        last_request = tick
+                        drops, dropped_total = drops + 1, dropped_total + 1
+                        if lat_ticks:
+                            pending.append((tick + lat_ticks, None, None, None, None))  # occupies the planner slot
+                        plan = None
                 else:
                     plan = planner.plan(np.asarray(plan_hist), boxes, goal_fn, map_fn, clearance_fn, prev=prev,
                                         guide_boxes=guide_boxes)
-                plan["predicted"] = bool(predictive)
-                if dump_memory and not plans:
-                    _dump_memory(out / "memory_first.npz", memory)
-                latency = time.perf_counter() - tp
-                anchor = (plan, anchor_at, np.asarray(plan_hist[-1], dtype=np.float64).copy(),
-                          flow.feed.finite_difference_dq(plan_hist))
-                last_request = tick
-                if lat_ticks == 0 or active is None:
-                    # The first plan is computed before the stream starts (on hardware: while standing),
-                    # so only replans pay the latency.
-                    active = anchor
-                else:
-                    pending.append((tick + lat_ticks,) + anchor)
-                plans.append(dict(tick=tick, waypoint_xy=np.asarray(wp).tolist(), route_remaining_m=remaining,
-                                  rule=plan["rule"], chosen_clearance_m=plan["chosen_clearance_m"],
-                                  latency_s=latency, plan_xy=plan["qpos"][:, :2].tolist(),
-                                  plan_root_z=plan["qpos"][:, 2].tolist(),
-                                  no_safe_candidate=plan.get("no_safe_candidate"), candidate_pool=plan.get("candidate_pool"),
-                                  predicted=plan["predicted"], guard=plan.get("guard"),
-                                  plan_knee_max_rad=float(plan["qpos"][:, [7 + k for k in G.KNEES]].max()),
-                                  plan_tilt_max_rad=G.plan_metrics(plan)["tilt"]))
-                plan["_log"] = plans[-1]
+                if plan is not None:
+                    latency = time.perf_counter() - tp
+                    drops = 0
+                    plan["predicted"] = bool(predictive)
+                    if dump_memory and not plans:
+                        _dump_memory(out / "memory_first.npz", memory)
+                    anchor = (plan, anchor_at, np.asarray(plan_hist[-1], dtype=np.float64).copy(),
+                              flow.feed.finite_difference_dq(plan_hist))
+                    last_request = tick
+                    if lat_ticks == 0 or active is None:
+                        # The first plan is computed before the stream starts (on hardware: while standing),
+                        # so only replans pay the latency.
+                        active = anchor
+                    else:
+                        pending.append((tick + lat_ticks,) + anchor)
+                    plans.append(dict(tick=tick, waypoint_xy=np.asarray(wp).tolist(), route_remaining_m=remaining,
+                                      rule=plan["rule"], chosen_clearance_m=plan["chosen_clearance_m"],
+                                      latency_s=latency, plan_xy=plan["qpos"][:, :2].tolist(),
+                                      plan_root_z=plan["qpos"][:, 2].tolist(),
+                                      no_safe_candidate=plan.get("no_safe_candidate"), candidate_pool=plan.get("candidate_pool"),
+                                      predicted=plan["predicted"], guard=plan.get("guard"),
+                                      plan_knee_max_rad=float(plan["qpos"][:, [7 + k for k in G.KNEES]].max()),
+                                      plan_tilt_max_rad=G.plan_metrics(plan)["tilt"]))
+                    plan["_log"] = plans[-1]
             plan, anchor_tick, anchor_q, anchor_dq = active
             tgt, clamped = flow.feed.target(plan, anchor_q, anchor_dq, tick - anchor_tick, qpos, limits)
             pos, quat, force, _ = sim.step(tgt[:, :29], tgt[:, 29:58], tgt[:, 58:64])
@@ -385,9 +405,10 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
         report = scorer.report()
         if error:
             report["outcome"], report["completed"] = "runtime_error", False
-        lat = [p["latency_s"] for p in plans]
+        lat = [p["latency_s"] for p in plans if p["rule"] != "dropped"]
         report.update(runtime_error=error, task_id=task.get("task_id"), family=task.get("family"), seed=int(seed),
-                      replans=len(plans), route_found=bool(route.found),
+                      replans=sum(p["rule"] != "dropped" for p in plans), dropped_plans=dropped_total,
+                      route_found=bool(route.found),
                       plan_latency_s={"p50": float(np.median(lat)), "p95": float(np.quantile(lat, 0.95))} if lat else None,
                       selection_rules={r: sum(p["rule"] == r for p in plans) for r in sorted({p["rule"] for p in plans})},
                       control_step_wall_p50_s=float(np.median(wall)) if wall else None, **{k: run_cfg[k] for k in (

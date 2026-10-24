@@ -139,3 +139,30 @@ def test_a_measured_plan_from_a_standstill_starts_when_it_lands(node):
     finally:
         node.pool.poll = real_poll
         node.jobs = {}
+
+
+def test_walking_drops_are_bounded(node):
+    """Each drop costs a planner latency of stream: after max_drops in a row, or with little stream left, the job
+    asks the guards for the calm path instead."""
+    from g1deploy.guards import stand_plan
+
+    q = FakeState()._q()
+    node.history = [q.astype(np.float32) for _ in range(6)]
+    node.active = (dict(stand_plan(q, 32), rule="safe_min_goal_distance"), 0, q, np.zeros(29))
+    if not hasattr(node, "memory"):
+        node.make_memory(q[:2])
+    node.route_now = lambda xy, t: None
+    sent = []
+    real_submit = node.pool.submit
+    node.pool.submit = lambda worker, job: sent.append(job)
+    try:
+        node.latency_est = 0.1
+        for drops, ahead, expect in ((0, 200, True), (node.guards.max_drops, 200, False), (0, 30, False)):
+            node.consecutive_drops, node.stream_end = drops, 100 + ahead
+            node.request(100, None)
+            assert sent[-1]["allow_drop"] is expect, (drops, ahead)
+    finally:
+        node.pool.submit = real_submit
+        node.jobs.clear()
+        node.measured_jobs.clear()
+        node.anchor_checks.clear()

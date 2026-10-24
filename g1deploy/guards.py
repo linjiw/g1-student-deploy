@@ -18,6 +18,8 @@ real robot's memory reaches the planner, not to the student itself:
   walk envelope  a one-legged lunge (knee 2.1 rad) and open-floor crouches passed the node's checks.
                  With no ceiling within reach, candidates must keep the pelvis, knees and tilt inside the
                  envelope measured on clean walks; the planner's own preference picks among those that do.
+                 None fits: while walking the plan is dropped (the current one keeps playing), from a
+                 standstill the calm fallback takes over.
   calm fallback  with no safe candidate, the frozen rule streams the highest-clearance candidate of any
                  pool: a 0.8-1.2 m motion from a standstill, then a crouch. From a standstill here it is the
                  best stop-pool candidate that stays near, inside the envelope and at least as clear as
@@ -73,6 +75,8 @@ class GuardConfig:
     envelope_tries: int = 6
     calm: bool = False
     still_speed_m_s: float = 0.25
+    still_yaw_rate_rad_s: float = 0.3  # a turn in place is not standing still
+    max_drops: int = 2  # consecutive walking drops before the calm path (each costs a planner latency of stream)
     calm_turn_max_m: float = 0.25  # a stop-pool candidate from a standstill may move the pelvis this far
     anchor_check_m: float | None = None
     anchor_hold_plans: int = 2
@@ -166,13 +170,13 @@ def self_mask(view, planner, measured_q, cfg):
     from scipy.ndimage import label
 
     band = body_cells(planner, measured_q, view, cfg.self_mask_band_m)
-    cand = band & view.near_only
+    occupied = (np.nan_to_num(view.support, nan=0.0) > 0.05) | (np.isfinite(view.ceiling) & (view.ceiling < 1e2))
+    cand = band & view.near_only & occupied  # evidence the planner sees; sub-threshold returns do not count
     if not cand.any():
         return view, {}
     # A leak is an isolated blob hugging the body. A component of evidence that reaches outside the band, or that
     # holds a cell once seen from farther away, is a real object (a wall the robot stands beside) and stays.
-    occ = (np.nan_to_num(view.support, nan=0.0) > 0.05) | (np.isfinite(view.ceiling) & (view.ceiling < 1e2)) | cand
-    lab, _ = label(occ, structure=np.ones((3, 3), dtype=bool))
+    lab, _ = label(occupied, structure=np.ones((3, 3), dtype=bool))
     ids = np.unique(lab[cand])
     bad = np.unique(lab[(lab > 0) & ~(band & view.near_only)])
     hide = cand & np.isin(lab, np.setdiff1d(ids, bad))
@@ -183,7 +187,7 @@ def self_mask(view, planner, measured_q, cfg):
         return view, {"self_mask_refused": count}
     sup, ceil = view.support.copy(), view.ceiling.copy()
     sup[hide & np.isfinite(sup)] = 0.0  # the robot stands there: ground
-    ceil[hide] = np.inf  # seen open (NaN would let overhead growth re-cover it)
+    ceil[hide & np.isfinite(ceil)] = np.inf  # seen open (NaN would let overhead growth re-cover it)
     return MemoryView(sup, ceil, view.lo, view.res, view.n, view.near_only), {"self_masked_cells": count}
 
 
@@ -242,9 +246,10 @@ def _merge(rects, mask, fill):
 
 
 def split_boxes(view, xy, cfg, grow_overhead_m=0.0, obstacle_threshold_m=0.05, min_cells=2, ceiling_thickness_m=0.1):
-    """`memory_boxes` that never covers a free cell: each connected component as well-filled rectangles of its own
-    cells, components nearest to `xy` first, at most `max_guide_boxes` boxes. Overhead fragments keep the frozen
-    growth into unseen cells."""
+    """`memory_boxes` without the bounding box of a whole component: each component as rectangles of its own cells
+    (on `split_coarse` x coarser cells, each >= `split_fill` occupied, so a box can hold some free floor; exact cover
+    when a box would contain the robot), components nearest to `xy` first, at most `max_guide_boxes` boxes.
+    Overhead fragments keep the frozen growth into unseen cells."""
     from scipy.ndimage import binary_dilation, find_objects, label
 
     f = max(int(cfg.split_coarse), 1)  # boxes on an f x coarser grid: f x f max-pooled (higher tops, lower undersides)
@@ -409,7 +414,7 @@ def stand_clearance(planner, plan, clearance_fn):
     return float(clearance_fn(q[None], planner.cfg.datum_offset_m)[0])
 
 
-def guard_selection(planner, out, qpos_hist, view, cfg, *, standing, clearance_fn=None):
+def guard_selection(planner, out, qpos_hist, view, cfg, *, standing, clearance_fn=None, allow_drop=True):
     """Envelope + calm fallback over the planner's own pools (see module docstring). Returns the plan.
 
     The envelope is checked on materialized plans (leg grounding changes the knees): the frozen choice first, then
@@ -446,8 +451,11 @@ def guard_selection(planner, out, qpos_hist, view, cfg, *, standing, clearance_f
             if not env_on or inside(plan_metrics(cand), cfg):
                 info.update(action="envelope_reselect", tries=tries)
                 return dict(out, **cand, rule=out["rule"] + "+envelope", guard=info)
-    if not cfg.calm:
-        info.update(action="envelope_reject")
+    if allow_drop and (not cfg.calm or (not standing and not info["no_safe"])):
+        # walking with a safe but untrackable plan: drop it, the current plan keeps playing (as the node does for
+        # any rejected plan); a synthesized stand at walking speed is not calmer. The caller withholds `allow_drop`
+        # for the first plan and after `max_drops` drops in a row (the stream would run out).
+        info.update(action="envelope_drop")
         return dict(out, guard=info, rejected=info.get("rejected", "unsafe"))
     # calm: nothing safe and trackable to walk with
     n = len(out["qpos"])
@@ -480,6 +488,18 @@ def _why(met, cfg):
     return ", ".join(out) or "unsafe"
 
 
+def is_standing(hist, cfg):
+    """Pelvis still in xy and in yaw over the history window (a calm stop turning in place is not standing)."""
+    h = np.asarray(hist, dtype=np.float64)
+    if len(h) < 2:
+        return True
+    dt = DT * (len(h) - 1)
+    w0, w1 = h[0, 3:7], h[-1, 3:7]
+    yaw = lambda q: math.atan2(2 * (q[0] * q[3] + q[1] * q[2]), 1 - 2 * (q[2] ** 2 + q[3] ** 2))  # noqa: E731
+    dyaw = abs((yaw(w1) - yaw(w0) + math.pi) % (2 * math.pi) - math.pi)
+    return speed_xy(h) < cfg.still_speed_m_s and dyaw / dt < cfg.still_yaw_rate_rad_s
+
+
 def speed_xy(hist):
     h = np.asarray(hist, dtype=np.float64)
     if len(h) < 2:
@@ -488,7 +508,7 @@ def speed_xy(hist):
 
 
 def plan_guarded(planner, hist, boxes, goal_fn, view, cfg, *, measured_q=None, standing=False, prev=None,
-                 guide_grow_overhead_m=0.0):
+                 guide_grow_overhead_m=0.0, allow_drop=True):
     """One plan through the guards: view -> (self mask, overhead walls) -> map / guidance / selector -> frozen
     planner -> envelope + calm. `view`: a MemoryView (memory_view(memory))."""
     from g1deploy import bundle
@@ -521,7 +541,7 @@ def plan_guarded(planner, hist, boxes, goal_fn, view, cfg, *, measured_q=None, s
     out = planner.plan(np.asarray(hist), boxes, goal_fn, map_fn, sel, prev=prev, guide_boxes=guide)
     t2 = time.perf_counter()
     if cfg.envelope or cfg.calm:
-        out = guard_selection(planner, out, hist, view, cfg, standing=standing, clearance_fn=sel)
+        out = guard_selection(planner, out, hist, view, cfg, standing=standing, clearance_fn=sel, allow_drop=allow_drop)
     info["ms"] = {"view": round(1e3 * (t1 - t0), 1), "plan": round(1e3 * (t2 - t1), 1),
                   "select": round(1e3 * (time.perf_counter() - t2), 1)}
     out.setdefault("guard", {}).update(info)
