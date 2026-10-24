@@ -148,6 +148,25 @@ What these runs show:
   standstill), 5 envelope re-selections (knees 2.1–2.4 rad, a 0.60 m pelvis) and 1 walking drop (tilt 0.63 rad).
   None of the ten worst per-run plan latencies exceeded 0.25 s at p95 on this GPU.
 
+## Evidence: the deploy PC (RTX 4070 Ti SUPER)
+
+The deploy-PC session merged this branch into deploy-kit, on a local branch `integration`, with 124 tests passing.
+It then ran its lab-site twins, the courses built from what the lab G1's lidar saw. Each condition is three
+real-time runs through `./g1 sim` with `--guards walls --goal-lookahead 1.0` (2026-10-24).
+
+| twin | arrived | lowest pelvis (m) | contact | plan latency p95 (s) | guard actions |
+|---|---|---|---|---|---|
+| original start inside the clutter (without guards the merged box held the robot) | 3/3 | 0.66–0.70 | 0 | 0.08–0.12 | none needed |
+| 1.5 m forward, 5 cm margin | 3/3 | 0.62–0.64 | 0 | 0.09 | 5–6 envelope re-selections and 1–4 walking drops per run |
+| 1.5 m forward, 3 cm margin (the shoulder leak behind the back-off) | 3/3 | 0.65–0.70 | 0 | 0.08–0.09 | first plan: 1 leak cell masked, then safe |
+
+Across these runs:
+- **Health:** no plan over 0.32 s, no plan with nothing safe, no stall risk, no anchor miss and no mask refusal.
+- **Shoulder leak:** at the 3 cm margin it sits inside the self mask's band, and the mask alone recovers the stack.
+  With the leak and no guards, this twin backed off and crouched.
+- **Still unmeasured:** the 4070's latency on a plan where nothing is safe (frozen resampling, 0.35–0.50 s on the
+  5080), because none occurred.
+
 ## Recommended use on the ladder
 
 | rung | node flags | course limits |
