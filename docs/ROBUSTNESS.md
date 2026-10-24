@@ -177,11 +177,22 @@ The rest of that panel matched this dev box:
 |---|---|---|---|---|
 | kit, no guards | 2/6 | 3 | 1 | 0 |
 | kit + `--guards walls`, slow | 3/3 measured | 0 | 0 | 3 |
+| kit + `--guards walls`, slow, rmem_max raised (room, dense rerun) | 4/4 | 0 | 0 | 0 |
 
 The 3 unmeasured runs got no lidar. The node fused 0 points (one frame in one run) against 1.3–1.7 M in the
 others, because that PC's `net.core.rmem_max` is still 212,992 bytes against lidar frames of about 0.9 MB in
 closed rooms. The DDS reader then stalled for the whole run. The panel now scores such runs as `no_lidar`,
 unmeasured rather than failed, and the node reports `prescan_blocked` every 5 s when the walk cannot start.
+
+The deploy-PC user then raised `net.core.rmem_max` to 33,554,432 (`rmem_default` 8,388,608). The rerun of room and
+dense came out as follows:
+- 0 UDP receive-buffer errors, against about 39 k before;
+- 2.5–2.8 M lidar points fused per run;
+- 4/4 arrived, lowest pelvis 0.64–0.67 m, no contact;
+- plan p95 0.084–0.088 s and at most 0.093 s, with no plan where nothing was safe.
+
+On the 4070, `--guards walls --goal-lookahead 1.0` now stands at 6/6 on the panel courses (open floor, room, dense)
+and 9/9 on the lab twins. The 0.42 s plans came only from unguarded runs.
 
 ## Recommended use on the ladder
 
@@ -215,8 +226,9 @@ stay mandatory at every rung. Before H5, run this branch's panel on the deploy P
 - **A plan with nothing safe is over the gate on the deploy GPU** (0.42 s on the 4070). The guards make these plans
   rare (none in the guarded panels) and plan the next one from the measured state, but they do not make them
   fast. A cheaper fallback, such as fewer resamples or a stop pool first, is a planner-side change.
-- **Lidar on the deploy PC needs `sudo sysctl -w net.core.rmem_max=16777216`** (and persisting it). Without it,
-  closed and dense rooms lose whole lidar frames; the node then waits in PRESCAN and reports `prescan_blocked`.
+- **Lidar on any deploy PC needs a large UDP receive buffer.** The lab deploy PC now runs `net.core.rmem_max` =
+  33,554,432; persist it in `/etc/sysctl.d/`. With the stock 212,992 bytes, closed and dense rooms lose whole lidar
+  frames, and the node then waits in PRESCAN and reports `prescan_blocked`.
 - **The envelope comes from authored courses.** Recalibrate it from robot sessions (`tools/session_report.py`
   on deploy-kit) before H6.
 
