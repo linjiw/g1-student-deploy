@@ -119,6 +119,10 @@ def main(argv=None):
                     help="dds: the G1's own lidar topic and format (default); zmq: deskewed world clouds")
     ap.add_argument("--lidar-cfg", default=None, help="simulator MID-360 options (JSON), e.g. a mount error")
     ap.add_argument("--mount-calib", default=None)
+    ap.add_argument("--guards", default=None, help="node guard preset (g1deploy/guards.py): deploy | walls")
+    ap.add_argument("--self-margin", type=float, default=None, help="node self-filter margin override (m)")
+    ap.add_argument("--goal-lookahead", type=float, default=None, help="node --goal-lookahead (1.0: slow mode)")
+    ap.add_argument("--seed", type=int, default=None, help="node --seed (planner random stream)")
     ap.add_argument("--odom", choices=("dds", "leg"), default="dds",
                     help="dds: simulator ground truth (stands in for LIO); leg: leg odometry from rt/lowstate only")
     ap.add_argument("--operator", choices=("keyboard", "remote"), default="keyboard",
@@ -205,6 +209,10 @@ def main(argv=None):
             node = Proc("node", [py, "-u", "g1deploy/node.py", *goal_args, "--route", args.route,
                                  "--cloud", "dds" if args.lidar_io == "dds" else "tcp://localhost:5560",
                                  *(["--mount-calib", args.mount_calib] if args.mount_calib else []),
+                                 *(["--guards", args.guards] if args.guards else []),
+                                 *(["--self-margin", str(args.self_margin)] if args.self_margin is not None else []),
+                                 *(["--goal-lookahead", str(args.goal_lookahead)] if args.goal_lookahead else []),
+                                 *(["--seed", str(args.seed)] if args.seed is not None else []),
                                  "--boxes", str(boxes_file), "--inflight", str(args.inflight), "--prescan-s",
                                  str(args.prescan_s), "--start-file", str(start), "--log", str(out / "node_plans.json"),
                                  "--dump-memory", str(out / "node_memory.npz")],

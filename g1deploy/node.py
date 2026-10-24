@@ -22,6 +22,11 @@ Phases: WAIT -> PRESCAN (fill memory while standing) -> RUN -> ARRIVED | STOPPED
 Safety supervisor (never relaxes): tilt > --tilt-estop -> estop; state/odometry stale > 0.5 s -> estop;
 cloud stale > --cloud-timeout -> settle to stand; non-finite / out-of-range plans are rejected (the
 previous plan keeps playing); reference joint velocities are clipped to --max-joint-vel.
+
+`--guards deploy` (g1deploy/guards.py, docs/ROBUSTNESS.md) adds, between the memory and SONIC: the self mask,
+guidance boxes that never cover free cells, the walk envelope, the calm fallback (no safe candidate -> a near
+stop-pool candidate or a settle-to-stand, never a max-clearance lunge) and the anchor check (measured anchoring
+after a fallback or a missed prediction). `--guards walls` also turns low overheads into walls (H5-H6).
 """
 
 from __future__ import annotations
@@ -43,7 +48,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from g1deploy import bundle, contract as C  # noqa: E402
+from g1deploy import bundle, contract as C, guards as G  # noqa: E402
 from g1deploy.latency import predicted_history  # noqa: E402
 from g1deploy.zmq_stream import LOOKAHEAD_FRAMES, PoseStreamer, unpack  # noqa: E402
 
@@ -241,13 +246,9 @@ class CloudInput:
 
 
 # ------------------------------------------------------------------------------------------ planners
-def memory_view(memory):
-    """Picklable snapshot of the memory layers with the parent class's ego_map()."""
-    flow = bundle.load_flow()
-    view = flow.sensor_map.SensorMapMemory.__new__(flow.sensor_map.SensorMapMemory)
-    view.support, view.ceiling = memory.support.copy(), memory.ceiling.copy()
-    view.lo, view.res, view.n = memory.lo.copy(), memory.res, memory.n
-    return view
+def memory_view(memory, near_only=False):
+    """Picklable snapshot of the memory layers with the parent class's ego_map() (and the near-only cells)."""
+    return G.memory_view(memory, near_only)
 
 
 def route_copy(route):
@@ -257,7 +258,7 @@ def route_copy(route):
     return r
 
 
-def _worker(conn, pdict, episode, seed, impl="fused", precision="fp32"):
+def _worker(conn, pdict, episode, seed, impl="fused", precision="fp32", guards=None):
     import os
     import signal
 
@@ -276,6 +277,7 @@ def _worker(conn, pdict, episode, seed, impl="fused", precision="fp32"):
     planner = build_planner(flow.planner.PlannerConfig(**dict(pdict, seed=seed)), impl, precision)
     pc = planner.cfg
     sm, cb = flow.sensor_map, flow.callback
+    gcfg = G.preset(guards)
     conn.send("ready")
     while True:
         job = conn.recv()
@@ -289,15 +291,20 @@ def _worker(conn, pdict, episode, seed, impl="fused", precision="fp32"):
             m, _ = view.ego_map(xy, yaw, pc.datum_offset_m, pc.support_clip_m or 0.8)
             return m
 
-        guide = sm.memory_boxes(view, grow_overhead_m=pc.guide_grow_overhead_m) if pc.guide_w > 0 else None
+        guide = sm.memory_boxes(view, grow_overhead_m=pc.guide_grow_overhead_m) if pc.guide_w > 0 and not gcfg.any() else None
         goal_fn = make_goal_fn(route, episode["goal_lookahead_m"], episode["goal_heading"], episode["steer_lookahead_m"],
                                None, cb.goal_vector, cb.route_goal_heading,
                                arrival_radius_m=episode["arrival_radius_m"],
                                arrival_scope=job["navigation_generation"])
         goal_fn.arrival_anchor = job["arrival_anchor"]
         try:
-            plan = planner.plan(np.asarray(hist), [], goal_fn, map_fn, sel, prev=None, guide_boxes=guide)
+            if gcfg.any():
+                plan = G.plan_guarded(planner, hist, [], goal_fn, view, gcfg, measured_q=job.get("measured"),
+                                      standing=bool(job.get("standing")), guide_grow_overhead_m=pc.guide_grow_overhead_m)
+            else:
+                plan = planner.plan(np.asarray(hist), [], goal_fn, map_fn, sel, prev=None, guide_boxes=guide)
             out = {k: plan[k] for k in ("qpos", "rotation", "joint_velocity", "rule", "chosen_clearance_m")}
+            out.update({k: plan[k] for k in ("no_safe_candidate", "candidate_pool", "guard", "rejected") if k in plan})
         except Exception as exc:  # reported, never fatal to the node
             out = {"error": f"{type(exc).__name__}: {exc}"}
         conn.send((job["id"], out, time.monotonic() - t0))
@@ -306,12 +313,12 @@ def _worker(conn, pdict, episode, seed, impl="fused", precision="fp32"):
 class PlannerPool:
     """`n` planner processes (spawn); each holds its own CUDA context (~0.4 GB) and model copy."""
 
-    def __init__(self, n, pdict, episode, seed, impl="fused", precision="fp32"):
+    def __init__(self, n, pdict, episode, seed, impl="fused", precision="fp32", guards=None):
         ctx = mp.get_context("spawn")
         self.workers = []
         for i in range(n):
             a, b = ctx.Pipe()
-            p = ctx.Process(target=_worker, args=(b, pdict, episode, seed + i, impl, precision), daemon=True)
+            p = ctx.Process(target=_worker, args=(b, pdict, episode, seed + i, impl, precision, guards), daemon=True)
             p.start()
             self.workers.append({"proc": p, "conn": a, "busy": None})
         for w in self.workers:
@@ -353,6 +360,8 @@ class ControlServer:
       {"cmd": "go"}                           -> start (or restart after a stand/arrival) towards the goal
       {"cmd": "stand"}                        -> settle to stand (deferred near ceilings)
       {"cmd": "goal", "ahead": x, "left": y}  -> new goal relative to the current pose (then "go")
+      {"cmd": "goal", "frame": "odom", "x": x, "y": y, "seq": n}
+                                              -> new goal in the odometry frame; status echoes `goal_seq`
       {"cmd": "quit"}                         -> stand, then exit
     Used by the operator console (g1deploy/console.py) in simulation and on the robot."""
 
@@ -382,6 +391,8 @@ class ControlServer:
 
 # ---------------------------------------------------------------------------------------------- node
 class StudentNode:
+    guards = G.GuardConfig()  # off unless --guards (instances built without __init__ in tests stay off too)
+
     def __init__(self, args):
         self.args = args
         self.flow = bundle.load_flow()
@@ -419,14 +430,25 @@ class StudentNode:
         self.overruns, self.skipped, self.max_lag_s = 0, 0, 0.0
         self.commands, self.status = [], {"phase": "BOOT"}
         self.go_event = threading.Event()
+        self.guards = G.preset(args.guards)
+        self.guard_counts, self.last_guard = {}, None
+        self.measured_until, self.anchor_checks = -1, []  # anchor check: measured anchoring until this tick
+        self.measured_jobs, self.last_streamed_req = {}, -10**9  # measured job id -> requested while standing
+        self.self_mask_plans, self.self_mask_max = 0, 0
+        self.goal_seq = None
         self.pool = PlannerPool(args.inflight, self.pdict, self.episode, args.seed, args.planner_impl,
-                                args.planner_precision)
+                                args.planner_precision, self.guards.describe() if self.guards.any() else None)
 
     # -- perception ---------------------------------------------------------------------------
     def make_memory(self, xy):
         from g1deploy.perception.cloud_memory import CloudMemory
 
-        self.memory = CloudMemory(xy, rng=np.random.default_rng(self.args.seed), **dict(self.pcfg.sensor))
+        sensor = dict(self.pcfg.sensor)
+        if self.args.self_margin is not None:
+            sensor["self_margin_m"] = self.args.self_margin
+        if self.guards.min_high_points:
+            sensor["min_high_points"] = self.guards.min_high_points
+        self.memory = CloudMemory(xy, rng=np.random.default_rng(self.args.seed), **sensor)
         self.memory.latency = 0.0  # real latency is already in the data; fuse on arrival
         from g1deploy.perception.unitree_lidar import CloudFromSensorFrame, Mount
 
@@ -490,17 +512,30 @@ class StudentNode:
     def request(self, now_tick, worker):
         first = self.active is None
         lead = 0 if first else int(math.ceil(self.latency_est / DT)) + 1
+        measured = False
+        if lead and self.guards.anchor_check_m is not None and (
+                now_tick < self.measured_until or self.active[0].get("rule") in G.FALLBACK_RULES
+                or self.active[0].get("no_safe_candidate")):
+            lead, measured = 0, True  # never extrapolate a fallback or a plan the robot did not follow
         hist = self.history if lead == 0 else predicted_history(self.history, self.active, now_tick, lead, len(self.history))
+        standing = first or G.speed_xy(self.history) < self.guards.still_speed_m_s
         route = self.route_now(np.asarray(self.history[-1][:2], dtype=float), now_tick * DT)
         with self.mem_lock:
-            view = memory_view(self.memory)
+            view = memory_view(self.memory, True) if self.guards.self_mask else memory_view(self.memory)
         jid = self.next_id
         self.next_id += 1
         self.pool.submit(worker, {"id": jid, "hist": [np.asarray(h) for h in hist], "route": route, "memory": view,
                                   "arrival_anchor": np.asarray(self.history[-1]).copy(),
-                                  "navigation_generation": self.navigation_generation})
+                                  "navigation_generation": self.navigation_generation,
+                                  "measured": np.asarray(self.history[-1], dtype=np.float64).copy(),
+                                  "standing": standing})
         self.jobs[jid] = (now_tick + lead, np.asarray(hist[-1], dtype=np.float64),
                           self.flow.feed.finite_difference_dq(hist), now_tick, first)
+        if lead and self.guards.anchor_check_m is not None:
+            self.anchor_checks.append((now_tick + lead, np.asarray(hist[-1][:2], dtype=np.float64)))
+        elif measured:
+            self.measured_jobs[jid] = standing
+            emit("anchor_measured", tick=now_tick, rule=self.active[0].get("rule"))
         self.last_request = now_tick
 
     def sane(self, plan):
@@ -525,14 +560,38 @@ class StudentNode:
                 emit("plan_error", error=out["error"])
                 continue
             plan = out
-            if first:
+            measured = self.measured_jobs.pop(jid, None) if self.guards.any() else None
+            if first or measured:
                 anchor_tick = now_tick  # computed while standing still: start it when it lands
             self.latencies.append(lat)
             self.latency_est = float(np.quantile(self.latencies[-8:], 0.9))
-            reason = self.sane(plan)
+            guard = plan.get("guard") or {}
+            if guard.get("self_masked_cells") or guard.get("self_mask_refused"):
+                cells = guard.get("self_masked_cells") or 0
+                self.self_mask_plans += bool(cells)
+                if guard.get("self_mask_refused") or cells > self.self_mask_max:  # first sight, growth, refusal
+                    emit("self_mask", tick=now_tick, cells=cells, refused=guard.get("self_mask_refused"))
+                self.self_mask_max = max(self.self_mask_max, cells)
+            if guard.get("action"):
+                self.guard_counts[guard["action"]] = self.guard_counts.get(guard["action"], 0) + 1
+                self.last_guard = dict(action=guard["action"], tick=now_tick, frozen_rule=guard.get("frozen_rule"),
+                                       rejected=guard.get("rejected"), no_safe=guard.get("no_safe"))
+                emit("guard", **self.last_guard)
+            reason = plan.get("rejected") and f"envelope: {plan['rejected']}" or self.sane(plan)
             self.log.append(dict(tick=now_tick, req_tick=req_tick, anchor_tick=anchor_tick, latency_s=lat,
-                                 late_ticks=now_tick - anchor_tick, rule=plan["rule"], rejected=reason))
-            if reason or anchor_tick <= self.last_streamed_anchor:
+                                 late_ticks=now_tick - anchor_tick, rule=plan["rule"], rejected=reason,
+                                 no_safe=plan.get("no_safe_candidate"), guard=guard.get("action"),
+                                 self_masked=guard.get("self_masked_cells"), self_mask_refused=guard.get("self_mask_refused"),
+                                 guide_boxes=guard.get("guide_boxes"), guard_ms=guard.get("ms")))
+            if measured is not None:
+                # anchored on the measured state, earlier than the predicted anchor of the plan it replaces: ordered
+                # by request; a stand (anchor pushed 10**6 ahead) still blocks it
+                stale = req_tick <= self.last_streamed_req or self.last_streamed_anchor > now_tick + 10**5
+            else:
+                stale = anchor_tick <= self.last_streamed_anchor
+                if self.guards.any():  # a newer measured plan is never replaced by an older predicted one
+                    stale = stale or req_tick <= self.last_streamed_req
+            if reason or stale:
                 emit("plan_dropped", reason=reason or "stale", anchor_tick=anchor_tick)
                 continue
             peak = float(np.abs(plan["joint_velocity"]).max())
@@ -541,7 +600,8 @@ class StudentNode:
                                                          self.args.max_joint_vel))
                 emit("dq_clipped", max_rad_s=peak, anchor_tick=anchor_tick)
             self.active = (plan, anchor_tick, anchor_q, anchor_dq)
-            self.last_streamed_anchor = anchor_tick
+            self.last_streamed_anchor = max(anchor_tick, self.last_streamed_anchor)
+            self.last_streamed_req = max(req_tick, self.last_streamed_req)
             if self.streamer is not None:
                 start = max(anchor_tick, now_tick - 2)  # never before the runner's window start (playback - 5)
                 self.stream_end = self.streamer.send_plan(plan, anchor_tick, anchor_q, anchor_dq, start, self.limits)[1]
@@ -614,15 +674,30 @@ class StudentNode:
                 if self.active is not None:
                     self.stand(self.tick, "operator")
             elif cmd == "goal":
-                self.navigation_generation += 1
-                w, x, y, z = q[3:7]
-                yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
-                ahead, left = float(c.get("ahead", 0.0)), float(c.get("left", 0.0))
-                self.goal = q[:2] + np.array([math.cos(yaw) * ahead - math.sin(yaw) * left,
-                                              math.sin(yaw) * ahead + math.cos(yaw) * left])
+                if c.get("frame") == "odom":
+                    try:
+                        goal = np.array([float(c["x"]), float(c["y"])])
+                    except (KeyError, TypeError, ValueError):
+                        emit("command_refused", cmd=cmd, reason="frame odom needs numeric x and y")
+                        continue
+                    if not np.isfinite(goal).all():
+                        emit("command_refused", cmd=cmd, reason="non-finite goal")
+                        continue
+                    self.navigation_generation += 1
+                    self.goal = goal
+                    frame = "odom"
+                else:
+                    self.navigation_generation += 1
+                    w, x, y, z = q[3:7]
+                    yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+                    ahead, left = float(c.get("ahead", 0.0)), float(c.get("left", 0.0))
+                    self.goal = q[:2] + np.array([math.cos(yaw) * ahead - math.sin(yaw) * left,
+                                                  math.sin(yaw) * ahead + math.cos(yaw) * left])
+                    frame = "current"
+                self.goal_seq = c.get("seq")
                 if hasattr(self, "route"):
                     del self.route  # re-planned from the memory on the next refresh
-                emit("goal", frame="current", goal_odom=self.goal.tolist())
+                emit("goal", frame=frame, goal_odom=self.goal.tolist(), seq=self.goal_seq)
             elif cmd == "quit":
                 if self.active is not None and self.phase == "RUN":
                     self.stand(self.tick, "quit")
@@ -637,6 +712,8 @@ class StudentNode:
         self.pending_stand = None
         self.commands_quit = False
         self.last_streamed_anchor, self.last_request, self.stream_end = -10**9, -10**9, -1
+        self.measured_until, self.anchor_checks = -1, []
+        self.measured_jobs, self.last_streamed_req = {}, -10**9
         if self.streamer is not None:
             self.streamer.last_end = None  # the runner resets playback on the new run's first chunk anyway
         for jid, _, _ in self.pool.poll():  # results of the previous run are dropped
@@ -693,7 +770,11 @@ class StudentNode:
             prescan_until = self.handle_commands(q, prescan_until)
             if self.commands_quit:
                 return "quit"
-            self.status = dict(phase=self.phase, tick=self.tick, goal=self.goal.tolist(),
+            w_, x_, y_, z_ = q[3:7]
+            self.status = dict(phase=self.phase, tick=self.tick, goal=self.goal.tolist(), goal_seq=self.goal_seq,
+                               yaw_rad=float(math.atan2(2 * (w_ * z_ + x_ * y_), 1 - 2 * (y_ * y_ + z_ * z_))),
+                               guards=self.args.guards, guard_counts=dict(self.guard_counts), last_guard=self.last_guard,
+                               self_mask_plans=self.self_mask_plans, self_mask_max_cells=self.self_mask_max,
                                goal_dist_m=float(np.linalg.norm(q[:2] - self.goal)), pelvis_z_m=float(q[2]),
                                tilt_rad=float(tilt), xy=q[:2].tolist(), plans=len(self.log),
                                latency_s=self.log[-1]["latency_s"] if self.log else None, latency_est_s=self.latency_est,
@@ -713,6 +794,14 @@ class StudentNode:
                     self.request(self.tick, self.pool.free()[0])
             elif self.phase == "RUN":
                 self.collect(self.tick)
+                while self.anchor_checks and self.anchor_checks[0][0] <= self.tick:
+                    _, predicted = self.anchor_checks.pop(0)  # the predicted anchor vs the pose it was meant for
+                    miss = float(np.linalg.norm(predicted - q[:2]))
+                    if miss > self.guards.anchor_check_m:
+                        # as sim/lockstep.py: `anchor_hold_plans` re-plans plus the latency they take to land
+                        lead = int(math.ceil(self.latency_est / DT)) + 1
+                        self.measured_until = self.tick + self.guards.anchor_hold_plans * self.replan + lead
+                        emit("anchor_miss", tick=self.tick, miss_m=round(miss, 3))
                 dist = float(np.linalg.norm(q[:2] - self.goal))
                 if dist <= a.goal_radius and self.active is not None:
                     self.phase = "ARRIVED"
@@ -774,6 +863,11 @@ def parse(argv=None):
     ap.add_argument("--max-joint-vel", type=float, default=30.0,
                     help="reference joint velocities are clipped to this (the runner aborts at 35 rad/s measured)")
     ap.add_argument("--goal-radius", type=float, default=0.4)
+    ap.add_argument("--guards", choices=sorted(G.PRESETS), default="off",
+                    help="deploy-side guards (g1deploy/guards.py): deploy = self mask, split guidance boxes, walk envelope, "
+                         "calm fallback, anchor check; walls = deploy + low overheads as walls (H5-H6, no ducking)")
+    ap.add_argument("--self-margin", type=float, default=None,
+                    help="self-filter margin override (m); default: CloudMemory's")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-ticks", type=int, default=0)
     ap.add_argument("--log", default=None)
