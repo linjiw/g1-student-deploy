@@ -175,10 +175,12 @@ def _run_realtime(job):
 
 def episode_metrics(d: Path):
     s = json.loads((d / "score.json").read_text())
-    if (d / "node_plans.json").is_file() or (d / "node.log").is_file():  # a real-time rehearsal: plan log + events
+    realtime = any((d / f).is_file() for f in ("node_plans.json", "node.log", "runner.log", "config.json")) \
+        or s.get("outcome") in ("never_streamed", "rehearse_error")
+    if realtime:  # a real-time rehearsal: plan log + events (or only the failure score.json written by _run_realtime)
         return realtime_metrics(d, s)
     plans = json.loads((d / "plans.json").read_text()) if (d / "plans.json").is_file() else []
-    out = dict(outcome=s["outcome"], elapsed_s=s["elapsed_s"], min_pelvis_m=s.get("minimum_root_height_m"),
+    out = dict(outcome=s.get("outcome", "incomplete"), elapsed_s=s.get("elapsed_s"), min_pelvis_m=s.get("minimum_root_height_m"),
                max_contact_n=s.get("maximum_obstacle_contact_n"), max_tilt_rad=s.get("maximum_root_tilt_rad"),
                final_dist_m=s.get("final_goal_distance_xy_m"), plans=len(plans),
                latency_p95_s=(s.get("plan_latency_s") or {}).get("p95"))
