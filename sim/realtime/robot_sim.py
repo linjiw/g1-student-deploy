@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
-LUCID = Path(os.environ.get("LUCID_DEPLOY_ROOT", "/home/linjiw/lucid-sonic/lucid-g1-deploy"))
+LUCID = Path(os.environ.get("LUCID_DEPLOY_ROOT", Path.home() / "lucid-sonic/lucid-g1-deploy"))
 sys.path[:0] = [str(ROOT), str(LUCID / "sim"), str(LUCID / "sdk")]
 
 from g1deploy.perception import mid360  # noqa: E402

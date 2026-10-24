@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from g1deploy import contract as C  # noqa: E402
 
-LUCID = Path(os.environ.get("LUCID_DEPLOY_ROOT", "/home/linjiw/lucid-sonic/lucid-g1-deploy"))
+LUCID = Path(os.environ.get("LUCID_DEPLOY_ROOT", Path.home() / "lucid-sonic/lucid-g1-deploy"))
 OUT = ROOT / "sim/realtime/motions"  # the converter writes OUT/<clip name>/
 
 

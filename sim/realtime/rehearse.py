@@ -36,7 +36,7 @@ sys.path.insert(0, str(ROOT))
 from g1deploy import bundle  # noqa: E402
 from g1deploy.scoring import TaskScorer  # noqa: E402
 
-LUCID = Path(os.environ.get("LUCID_DEPLOY_ROOT", "/home/linjiw/lucid-sonic/lucid-g1-deploy"))
+LUCID = Path(os.environ.get("LUCID_DEPLOY_ROOT", Path.home() / "lucid-sonic/lucid-g1-deploy"))
 RUNNER = LUCID / "runner/target/release/g1_deploy_onnx_ref"
 OBS_CONFIG = LUCID / "config/observation_config_lucid_g1_1570.yaml"
 MOTIONS = ROOT / "sim/realtime/motions"
