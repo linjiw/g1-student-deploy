@@ -164,8 +164,24 @@ Across these runs:
 - **Health:** no plan over 0.32 s, no plan with nothing safe, no stall risk, no anchor miss and no mask refusal.
 - **Shoulder leak:** at the 3 cm margin it sits inside the self mask's band, and the mask alone recovers the stack.
   With the leak and no guards, this twin backed off and crouched.
-- **Still unmeasured:** the 4070's latency on a plan where nothing is safe (frozen resampling, 0.35–0.50 s on the
-  5080), because none occurred.
+- **No plan with nothing safe occurred**, so the 4070's latency on one could not be measured here.
+
+**The gate number.** The deploy PC's real-time panel answered it: on the 4070, a plan where nothing is safe takes
+**0.42 s, over the 0.32 s gate**. These are the frozen resampling plus the stop pool. The source was one unguarded
+dense-room run: 29 such plans at 0.421–0.424 s, 30 plans over the gate, and it ended in a collision. No guarded run
+produced one, and the slowest guarded plan was 0.087 s.
+
+The rest of that panel matched this dev box:
+
+| condition | done | fall | collision | unmeasured |
+|---|---|---|---|---|
+| kit, no guards | 2/6 | 3 | 1 | 0 |
+| kit + `--guards walls`, slow | 3/3 measured | 0 | 0 | 3 |
+
+The 3 unmeasured runs got no lidar. The node fused 0 points (one frame in one run) against 1.3–1.7 M in the
+others, because that PC's `net.core.rmem_max` is still 212,992 bytes against lidar frames of about 0.9 MB in
+closed rooms. The DDS reader then stalled for the whole run. The panel now scores such runs as `no_lidar`,
+unmeasured rather than failed, and the node reports `prescan_blocked` every 5 s when the walk cannot start.
 
 ## Recommended use on the ladder
 
@@ -196,6 +212,11 @@ stay mandatory at every rung. Before H5, run this branch's panel on the deploy P
   in this branch.
 - **Walking drops are bounded, not free.** Each costs a planner latency of stream; after 2 in a row the calm path
   takes over.
+- **A plan with nothing safe is over the gate on the deploy GPU** (0.42 s on the 4070). The guards make these plans
+  rare (none in the guarded panels) and plan the next one from the measured state, but they do not make them
+  fast. A cheaper fallback, such as fewer resamples or a stop pool first, is a planner-side change.
+- **Lidar on the deploy PC needs `sudo sysctl -w net.core.rmem_max=16777216`** (and persisting it). Without it,
+  closed and dense rooms lose whole lidar frames; the node then waits in PRESCAN and reports `prescan_blocked`.
 - **The envelope comes from authored courses.** Recalibrate it from robot sessions (`tools/session_report.py`
   on deploy-kit) before H6.
 

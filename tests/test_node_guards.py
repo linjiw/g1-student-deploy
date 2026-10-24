@@ -166,3 +166,11 @@ def test_walking_drops_are_bounded(node):
         node.jobs.clear()
         node.measured_jobs.clear()
         node.anchor_checks.clear()
+
+
+def test_a_walk_that_cannot_start_says_why(node):
+    """No lidar at all: the node stays in PRESCAN and reports it, instead of a robot that silently stands."""
+    st, cl = FakeState(), FakeCloud()
+    cl.stop = True
+    ev, _ = _run(node, st, cl, lambda e: "prescan_blocked" in e, timeout=10.0)
+    assert "prescan_blocked" in ev and "run" not in ev

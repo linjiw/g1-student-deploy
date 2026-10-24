@@ -744,6 +744,7 @@ class StudentNode:
         self.measured_until, self.anchor_checks = -1, []
         self.measured_jobs, self.last_streamed_req = {}, -10**9
         self.consecutive_drops = 0
+        self.prescan_blocked_next = -1
         if self.streamer is not None:
             self.streamer.last_end = None  # the runner resets playback on the new run's first chunk anyway
         for jid, _, _ in self.pool.poll():  # results of the previous run are dropped
@@ -822,6 +823,19 @@ class StudentNode:
                 if self.pool.free():
                     self.phase = "RUN"
                     self.request(self.tick, self.pool.free()[0])
+            elif self.phase == "PRESCAN" and self.tick >= prescan_until + int(2.0 / DT):
+                # the pre-scan is over but the walk cannot start: say why, every 5 s (a robot that only stands
+                # there is otherwise indistinguishable from one about to walk)
+                if self.tick >= getattr(self, "prescan_blocked_next", -1):
+                    why = []
+                    if cloud_age >= a.cloud_timeout:
+                        why.append("no lidar" if cloud.last <= 0 else f"lidar stale {cloud_age:.1f}s")
+                    if not hasattr(self, "route"):
+                        why.append("no route yet")
+                    emit("prescan_blocked", tick=self.tick, reason=", ".join(why) or "planner busy",
+                         cloud_age_s=None if cloud.last <= 0 else round(cloud_age, 2),
+                         points=getattr(getattr(self, "memory", None), "stats", {}).get("points"))
+                    self.prescan_blocked_next = self.tick + int(5.0 / DT)
             elif self.phase == "RUN":
                 self.collect(self.tick)
                 while self.anchor_checks and self.anchor_checks[0][0] <= self.tick:
