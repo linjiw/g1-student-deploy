@@ -219,7 +219,8 @@ class Session:
             self.start_livox(iface)
         meta = session_meta(a, iface)
         meta.update(mode=a.mode, task=getattr(self, "task", None), goal=list(a.goal), t0=self.t0,
-                    replay=a.replay, odom=a.odom, lidar=None if sim else a.lidar, body=a.body)
+                    replay=a.replay, odom=a.odom, lidar=None if sim else a.lidar, body=a.body, guards=a.guards,
+                    goal_lookahead=a.goal_lookahead)
         (self.dir / "session.json").write_text(json.dumps(meta, indent=1) + "\n")
         runner_cmd = [str(RUNNER), iface, str(onnx), f"{motions}/", "--obs-config", str(OBS_CONFIG),
                       "--input-type", "gamepad_manager", "--planner-file", str(planner),
@@ -251,6 +252,10 @@ class Session:
         node_cmd += ["--planner-impl", a.planner_impl, "--planner-precision", a.planner_precision]
         if a.debug_plans:
             node_cmd += ["--debug-dump", str(self.dir / "plans")]
+        if a.guards != "off":
+            node_cmd += ["--guards", a.guards]
+        if a.self_margin is not None:
+            node_cmd += ["--self-margin", str(a.self_margin)]
         env = dict(self.env, G1_BODY_MODEL=a.body)
         self.procs["node"] = Proc("node", node_cmd, self.dir / "node.log", env)
         self.event(f"node: student planner, goal {a.goal[0]:.1f} m ahead {a.goal[1]:+.1f} m left, odom {a.odom}")
@@ -633,6 +638,10 @@ def main(argv=None):
         p.add_argument("--no-report", dest="report", action="store_false")
         p.add_argument("--debug-plans", action="store_true", help="node writes every plan's exact inputs and result "
                                                                    "to <session>/plans (tools/debug_plan.py)")
+        p.add_argument("--guards", choices=("off", "deploy", "walls"), default="off",
+                       help="deploy-side guards (docs/ROBUSTNESS.md): deploy = self mask, split guidance boxes, walk "
+                            "envelope, calm fallback, anchor check; walls = deploy + low overheads as walls (H5-H6)")
+        p.add_argument("--self-margin", type=float, default=None, help="self-filter margin override (m)")
         p.add_argument("--operator", default=os.environ.get("G1_OPERATOR"), help="who runs the session (metadata)")
         p.add_argument("--note", default=None, help="free text stored with the session (course, conditions, ...)")
         if mode == "sim":

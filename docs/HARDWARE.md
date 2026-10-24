@@ -51,11 +51,15 @@ Details of the robot's sensors and the LIO configuration: [G1_PERCEPTION.md](G1_
 | H2 | perception standing still: calibrate, coverage, self filter, odometry | §3 |
 | H3 | runner in the gantry: INIT → Start → SONIC planner stand | stable stand, no aborts |
 | H4 | stream without the planner: `tools/stream_replay.py <recorded empty-floor episode> --slow 2`, gantry slack | tracked; one catch-up reset at the start only |
-| H5 | student live, open floor, goal 2–3 m (`--goal-frame start`), gantry slack then spotter | arrives and stands |
-| H6 | ground obstacles (pillar, wall detour), measured course | as G4 in sim |
+| H5 | student live, open floor, goal 2–3 m (`--goal-frame start`, `--guards walls --goal-lookahead 1.0`), gantry slack then spotter | arrives and stands |
+| H6 | ground obstacles (pillar, wall detour), measured course (`--guards walls --goal-lookahead 1.0`) | as G4 in sim |
 | H7 | overhead beams — only after the deep-duck envelope (tilt up to ~0.7 rad) is checked in place, and with a beam that yields | — |
 
 ## 5. Known gaps (decide before H5)
+
+- **Map artifacts.** Leaked self-returns, boxed-in rooms and fallback lunges are guarded on the deploy side
+  (`--guards`, [ROBUSTNESS.md](ROBUSTNESS.md)); the guards are opt-in and not hardware-verified. Every guard action
+  appears in the node's events (`guard`, `anchor_miss`) and status (`guard_counts`, `last_guard`).
 
 - **Walking speed.** From standing the student averages ~0.9 m/s (peaks 1.4 m/s; goal lookahead 1.5 m). A slower mode
   (`--goal-lookahead 1.0`) is being evaluated (G4e).

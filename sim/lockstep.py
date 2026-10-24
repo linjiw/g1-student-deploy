@@ -19,6 +19,8 @@ MuJoCo and fused ONNX. Deployment effects can be switched on one at a time:
   --prescan-s P   lidar captures during P s before the first plan (hardware: the robot stands while
                   the memory fills). Isaac's privileged-route protocol used 0.
   --lidar mjray   MuJoCo ray-cast MID-360 (scene incl. the robot's own body) + label-free memory.
+  --guards deploy the deploy-side guards of g1deploy/guards.py (self mask, split guidance boxes, walk
+                  envelope, calm fallback, anchor check); `walls` adds overhead-as-wall (H5-H6).
 
 Outputs one directory per episode: score.json, plans.json, closed_loop.npz (realized qpos, references).
 
@@ -38,7 +40,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from g1deploy import bundle  # noqa: E402
+from g1deploy import bundle, guards as G  # noqa: E402
 from g1deploy.latency import predicted_history  # noqa: E402
 from g1deploy.scoring import TaskScorer  # noqa: E402
 from sim.episode import Physics, read_json, stand_start_state, task_start_state  # noqa: E402
@@ -146,6 +148,11 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
 _PLANNERS = {}
 
 
+def _dump_memory(path, memory):
+    near = memory.near_only() if hasattr(memory, "near_only") else np.zeros_like(memory.support, dtype=bool)
+    np.savez_compressed(path, support=memory.support, ceiling=memory.ceiling, lo=memory.lo, res=memory.res, near_only=near)
+
+
 def cached_planner(flow, pcfg, impl="fused", precision="fp32"):
     """One planner per (config, implementation) per process, re-seeded for each episode.
 
@@ -170,7 +177,7 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
                 start="recorded",
                 route_source="privileged", lidar="analytic", odom_noise=None, prescan_s=None, lidar_cfg=None,
                 goal_lookahead=None, planner_overrides=None, planner_impl="fused", planner_precision="fp32",
-                deadline_s=None, save_npz=True):
+                deadline_s=None, save_npz=True, guards=None, dump_memory=False):
     import torch
 
     flow = bundle.load_flow()
@@ -195,13 +202,14 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
     route_cfg = variant.get("route", {})
     prescan = float(variant.get("sensor_prescan_s", 0.0) if prescan_s is None else prescan_s)
     lidar_cfg = dict(lidar_cfg or {})
+    gcfg = G.preset(guards)
     run_cfg = dict(task_path=str(task_path), seed=int(seed), planner=pdict, episode=ep, route_source=route_source,
                    lidar_cfg=lidar_cfg,
                    route=route_cfg, sensor_prescan_s=prescan, latency_s=latency_s, anchor_mode=anchor_mode, inflight=inflight,
                    start=start,
                    lidar=lidar,
                    odom_noise=odom_noise, engine="mujoco", sonic_onnx=str(bundle.sonic_onnx()), planner_impl=planner_impl,
-                   planner_precision=planner_precision)
+                   planner_precision=planner_precision, guards=gcfg.describe() if gcfg.any() else None)
     write_json(out / "run_config.json", run_cfg)
     np.random.seed(int(seed))
     torch.manual_seed(int(seed))
@@ -254,6 +262,8 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
                 memory.add_cloud(t_end + memory.latency, pts, org, None)  # self-filtered per slice in the scanner
     else:
         raise ValueError(lidar)
+    if gcfg.min_high_points and hasattr(memory, "min_high"):
+        memory.min_high = int(gcfg.min_high_points)
     if prescan > 0 and lidar == "mid360":  # standing/frozen pre-scan: the sensor runs, physics does not
         for t_ in np.arange(-prescan, 1e-9, 0.005):
             scanner.substep(float(t_))
@@ -281,6 +291,8 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
 
     active = None  # (plan, anchor_tick, anchor_q, anchor_dq)
     pending = []  # [(ready_tick, plan, anchor_tick, anchor_q, anchor_dq)], oldest first
+    measured_until = -1  # anchor check: plan from the measured state until this tick
+    drops = dropped_total = 0  # walking envelope drops in a row / in all
     last_request = -10**9
     plans, references, realized, pre_q, est_q, wall = [], [], [], [], [], []
     outcome, error = None, None
@@ -300,36 +312,81 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
                 drain_scanner()
             memory.step(tick * 0.02, true_q[:3], true_q[3:7])
             while pending and tick >= pending[0][0]:
-                active = pending.pop(0)[1:]
+                landed = pending.pop(0)[1:]
+                if landed[0] is None:  # a dropped plan: the node learns of it when it lands; the active plan plays on
+                    continue
+                active = landed
+                if active[0].get("predicted"):  # the predicted anchor vs the measured pose it was meant for
+                    miss = float(np.linalg.norm(np.asarray(active[2][:2]) - qpos[:2]))
+                    active[0]["_log"]["anchor_miss_m"] = miss
+                    if gcfg.anchor_check_m is not None and miss > gcfg.anchor_check_m:
+                        measured_until = tick + gcfg.anchor_hold_plans * replan + lat_ticks
             if len(pending) < inflight and (active is None or tick - last_request >= replan):
                 if route_source == "sensor":
                     route.refresh(qpos[:2], tick * 0.02)
                 wp, heading, remaining = route.waypoint(qpos[:2], lookahead)
                 guide_boxes = sm.memory_boxes(memory, grow_overhead_m=pcfg.guide_grow_overhead_m) \
-                    if pcfg.guide_w > 0 and pcfg.guide_source == "sensor" else None
+                    if pcfg.guide_w > 0 and pcfg.guide_source == "sensor" and not gcfg.any() else None
                 predictive = anchor_mode == "predict" and lat_ticks > 0 and active is not None
+                standing = active is None or G.is_standing(history[-6:], gcfg)
+                forced = False
+                if predictive and gcfg.anchor_check_m is not None and (
+                        tick < measured_until or active[0]["rule"] in G.FALLBACK_RULES or active[0].get("no_safe_candidate")):
+                    forced, predictive = True, False  # never extrapolate a fallback or a plan the robot did not follow
                 plan_hist = predicted_history(history, active, tick, lat_ticks, planner.history + 2) \
                     if predictive else history
-                anchor_at = tick + lat_ticks if predictive else tick
+                # a measured plan from a standstill starts when it lands (as the first plan), not lat_ticks into it
+                anchor_at = tick + lat_ticks if predictive or (forced and standing) else tick
                 prev = None if active is None else (active[0], anchor_at - active[1])
                 tp = time.perf_counter()
                 goal_fn.arrival_anchor = qpos.copy()  # observed estimate, not latency-predicted history
-                plan = planner.plan(np.asarray(plan_hist), boxes, goal_fn, map_fn, clearance_fn, prev=prev,
-                                    guide_boxes=guide_boxes)
-                latency = time.perf_counter() - tp
-                anchor = (plan, anchor_at, np.asarray(plan_hist[-1], dtype=np.float64).copy(),
-                          flow.feed.finite_difference_dq(plan_hist))
-                last_request = tick
-                if lat_ticks == 0 or active is None:
-                    # The first plan is computed before the stream starts (on hardware: while standing),
-                    # so only replans pay the latency.
-                    active = anchor
+                if gcfg.any():
+                    plan = G.plan_guarded(planner, plan_hist, boxes, goal_fn, G.memory_view(memory, gcfg.self_mask), gcfg,
+                                          measured_q=qpos, standing=standing, prev=prev,
+                                          guide_grow_overhead_m=pcfg.guide_grow_overhead_m,
+                                          allow_drop=active is not None and drops < gcfg.max_drops)
+                    if plan.get("rejected") and active is None:
+                        plan = dict(plan, **G.stand_plan(plan_hist[-1], len(plan["qpos"])), rule="stand_rejected")
+                    elif plan.get("rejected"):  # dropped, as by the node: the active plan keeps playing
+                        plans.append(dict(tick=tick, rule="dropped", rejected=plan["rejected"], guard=plan.get("guard"),
+                                          latency_s=time.perf_counter() - tp, chosen_clearance_m=None,
+                                          plan_xy=plan["qpos"][:, :2].tolist(), plan_root_z=plan["qpos"][:, 2].tolist(),
+                                          predicted=bool(predictive), no_safe_candidate=plan.get("no_safe_candidate"),
+                                          candidate_pool=plan.get("candidate_pool"),
+                                          plan_knee_max_rad=float(plan["qpos"][:, [7 + k for k in G.KNEES]].max()),
+                                          plan_tilt_max_rad=G.plan_metrics(plan)["tilt"]))
+                        last_request = tick
+                        drops, dropped_total = drops + 1, dropped_total + 1
+                        if lat_ticks:
+                            pending.append((tick + lat_ticks, None, None, None, None))  # occupies the planner slot
+                        plan = None
                 else:
-                    pending.append((tick + lat_ticks,) + anchor)
-                plans.append(dict(tick=tick, waypoint_xy=np.asarray(wp).tolist(), route_remaining_m=remaining,
-                                  rule=plan["rule"], chosen_clearance_m=plan["chosen_clearance_m"],
-                                  latency_s=latency, plan_xy=plan["qpos"][:, :2].tolist(),
-                                  plan_root_z=plan["qpos"][:, 2].tolist()))
+                    plan = planner.plan(np.asarray(plan_hist), boxes, goal_fn, map_fn, clearance_fn, prev=prev,
+                                        guide_boxes=guide_boxes)
+                if plan is not None:
+                    latency = time.perf_counter() - tp
+                    drops = 0
+                    plan["predicted"] = bool(predictive)
+                    if dump_memory and not plans:
+                        _dump_memory(out / "memory_first.npz", memory)
+                    anchor = (plan, anchor_at, np.asarray(plan_hist[-1], dtype=np.float64).copy(),
+                              flow.feed.finite_difference_dq(plan_hist))
+                    last_request = tick
+                    if lat_ticks == 0 or active is None:
+                        # The first plan is computed before the stream starts (on hardware: while standing),
+                        # so only replans pay the latency.
+                        active = anchor
+                    else:
+                        pending.append((tick + lat_ticks,) + anchor)
+                    plans.append(dict(tick=tick, waypoint_xy=np.asarray(wp).tolist(), route_remaining_m=remaining,
+                                      rule=plan["rule"], chosen_clearance_m=plan["chosen_clearance_m"],
+                                      latency_s=latency, plan_xy=plan["qpos"][:, :2].tolist(),
+                                      plan_root_z=plan["qpos"][:, 2].tolist(),
+                                      no_safe_candidate=plan.get("no_safe_candidate"), candidate_pool=plan.get("candidate_pool"),
+                                      predicted=plan["predicted"], guard=plan.get("guard"),
+                                      plan_knee_max_rad=float(plan["qpos"][:, [7 + k for k in G.KNEES]].max()),
+                                      plan_tilt_max_rad=G.plan_metrics(plan)["tilt"]))
+                    plan["_log"] = plans[-1]
             plan, anchor_tick, anchor_q, anchor_dq = active
             tgt, clamped = flow.feed.target(plan, anchor_q, anchor_dq, tick - anchor_tick, qpos, limits)
             pos, quat, force, _ = sim.step(tgt[:, :29], tgt[:, 29:58], tgt[:, 58:64])
@@ -348,15 +405,18 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
         report = scorer.report()
         if error:
             report["outcome"], report["completed"] = "runtime_error", False
-        lat = [p["latency_s"] for p in plans]
+        lat = [p["latency_s"] for p in plans if p["rule"] != "dropped"]
         report.update(runtime_error=error, task_id=task.get("task_id"), family=task.get("family"), seed=int(seed),
-                      replans=len(plans), route_found=bool(route.found),
+                      replans=sum(p["rule"] != "dropped" for p in plans), dropped_plans=dropped_total,
+                      route_found=bool(route.found),
                       plan_latency_s={"p50": float(np.median(lat)), "p95": float(np.quantile(lat, 0.95))} if lat else None,
                       selection_rules={r: sum(p["rule"] == r for p in plans) for r in sorted({p["rule"] for p in plans})},
                       control_step_wall_p50_s=float(np.median(wall)) if wall else None, **{k: run_cfg[k] for k in (
                           "latency_s", "anchor_mode", "inflight", "start", "lidar", "route_source")})
         write_json(out / "score.json", report)
         write_json(out / "plans.json", plans)
+        if dump_memory:
+            _dump_memory(out / "memory_last.npz", memory)
         if save_npz:
             np.savez_compressed(out / "closed_loop.npz", pre_action_qpos=np.asarray(pre_q),
                                 realized_qpos=np.asarray(realized), references=np.asarray(references),
@@ -381,6 +441,7 @@ def main(argv=None):
     ap.add_argument("--odom-noise", default=None, help="JSON dict, e.g. '{\"xy_rw_m\": 0.02, \"yaw_rw_rad\": 0.01}'")
     ap.add_argument("--deadline-s", type=float, default=None)
     ap.add_argument("--goal-lookahead", type=float, default=None, help="override (1.5 evaluated); sets walking speed")
+    ap.add_argument("--guards", default=None, choices=sorted(G.PRESETS), help="deploy-side guards (g1deploy/guards.py)")
     ap.add_argument("--prescan-s", type=float, default=None,
                     help="lidar captures before the first plan (default: the route variant's; Isaac privileged = 0)")
     args = ap.parse_args(argv)
@@ -389,7 +450,7 @@ def main(argv=None):
                     route_source=args.route, lidar=args.lidar,
                     lidar_cfg=json.loads(args.lidar_cfg) if args.lidar_cfg else None,
                     odom_noise=json.loads(args.odom_noise) if args.odom_noise else None, deadline_s=args.deadline_s,
-                    prescan_s=args.prescan_s, goal_lookahead=args.goal_lookahead)
+                    prescan_s=args.prescan_s, goal_lookahead=args.goal_lookahead, guards=args.guards)
     print(json.dumps({k: r[k] for k in ("task_id", "outcome", "elapsed_s", "replans", "plan_latency_s")}))
     return 0
 

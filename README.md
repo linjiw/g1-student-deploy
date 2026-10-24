@@ -25,6 +25,7 @@ Status: simulation only. Nothing has run on a robot. See [docs/DESIGN.md](docs/D
 | `g1deploy/sonic.py` | SONIC 1570-observation tracker in Python (ONNX parity) |
 | `g1deploy/route_compat.py` | deployment correction for same-cell start/goal routes, applied by `bundle.load_flow()` without changing frozen files |
 | `g1deploy/planner_compat.py` | preserves maximum candidate clearance, prefers actual stop-conditioned candidates on fallback ties, and reports the selected pool |
+| `g1deploy/guards.py`, `tools/robust_panel.py` | opt-in deploy-side guards (`--guards deploy` / `walls`): self mask, guidance boxes that never cover free cells, walk envelope, calm fallback, anchor check; the robustness panel that measures them in lock-step and real time; [docs/ROBUSTNESS.md](docs/ROBUSTNESS.md) |
 | `sim/lockstep.py`, `tools/eval_panel.py` | Path A: MuJoCo counterpart of the Isaac callback; switches for latency (+ predictive anchoring), standing start, lidar route, ray-cast lidar, odometry drift |
 | `g1deploy/perception/` | MID-360 pattern/mount, MuJoCo ray casting incl. self-hits, mesh-capsule self filter, label-free evidence memory |
 | `g1deploy/node.py` | the deployable node: DDS state + odometry + cloud → planner processes → SONIC stream; supervisor |
@@ -94,7 +95,8 @@ the previous behavior. The frozen bundle itself is never rewritten.
 Guides: [docs/OPERATOR_GUIDE.md](docs/OPERATOR_GUIDE.md) (setup, keys, procedure, logs) ·
 [docs/HARDWARE.md](docs/HARDWARE.md) (bring-up ladder) · [docs/G1_PERCEPTION.md](docs/G1_PERCEPTION.md) (the robot's
 lidar, odometry, calibration) · [docs/READINESS.md](docs/READINESS.md) (what is established, what is not) ·
-[docs/RUNBOOK.md](docs/RUNBOOK.md) (simulation gates and results).
+[docs/RUNBOOK.md](docs/RUNBOOK.md) (simulation gates and results) · [docs/ROBUSTNESS.md](docs/ROBUSTNESS.md) (deploy-side guards
+and the robustness panel).
 Video: `runs/video/g1_deploy_tutorial.mp4` (built by `tools/make_tutorial.py` from recorded `g1 sim` sessions).
 
 

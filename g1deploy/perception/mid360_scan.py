@@ -50,12 +50,18 @@ class Mid360Scanner:
         self.cursor = int(phase) % len(self.dirs)
         # Head-shell occlusion (one G1 unit measured a front blind sector of +-45 deg azimuth): rays in the
         # sensor-frame azimuth sector |az| <= az_deg and elevation band [el_lo_deg, el_hi_deg] never return.
+        # `bands`: [[az_lo_deg, az_hi_deg], ...] sectors instead (the lab G1: [[-45, -35], [40, 50]]).
         self.occluded = np.zeros(len(self.dirs), dtype=bool)
         if occlusion:
             a = np.degrees(np.arctan2(np.sin(az), np.cos(az)))
             e = np.degrees(el)
-            self.occluded = (np.abs(a) <= float(occlusion.get("az_deg", 45.0))) \
-                & (e >= float(occlusion.get("el_lo_deg", -90.0))) & (e <= float(occlusion.get("el_hi_deg", 90.0)))
+            if occlusion.get("bands"):
+                sector = np.zeros(len(a), dtype=bool)
+                for lo, hi in occlusion["bands"]:
+                    sector |= (a >= float(lo)) & (a <= float(hi))
+            else:
+                sector = np.abs(a) <= float(occlusion.get("az_deg", 45.0))
+            self.occluded = sector & (e >= float(occlusion.get("el_lo_deg", -90.0))) & (e <= float(occlusion.get("el_hi_deg", 90.0)))
         self.rate, self.frame_dt = float(points_per_s), 1.0 / frame_hz
         self.range_m, self.noise, self.dropout = range_m, range_noise_m, dropout
         self.deskew = deskew
