@@ -194,6 +194,43 @@ dense came out as follows:
 On the 4070, `--guards walls --goal-lookahead 1.0` now stands at 6/6 on the panel courses (open floor, room, dense)
 and 9/9 on the lab twins. The 0.42 s plans came only from unguarded runs.
 
+### Where a no-safe plan's time goes (4070, offline)
+
+The deploy PC replayed exact node inputs (`--debug-plans` dumps) through the deployed fused fp32 planner, forced
+into the fallback. Times are medians in ms, uncontended, from `tools/profile_fallback.py` on deploy-kit:
+
+| state | total | K go | 3K resample | K stop pool | clearance | grounding |
+|---|---|---|---|---|---|---|
+| lab-site twins (6–9 guide boxes) | 242 | 41 | 104 | 40 | 52 | 2 |
+| dense room, at the pose of the 0.42 s run (31 boxes) | 336 | 58 | 154 | 50 | 53 | 20 |
+| a normal plan, lab twins (for comparison) | 54 | 41 | – | – | 10 | 1 |
+
+- **The resample dominates.** The 3K resample is about 46% of a fallback, plus about 10% for its share of the
+  clearance (CPU, about 0.65 ms per candidate).
+- **Contention adds about 25%.** Real time measured 0.42 s against 0.34 s uncontended, so the dense fallback is
+  over the gate either way.
+- **A shortcut has little to gain.** Skipping the resample from a standstill under `--guards` would save about
+  150 ms. It would also change the candidate set, and it helps least where it applies: from a standstill the robot
+  is holding a stand while it waits, so latency there is not safety-critical. While walking, the frozen fallback is
+  kept as it is. So the faster fallback stays a planner-side request.
+
+### More on the 4070: lock-step and real lidar
+
+**The remaining courses in lock-step.** Pillar, slalom, table and wall-close, 3 seeds each:
+- kit, no guards: 9/12, 3 collisions.
+- `--guards walls` + slow: 11/12, 1 slalom collision.
+- No falls in either.
+- Guarded runs did meet a plan with nothing safe twice: a slalom (0.29 s) and wall-close (0.28 s, ending in a calm
+  stop). Lock-step plans run about 1.25× faster than real time, so those would be about 0.35 s on the robot.
+- The guards' view preparation on that CPU: 9.0 ms at the median, 9.6 ms at p95.
+
+**The self mask on real data.** The deploy PC re-fused its standing recordings of the lab G1 through the node's
+path (rec2, rec3; the robot hanging in the gantry). At the 5 cm margin there was one near-only band cell, at the
+harness strap 0.20 m behind the pelvis (support 1.17 m). It was not masked, because its evidence reaches outside
+the band toward the gantry. At 3 cm there were two such cells, still not masked. On real data the mask has not
+acted yet; it acted only in the 3 cm lab twin, and the strap stays visible as intended. SONIC's own stand pose is
+the capture still missing, listed for H3 in DEPLOY_KIT.md.
+
 ## Recommended use on the ladder
 
 | rung | node flags | course limits |
