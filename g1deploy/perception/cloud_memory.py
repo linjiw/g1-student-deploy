@@ -165,12 +165,17 @@ class CloudMemory(RayCastMemory):
                 zmin_high - edge_dz (else it is the top/edge of that obstacle) -> ceiling = zmin_high
       ambiguous high returns only otherwise -> support = zmax (conservative, revisable)
       ground    otherwise, if any ground return -> support 0
+    `min_high_points` > 1 also asks that many high returns of a high-only cell before it counts as overhead or
+    ambiguous (one stray return made a ceiling over the lab's furniture). Every low / high return is also counted
+    as *far* when it lay more than `near_m` from the sensor horizontally: a cell seen only from closer than that
+    (`near_only()`) is where the robot's own leaked returns land (g1deploy/guards.py masks such cells next to the
+    body from the planner's view; the memory itself keeps them).
     """
 
     def __init__(self, origin_xy, *, source=None, ground_tol_m=0.05, face_push_m=0.035, self_filter=True,
                  self_margin_m=0.03, overhead_min_bottom_m=0.8, min_low_points=3, low_ratio=0.2,
                  free_band_m=(0.1, 0.8), carve_step_m=0.05, carve_stop_m=0.1, edge_cells=2, edge_dz_m=0.05,
-                 carve_rays=4000, **kw):
+                 carve_rays=4000, min_high_points=1, near_m=0.6, **kw):
         kw.pop("boxes", None)
         super().__init__([], origin_xy, overhead_min_bottom_m=overhead_min_bottom_m, **kw)
         self.source = source
@@ -178,6 +183,7 @@ class CloudMemory(RayCastMemory):
         self.min_low, self.low_ratio, self.free_band = int(min_low_points), float(low_ratio), tuple(free_band_m)
         self.edge_cells, self.edge_dz = int(edge_cells), float(edge_dz_m)
         self.carve_step, self.carve_stop, self.carve_rays = carve_step_m, carve_stop_m, int(carve_rays)
+        self.min_high, self.near_m = int(min_high_points), float(near_m)
         self.body_filter = BodyFilter(margin_m=self_margin_m) if self_filter else None
         shape = (self.n * self.n,)
         self.n_low = np.zeros(shape, dtype=np.int32)
@@ -186,6 +192,9 @@ class CloudMemory(RayCastMemory):
         self.n_ground = np.zeros(shape, dtype=np.int32)
         self.zmin_high = np.full(shape, np.inf)
         self.free_low = np.zeros(shape, dtype=bool)
+        self.n_high = np.zeros(shape, dtype=np.int32)
+        self.n_low_far = np.zeros(shape, dtype=np.int32)
+        self.n_high_far = np.zeros(shape, dtype=np.int32)
         self.stats = {"points": 0, "self_removed": 0, "ground": 0, "solid_cells": 0, "overhead_cells": 0,
                       "ambiguous_cells": 0}
 
@@ -230,7 +239,8 @@ class CloudMemory(RayCastMemory):
         gi, gok = self._cells(self._apply_pose_error(pts[ground, :2], center))
         obj, ou = pts[~ground], unit[~ground]
         oi, ook = self._cells(self._apply_pose_error(obj[:, :2] + self.face_push * ou[:, :2], center))
-        return dict(free=np.unique(fi[fok]), ground=gi[gok], obj_idx=oi[ook], obj_z=obj[ook, 2])
+        far = np.linalg.norm(obj[:, :2] - o[~ground, :2], axis=1) > self.near_m
+        return dict(free=np.unique(fi[fok]), ground=gi[gok], obj_idx=oi[ook], obj_z=obj[ook, 2], obj_far=far[ook])
 
     def add_cloud(self, t_ready, points_world, origin_world, qpos36=None):
         """A capture in the gravity-aligned odometry frame (floor at z = 0), usable at `t_ready`."""
@@ -270,6 +280,11 @@ class CloudMemory(RayCastMemory):
                 np.minimum.at(self.zmin, oi, oz)
                 np.maximum.at(self.zmax, oi, oz)
                 np.minimum.at(self.zmin_high, oi[~low], oz[~low])
+                np.add.at(self.n_high, oi[~low], 1)
+                far = ev.get("obj_far")
+                if far is not None:
+                    np.add.at(self.n_low_far, oi[low & far], 1)
+                    np.add.at(self.n_high_far, oi[~low & far], 1)
                 self.stats["ground"] += len(ev["ground"])
                 touched.append(True)
             else:
@@ -283,7 +298,7 @@ class CloudMemory(RayCastMemory):
         from scipy.ndimage import maximum_filter
 
         solid = (self.n_low >= self.min_low) & (self.n_low >= self.low_ratio * self.n_ground)
-        high = ~solid & np.isfinite(self.zmin_high)
+        high = ~solid & np.isfinite(self.zmin_high) & (self.n_high >= self.min_high)
         # a high-only cell next to a solid cell reaching its height is the top/edge of that obstacle
         solid_top = np.where(solid, self.zmax, -np.inf).reshape(self.n, self.n)
         near = maximum_filter(solid_top, size=2 * self.edge_cells + 1, mode="constant", cval=-np.inf).reshape(-1)
@@ -297,6 +312,11 @@ class CloudMemory(RayCastMemory):
         self.stats["solid_cells"] = int(solid.sum())
         self.stats["overhead_cells"] = int(over.sum())
         self.stats["ambiguous_cells"] = int(amb.sum())
+
+    def near_only(self):
+        """(n, n) True where the cell has obstacle evidence but none of it was seen from farther than `near_m`."""
+        seen = (self.n_low > 0) | (self.n_high > 0)
+        return (seen & (self.n_low_far == 0) & (self.n_high_far == 0)).reshape(self.n, self.n)
 
 
 class MjRaySource:
