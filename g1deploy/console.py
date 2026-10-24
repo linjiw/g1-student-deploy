@@ -20,7 +20,7 @@ usage:
            [--script STEPS] [--record DIR] [--replay EPISODE]
   g1 robot [--robot NAME] --iface eno1 --goal 3 0 [--odom leg|zmq] [--lidar dds|livox] [--mount-calib mount.json]
            [--body dex3|rubber] [--replay EPISODE]
-  g1 check|calibrate|bench|replay|rehearse|test|report|discover|remote|doctor|sessions|note|courses ...
+  g1 check|calibrate|bench|replay|rehearse|test|report|discover|remote|doctor|sessions|note|courses|lidar|lio ...
                                                          (wrappers around tools/, see docs/DEPLOY_KIT.md)
 
 --script runs without a keyboard (tests, videos): comma-separated steps
@@ -217,6 +217,9 @@ class Session:
                 self.event("sim: LIO stand-in on :5561 (odom + registered cloud)")
         elif a.lidar == "livox":
             self.start_livox(iface)
+        if not sim and a.odom == "zmq" and subprocess.run(["pgrep", "-f", "adapters/dds_lio_bridge.py"],
+                                                          capture_output=True).returncode:
+            self.event("odom zmq: NO LIO bridge on :5561, the node will wait for odometry (`g1 lio start`, standing)")
         meta = session_meta(a, iface)
         meta.update(mode=a.mode, task=getattr(self, "task", None), goal=list(a.goal), t0=self.t0,
                     replay=a.replay, odom=a.odom, lidar=None if sim else a.lidar, body=a.body, guards=a.guards,
@@ -599,7 +602,7 @@ def apply_robot_profile(args):
 TOOLS = {"check": "tools/check_robot.py", "calibrate": "tools/calibrate_mount.py", "bench": "tools/bench_planner.py",
          "replay": "tools/stream_replay.py", "rehearse": "sim/realtime/rehearse.py", "report": "tools/session_report.py",
          "discover": "tools/dds_discover.py", "remote": "tools/remote_check.py", "site": "tools/site_check.py"}
-KIT = ("doctor", "sessions", "note", "courses", "lidar")
+KIT = ("doctor", "sessions", "note", "courses", "lidar", "lio")
 
 
 def main(argv=None):

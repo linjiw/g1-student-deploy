@@ -7,6 +7,8 @@ node exchange, and ends every session with a report. This page is the robot-day 
 ```
 ./g1 doctor --robot lab-g1         pre-flight: desk + network + DDS rates + controller mode + lidar + calibration
 ./g1 lidar start --robot lab-g1    robots without Unitree's lidar service: Livox driver + adapter (for check/calibrate)
+./g1 lio replay SESSION            offline: FAST-LIO on a recorded session's lidar + IMU, drift PASS/FAIL (§7)
+./g1 lio start|check|stop --robot lab-g1    FAST-LIO + LIO bridge for --odom zmq (Studio goals), standing check
 ./g1 check / calibrate / remote    H1 state, H2 perception + mount, remote buttons (read-only)
 ./g1 robot --robot lab-g1 --goal 2 0 [--replay EPISODE]     H3-H5 (H4 with --replay), recorder + runner CSV on
 ./g1 sim --layout NAME [--mission course] [--odom leg|lio]  the same chain in MuJoCo (courses: ./g1 courses)
@@ -68,6 +70,10 @@ rate). Joints inside limits, tilt small.
 floor. Floor |z| < 1 cm and < 0.5° after calibration; no blocked sector in the front ±35°. Confirm the forward
 direction once per robot: an object in front must appear ahead (+x) in `h2.png`.
 
+**LIO (only for `--odom zmq` / Studio's real-robot goals).** Robot standing still: `./g1 lio start --robot NAME`
+(FAST-LIO + bridge; it starts `g1 lidar` if needed), `./g1 lio check --robot NAME` (30 s: < 3 cm, < 0.5°). Then walk
+the robot 5 m out and back by hand with `g1 lio status` running (< 5 cm, < 1°) before trusting it for a walk (§7).
+
 **Remote.** `./g1 remote --iface IFACE`: press Start, Select, F1, D-up; all four must register. Only with the robot
 in the gantry, since Unitree's own controller may react to buttons.
 
@@ -92,6 +98,16 @@ start or goal between 0.8 and 1.35 m high (table tops, the gantry frame): the no
 defers its stand there. New goal: `n` then `g`.
 
 **After each session** the console prints the report; read the flags first. `./g1 note latest "..."`.
+
+**Captures for research (record them when the step comes up; the recorder runs in every console session).**
+- H3, SONIC standing the robot in the gantry: 20–30 s standing still with lidar. Real self-returns at SONIC's stand
+  pose: leak and mask counts offline with `tools/guard_mask_real.py SESSION` (so far only the hanging-limp pose was
+  measured).
+- With the gantry strap where it was on the NO-GO day: `g1 site ... --json site.json`, keep the session (memory
+  dump). Confirms on real data that the strap stays visible (the hanging-limp recordings say yes, §10).
+- Optional: a person walks past at 1–2 m while the robot stands (does the memory forget what moved away?).
+- LIO: the 5 m out-and-back hand walk with `g1 lio start` running (§7), recorded: the first moving real-data LIO
+  check (`g1 lio replay` has only had standing data).
 
 **Never run a simulation on the deploy PC during a robot session**: both use ZMQ :5556/:5557/:5561/:5562 on this
 machine, and a sim's streams end up in the robot's recording (seen on 2026-10-23). `g1 doctor` flags busy ports.
@@ -147,18 +163,36 @@ packet (~2 kHz × 96 points) whatever `publish_freq` says; the adapter does not 
 Leg odometry is the first-day default; Studio's real-robot Navigate needs the node on LIO (`--odom zmq`). On this PC
 the ROS python cannot import the deploy stack, so `g1deploy/adapters/dds_lio_bridge.py` reads FAST-LIO's
 `/Odometry` (+ `/cloud_registered`) directly from DDS with the same frame math and 50 Hz filter as
-`ros2_lio_bridge.py`:
+`ros2_lio_bridge.py`. `g1 lio` runs the pieces:
 
 ```bash
-g1 lidar start --robot NAME            # adapter; then (ROS env, rmw_cyclonedds on the robot NIC):
-ros2 launch fast_lio mapping.launch.py config_path:=$PWD/config/lio config_file:=fastlio_mid360_g1.yaml rviz:=false
-.venv/bin/python g1deploy/adapters/dds_lio_bridge.py --iface eno1 --forward-cloud    # robot standing still
-./g1 robot --robot NAME --odom zmq --goal 2 0
+./g1 lio replay runs/robot-probe/rec2 [--loops 6]   # offline, any time: FAST-LIO fed a recorded session (below)
+./g1 lio start --robot NAME     # robot standing still: g1 lidar (if needed) + FAST-LIO + bridge -> :5561
+./g1 lio check --robot NAME     # 30 s standing: FAST-LIO's /Odometry inside 3 cm / 0.5 deg, else FAIL
+./g1 robot --robot NAME --odom zmq --goal 2 0          # the console warns if no bridge runs
+./g1 lio status | stop          # logs in runs/lio/
 ```
 
-Status: the bridge and the 10 Hz input are built and unit-tested; FAST-LIO on this robot has **not** been run yet
-(the link dropped before the test). Validate it standing still (odometry must not drift), then by walking the robot
-5 m out and back by hand (HARDWARE.md §3: < 5 cm, < 1°), before using it for a walk.
+FAST-LIO is the Click-and-Traverse `lidar_ws` build with `config/lio/fastlio_mid360_g1.yaml` (input: the adapter's
+10 Hz `/livox/lidar_10hz` + `/livox/imu`). Like every FAST-LIO run, it rewrites its own debug logs under that
+workspace's `src/FAST_LIO/Log/` (`mat_pre.txt` etc.; its ROOT_DIR is compiled in).
+
+**Offline check on real data (`g1 lio replay`, `tools/lio_replay.py`).** Plays a recorded session's `rec/lidar`
+frames (as CustomMsg, the adapter's `--custom-out` format) and `rec/lidar_imu` into FAST-LIO on a private DDS domain
+(77) on loopback, nothing on the robot NIC; `--loops N` repeats a short recording with shifted stamps (a standing
+robot stays put). A fresh FAST-LIO per replay: reusing one across recordings sends its IMU propagation across the
+gap between them and it diverges (kilometres). Results on lab-g1's two standing recordings (2026-10-23, robot in the
+gantry, Unitree controller holding; RTX 4070 Ti SUPER PC):
+
+| recording | frames, IMU | replay | poses | drift max (end) | yaw drift | largest step | verdict |
+|---|---|---|---|---|---|---|---|
+| `runs/robot-probe/rec2` | 80 frames, 1655 IMU (8.3 s) | ×6, 49.5 s | 477 at 9.6 Hz | 0.25 cm (0.15) | 0.10° | 0.17 cm | PASS |
+| `runs/robot-probe/rec3` | 92 frames, 2020 IMU (10.2 s, 0.4 s lidar gaps) | ×6, 60.0 s | 549 at 9.1 Hz | 0.47 cm (0.27) | 0.05° | 0.27 cm | PASS |
+
+So the config, the adapter's 10 Hz frames, the Livox IMU in g and the lidar-clock stamps work with FAST-LIO on this
+robot's data. Not yet covered: motion (extrinsic and IMU-gyro errors only show when the head moves) and the bridge's
+world initialisation on real lowstate. Next robot day: `g1 lio start` + `g1 lio check` standing, then the 5 m hand
+walk (HARDWARE.md §3: < 5 cm, < 1°), recorded, before using it for a walk.
 
 ## 8. lab-g1: what the read-only bring-up measured (2026-10-23)
 
@@ -194,3 +228,32 @@ heights, safety, the live plan, the map the network sees). `./g1 sim --viewer` s
 | planner p95 0.26–0.29 s near obstacles on this RTX 4070 Ti SUPER (0.06 s on open floor) | pillar, wall-detour, slalom, table-edge | within the 0.32 s gate, close to it; `--planner-precision tf32` is the evaluated faster option (82/98, p95 0.142 s) |
 | obstacles 0.8–1.35 m tall and the gantry frame are filed as ceilings → deferred stand | table-edge trap, lab site | `g1 site` reports them |
 | `g1 check` exited 245 after its report (leg-odometry thread vs DDS teardown) | H2 runs | **fixed** clean exit |
+
+## 10. Deploy-PC measurements (2026-10-24, RTX 4070 Ti SUPER)
+
+**Where a no-safe plan's time goes** (`tools/profile_fallback.py`, fused fp32, exact node inputs, CUDA-synced
+stages, uncontended GPU; `runs/profile/`). With no safe candidate the frozen planner samples K = 16 go, 3K = 48
+resampled and K = 16 stop candidates:
+
+| state | guide boxes | total | go (16) | resample (48) | stop (16) | clearance (80) | grounding | rest |
+|---|---|---|---|---|---|---|---|---|
+| lab-site twins, 4 states (median) | 6–9 | 242 ms | 41 | 104 | 40 | 52 | 2 | 2 |
+| dense room (`rt-4070/kit/dense__s2` memory) | 31 | 336 ms | 58 | 154 | 50 | 53 | 20 | 2 |
+| as deployed, lab twins (K go only) | 6–9 | 54 ms | 41 | – | – | 10 | 1 | 1 |
+
+In real time (runner + simulator on the same GPU and CPU) the dense room's no-safe plans took 0.42 s: about 1.25×
+the uncontended number. The 3K resample is ~46 % of a no-safe plan, its share of the clearance another ~10 %:
+skipping it would bring the dense case to ~0.15 s uncontended. That is a candidate-set change (a planner or
+`planner_compat` decision with its own panel), not a speed-up of the same plan. Clearance is CPU-bound and linear in
+the candidates (~0.65 ms each).
+
+**Lock-step panel, remaining courses** (`tools/robust_panel.py`, 3 seeds; `runs/robust/ls-4070-b`): kit 9/12 (3
+collisions: pillar s3, slalom s1, s2), kit-walls-slow 11/12 (1 collision: slalom s3), 0 falls. Guard view 9.0 ms p50,
+9.6 p95, 12.3 max per plan on this CPU; guard selection p95 0.5 ms (max 19 ms on an envelope reselect).
+
+**Self mask on real lidar** (`tools/guard_mask_real.py`: lab-g1 rec2 and rec3 re-fused through the node's path, leg
+odometry, the preliminary mount calibration; robot hanging in the gantry, controller holding). At the deployed 5 cm
+margin: 1 near-only cell inside the 10 cm band, 0.20 m behind the pelvis at 1.17 m, where the harness strap leaves
+the back. It is joined to evidence outside the band, so the mask hides nothing (0 masked, 0 refused) and the strap
+stays visible to the planner. At 3 cm: 2 such cells (0.15 and 0.20 m behind), still 0 masked. SONIC's stand pose
+(H3) is not measured yet (captures, §3).

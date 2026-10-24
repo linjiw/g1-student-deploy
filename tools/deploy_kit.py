@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deployment kit helpers behind `g1 doctor | sessions | note | courses | lidar` (docs/DEPLOY_KIT.md).
+"""Deployment kit helpers behind `g1 doctor | sessions | note | courses | lidar | lio` (docs/DEPLOY_KIT.md).
 
   g1 doctor [--robot NAME | --iface NIC]   pre-flight: desk (GPU, bundle, runner, engines, disk, stale processes)
                                            and, with a robot, network, DDS rates, controller mode, lidar path,
@@ -11,6 +11,12 @@
                                            robots without Unitree's lidar service: livox_ros_driver2 (if not running)
                                            + g1deploy/adapters/livox_to_utlidar.py in the background, for `g1 check
                                            --perception` / `g1 calibrate` before a console session
+  g1 lio replay SESSION [--loops 6]        offline LIO check: FAST-LIO on a private loopback DDS domain, fed a recorded
+                                           session's lidar + lidar IMU (tools/lio_replay.py); drift report, PASS/FAIL
+  g1 lio start|stop|status [--robot NAME]  FAST-LIO on the robot NIC (input: the adapter's /livox/lidar_10hz, started
+                                           by `g1 lidar start` if needed) + adapters/dds_lio_bridge.py -> :5561, for
+                                           `g1 robot --odom zmq`. Start it with the robot standing still.
+  g1 lio check [--seconds 30]              the robot standing still: FAST-LIO's /Odometry must stay inside 3 cm / 0.5°
 """
 
 from __future__ import annotations
@@ -34,6 +40,11 @@ from g1deploy.console import LIVOX_WS, LUCID, ROBOTS, ROS_SETUP, RUNNER, SESSION
 OK, WARN, FAIL, INFO = "ok", "WARN", "FAIL", "·"
 PORTS = {5556: "node pose stream", 5557: "runner g1_debug", 5560: "sim cloud", 5561: "LIO bridge", 5562: "node control"}
 LIDAR_DIR = ROOT / "runs/lidar"
+LIO_DIR = ROOT / "runs/lio"
+LIO_CONFIG = ROOT / "config/lio/fastlio_mid360_g1.yaml"
+LIO_REPLAY_DOMAIN = 77  # replays: loopback only, a domain no robot participant uses
+FASTLIO = Path(LIVOX_WS).parent / "fast_lio/lib/fast_lio/fastlio_mapping"
+ADAPTER_PGREP = "^/usr/bin/python3 .*livox_to_utlidar"
 
 
 def profile(args):
@@ -112,6 +123,8 @@ def doctor_desk(r: Report):
           f"net.core.rmem_max = {rmax} (lidar frames are 0.3-0.9 MB bursts)",
           "printf 'net.core.rmem_max=33554432\\nnet.core.rmem_default=8388608\\n' | sudo tee "
           "/etc/sysctl.d/60-g1-dds.conf && sudo sysctl --system   (g1deploy/dds.py)")
+    r.add("desk", "FAST-LIO build", OK if FASTLIO.exists() else WARN, str(FASTLIO) if FASTLIO.exists() else "missing",
+          "needed only for `g1 lio` / `--odom zmq` (Studio's real-robot goals): build the lidar workspace")
     procs = sh("pgrep -af 'g1_deploy_onnx_ref|g1deploy/node.py|robot_sim.py|stream_replay.py|g1deploy/recorder.py' "
                "| grep -v pgrep")
     r.add("desk", "Stale deploy processes", OK if not procs else FAIL, "none" if not procs else procs.splitlines()[0][:100],
@@ -287,18 +300,36 @@ def cmd_courses(args):
 
 
 # ---------------------------------------------------------------------------------------------- lidar
+def ros_env():
+    """This environment without the venv's python settings (the ROS side runs the system python 3.10) and without a
+    ROS_DOMAIN_ID: robot-side ROS processes must share domain 0 with the node and the robot."""
+    return {k: v for k, v in os.environ.items() if not k.startswith(("PYTHON", "VIRTUAL_ENV")) and k != "ROS_DOMAIN_ID"}
+
+
+def ros_prefix(xml, domain=None):
+    """bash prefix: the ROS 2 + lidar workspace setup, rmw_cyclonedds on the NIC named in `xml`."""
+    return (f"source {ROS_SETUP} >/dev/null && source {LIVOX_WS} >/dev/null && export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp "
+            f"CYCLONEDDS_URI=file://{xml}" + (f" ROS_DOMAIN_ID={domain}" if domain is not None else "") + " && ")
+
+
+def spawn(cmd, log, env, cwd=None):
+    """A background process in its own process group (stopped with killpg), output to `log`."""
+    return subprocess.Popen(["bash", "-c", cmd], stdout=open(log, "w"), stderr=subprocess.STDOUT, env=env, cwd=cwd,
+                            start_new_session=True)
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, TypeError):
+        return False
+
+
 def cmd_lidar(args):
     LIDAR_DIR.mkdir(parents=True, exist_ok=True)
     pidfile = LIDAR_DIR / "pids.json"
     pids = json.loads(pidfile.read_text()) if pidfile.exists() else {}
-
-    def alive(pid):
-        try:
-            os.kill(pid, 0)
-            return True
-        except (OSError, TypeError):
-            return False
-
     if args.action == "stop":
         for name, pid in pids.items():
             if alive(pid):
@@ -312,35 +343,137 @@ def cmd_lidar(args):
         for name, pid in pids.items():
             print(f"  {name:<8} pid {pid} {'running' if alive(pid) else 'gone'}")
         print("  livox_ros_driver2:", "running" if sh("pgrep -f '^[^ ]*livox_ros_driver2_node'") else "not running")
-        print("  adapters running:", sh("pgrep -f '^/usr/bin/python3 .*livox_to_utlidar' | wc -l"))
+        print("  adapters running:", sh(f"pgrep -f '{ADAPTER_PGREP}' | wc -l"))
         if iface:
             s = dds_sample(iface, 2.0)
             print(f"  rt/utlidar/cloud_livox_mid360 on {iface}: {s['lidar'] / 2.0:.1f} Hz")
         return 0
     if not iface:
         raise SystemExit("give --robot NAME or --iface NIC")
-    if any(alive(p) for p in pids.values()) or sh("pgrep -f '^/usr/bin/python3 .*livox_to_utlidar'"):
+    if any(alive(p) for p in pids.values()) or sh(f"pgrep -f '{ADAPTER_PGREP}'"):
         raise SystemExit("an adapter is already running (two would publish every frame twice): `g1 lidar status`")
-    xml = cyclone_xml(iface, LIDAR_DIR / f"cyclonedds_{iface}.xml")
-    ros = (f"source {ROS_SETUP} >/dev/null && source {LIVOX_WS} >/dev/null && export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp "
-           f"CYCLONEDDS_URI=file://{xml} && ")
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("PYTHON", "VIRTUAL_ENV"))}
+    ros, env = ros_prefix(cyclone_xml(iface, LIDAR_DIR / f"cyclonedds_{iface}.xml")), ros_env()
     started = {}
     if not sh("pgrep -f '^[^ ]*livox_ros_driver2_node'"):
-        p = subprocess.Popen(["bash", "-c", ros + "exec ros2 launch livox_ros_driver2 msg_MID360_launch.py"],
-                             stdout=open(LIDAR_DIR / "livox.log", "w"), stderr=subprocess.STDOUT, env=env,
-                             start_new_session=True)
-        started["livox"] = p.pid
-    p = subprocess.Popen(["bash", "-c", ros + f"exec /usr/bin/python3 -u {ROOT}/g1deploy/adapters/livox_to_utlidar.py --stats-s 10 --custom-out /livox/lidar_10hz"],
-                         stdout=open(LIDAR_DIR / "adapter.log", "w"), stderr=subprocess.STDOUT, env=env,
-                         start_new_session=True)
-    started["adapter"] = p.pid
+        started["livox"] = spawn(ros + "exec ros2 launch livox_ros_driver2 msg_MID360_launch.py", LIDAR_DIR / "livox.log",
+                                 env).pid
+    started["adapter"] = spawn(ros + f"exec /usr/bin/python3 -u {ROOT}/g1deploy/adapters/livox_to_utlidar.py --stats-s 10 "
+                               "--custom-out /livox/lidar_10hz", LIDAR_DIR / "adapter.log", env).pid
     pidfile.write_text(json.dumps(started))
     time.sleep(4)
     s = dds_sample(iface, 2.0)
     print(f"started {started}; rt/utlidar/cloud_livox_mid360 on {iface}: {s['lidar'] / 2.0:.1f} Hz "
           f"(logs in {LIDAR_DIR}; `g1 lidar stop` ends them)")
     return 0 if s["lidar"] else 1
+
+
+# ------------------------------------------------------------------------------------------------ lio
+def wait_for(log, text, timeout):
+    t_end = time.monotonic() + timeout
+    while time.monotonic() < t_end:
+        if log.exists() and text in log.read_text(errors="replace"):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def start_fastlio(ros, env, log):
+    """FAST-LIO2 (the Click-and-Traverse lidar_ws build) with config/lio/fastlio_mid360_g1.yaml. It also rewrites its
+    own debug logs under that workspace's src/FAST_LIO/Log/ (ROOT_DIR is compiled in), as every FAST-LIO run does."""
+    if not FASTLIO.exists():
+        raise SystemExit(f"no FAST-LIO build at {FASTLIO} (colcon build the lidar workspace, or set G1_LIVOX_WS)")
+    p = spawn(ros + f"exec ros2 run fast_lio fastlio_mapping --ros-args --params-file {LIO_CONFIG}", log, env, cwd=log.parent)
+    if not wait_for(log, "Node init finished", 20):
+        os.killpg(p.pid, signal.SIGKILL)
+        raise SystemExit(f"FAST-LIO did not start (see {log})")
+    return p
+
+
+def cmd_lio_replay(args):
+    src = Path(args.session) if Path(args.session).is_dir() else resolve_session(args.session)
+    rec = src / "rec" if (src / "rec").is_dir() else src
+    if not ((rec / "lidar").is_dir() and (rec / "lidar_imu").is_dir()):
+        raise SystemExit(f"{rec}: needs recorded lidar and lidar_imu streams (a session with the livox adapter running)")
+    name = src.name if src.name != "rec" else src.parent.name
+    out = LIO_DIR / f"replay-{name}-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True)
+    # loopback and a private domain: the replayed /livox topics and FAST-LIO's output never reach a robot
+    ros, env = ros_prefix(cyclone_xml("lo", out / "cyclonedds_lo.xml"), LIO_REPLAY_DOMAIN), ros_env()
+    print(f"FAST-LIO on lo, domain {LIO_REPLAY_DOMAIN}: replaying {rec} x{args.loops} ...", flush=True)
+    fl = start_fastlio(ros, env, out / "fastlio.log")
+    try:
+        rc = subprocess.run(["bash", "-c", ros + f"exec /usr/bin/python3 -u {ROOT}/tools/lio_replay.py {rec} "
+                             f"--loops {args.loops} --rate {args.rate} --out {out / 'report.json'}"], env=env).returncode
+    finally:
+        os.killpg(fl.pid, signal.SIGINT)
+        try:
+            fl.wait(10)
+        except subprocess.TimeoutExpired:
+            os.killpg(fl.pid, signal.SIGKILL)
+    return rc
+
+
+def cmd_lio(args):
+    LIO_DIR.mkdir(parents=True, exist_ok=True)
+    if args.action == "replay":
+        if not args.session:
+            raise SystemExit("g1 lio replay SESSION (a recorded session dir, its rec/ dir, or a console session name)")
+        return cmd_lio_replay(args)
+    pidfile = LIO_DIR / "pids.json"
+    pids = json.loads(pidfile.read_text()) if pidfile.exists() else {}
+    if args.action == "stop":
+        for name, pid in pids.items():
+            if alive(pid):
+                os.killpg(pid, signal.SIGINT)
+                print(f"stopped {name} ({pid})")
+        pidfile.unlink(missing_ok=True)
+        return 0
+    if args.action == "status":
+        for name, pid in pids.items():
+            print(f"  {name:<8} pid {pid} {'running' if alive(pid) else 'gone'}")
+        log = LIO_DIR / "fastlio.log"
+        if log.exists() and pids:
+            print("  FAST-LIO:", "IMU initialised, mapping" if "IMU Initial Done" in log.read_text(errors="replace")
+                  else "waiting for the IMU / first scans")
+        log = LIO_DIR / "bridge.log"
+        if log.exists() and pids:
+            stats = [line for line in log.read_text(errors="replace").splitlines() if "LIO odom in" in line]
+            print("  bridge:", stats[-1].split("[dds_lio] ", 1)[-1] if stats else "no LIO odometry yet")
+        return 0
+    prof = profile(args)
+    iface = prof.get("iface")
+    if not iface:
+        raise SystemExit("give --robot NAME or --iface NIC")
+    ros, env = ros_prefix(cyclone_xml(iface, LIO_DIR / f"cyclonedds_{iface}.xml")), ros_env()
+    if args.action == "check":
+        out = LIO_DIR / f"check-{time.strftime('%Y%m%d-%H%M%S')}.json"
+        print(f"the robot must stand still: scoring FAST-LIO's /Odometry on {iface} for {args.seconds:.0f} s ...", flush=True)
+        return subprocess.run(["bash", "-c", ros + f"exec /usr/bin/python3 -u {ROOT}/tools/lio_replay.py --probe-only "
+                               f"--seconds {args.seconds} --out {out}"], env=env).returncode
+    if any(alive(p) for p in pids.values()) or sh("pgrep -f fastlio_mapping") or sh("pgrep -f adapters/dds_lio_bridge.py"):
+        raise SystemExit("FAST-LIO or the LIO bridge already runs: `g1 lio status`, `g1 lio stop`")
+    adapter = sh(f"pgrep -af '{ADAPTER_PGREP}'")
+    if not adapter:
+        if prof.get("lidar") != "livox":
+            raise SystemExit("`g1 lio` reads the livox adapter's 10 Hz /livox/lidar_10hz: this profile has no livox lidar")
+        if cmd_lidar(argparse.Namespace(action="start", robot=getattr(args, "robot", None), iface=iface)):
+            raise SystemExit("no lidar frames: fix `g1 lidar start` first")
+    elif "--custom-out" not in adapter:
+        raise SystemExit("the running adapter publishes no /livox/lidar_10hz (FAST-LIO's input): `g1 lidar stop`, then "
+                         "`g1 lidar start`")
+    print("the robot must stand still now: FAST-LIO initialises on its IMU, the bridge takes its world from the first pose")
+    started = {"fastlio": start_fastlio(ros, env, LIO_DIR / "fastlio.log").pid}
+    from g1deploy.console import _env
+
+    started["bridge"] = spawn(f"exec {ROOT / '.venv/bin/python'} -u {ROOT}/g1deploy/adapters/dds_lio_bridge.py --iface "
+                              f"{iface} --forward-cloud", LIO_DIR / "bridge.log", _env()).pid
+    pidfile.write_text(json.dumps(started))
+    imu = wait_for(LIO_DIR / "fastlio.log", "IMU Initial Done", 15)
+    world = wait_for(LIO_DIR / "bridge.log", "world initialised", 15)
+    print(f"started {started}: FAST-LIO {'IMU initialised' if imu else 'NO IMU INIT (no /livox/imu?)'}, bridge "
+          f"{'world initialised, odom -> :5561' if world else 'NO LIO POSE YET'} (logs in {LIO_DIR}). Next: "
+          "`g1 lio check` (standing still), then `g1 robot --odom zmq`")
+    return 0 if imu and world else 1
 
 
 def main(argv=None):
@@ -359,9 +492,17 @@ def main(argv=None):
     p.add_argument("action", choices=("start", "stop", "status"))
     p.add_argument("--robot")
     p.add_argument("--iface")
+    p = sub.add_parser("lio")
+    p.add_argument("action", choices=("replay", "start", "stop", "status", "check"))
+    p.add_argument("session", nargs="?", help="replay: a recorded session")
+    p.add_argument("--robot")
+    p.add_argument("--iface")
+    p.add_argument("--loops", type=int, default=6, help="replay: play the recording N times back to back")
+    p.add_argument("--rate", type=float, default=1.0, help="replay: playback speed")
+    p.add_argument("--seconds", type=float, default=30.0, help="check: how long to score the standing robot")
     args = ap.parse_args(argv)
     return {"doctor": cmd_doctor, "sessions": cmd_sessions, "note": cmd_note, "courses": cmd_courses,
-            "lidar": cmd_lidar}[args.cmd](args)
+            "lidar": cmd_lidar, "lio": cmd_lio}[args.cmd](args)
 
 
 if __name__ == "__main__":
