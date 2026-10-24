@@ -168,15 +168,31 @@ def _run_realtime(job):
         print(f"{out}: rehearse exited {r.returncode}\n{r.stderr[-1500:]}", flush=True)
         if not (out / "score.json").is_file():  # scored as a failure, not left out of the panel
             outcome = "never_streamed" if "node never started streaming" in r.stderr else "rehearse_error"
+            if outcome == "never_streamed" and lidar_points(out) == 0:
+                outcome = "no_lidar"  # the node fused no lidar point: the rig, not the policy (unmeasured)
             (out / "score.json").write_text(json.dumps({"outcome": outcome, "error": r.stderr[-600:]}, indent=1) + "\n")
     job["wall_s"] = time.time() - t0
     return job
 
 
+def lidar_points(d: Path):
+    """Points the node fused, from its --dump-memory file; None if unknown."""
+    f = d / "node_memory.npz"
+    if not f.is_file():
+        return None
+    try:
+        return int(json.loads(str(np.load(f)["stats"]))["points"])
+    except (KeyError, ValueError, OSError):
+        return None
+
+
+UNMEASURED = ("no_lidar", "rehearse_error")
+
+
 def episode_metrics(d: Path):
     s = json.loads((d / "score.json").read_text())
     realtime = any((d / f).is_file() for f in ("node_plans.json", "node.log", "runner.log", "config.json")) \
-        or s.get("outcome") in ("never_streamed", "rehearse_error")
+        or s.get("outcome") in ("never_streamed",) + UNMEASURED
     if realtime:  # a real-time rehearsal: plan log + events (or only the failure score.json written by _run_realtime)
         return realtime_metrics(d, s)
     plans = json.loads((d / "plans.json").read_text()) if (d / "plans.json").is_file() else []
@@ -251,9 +267,13 @@ def summarize(root: Path, conditions, names, seeds):
         rows[c] = eps
         if not eps:
             continue
-        v = list(eps.values())
+        unmeasured = sum(e["outcome"] in UNMEASURED for e in eps.values())
+        v = [e for e in eps.values() if e["outcome"] not in UNMEASURED]  # the rig failed, not the policy
+        if not v:
+            table.append(dict(condition=c, n=0, unmeasured=unmeasured))
+            continue
         agg = lambda k, f: f([e[k] for e in v if e.get(k) is not None]) if any(e.get(k) is not None for e in v) else None
-        table.append(dict(condition=c, n=len(v), success=sum(e["outcome"] == "goal_completion" for e in v),
+        table.append(dict(condition=c, n=len(v), unmeasured=unmeasured, success=sum(e["outcome"] == "goal_completion" for e in v),
                           fall=sum(e["outcome"] == "fall" for e in v), collision=sum(e["outcome"] == "obstacle_collision" for e in v),
                           timeout=sum(e["outcome"] in ("timeout", "never_streamed") for e in v),
                           first_no_safe=sum(e["first_no_safe"] for e in v),
@@ -266,11 +286,11 @@ def summarize(root: Path, conditions, names, seeds):
 
 
 def print_table(table, rows):
-    cols = ["condition", "n", "success", "fall", "collision", "timeout", "first_no_safe", "fallback_go", "calm_stand",
+    cols = ["condition", "n", "unmeasured", "success", "fall", "collision", "timeout", "first_no_safe", "fallback_go", "calm_stand",
             "calm_stop", "reselect", "dropped", "min_pelvis", "knee_max", "lat_p95", "miss_max"]
     print(" ".join(f"{c[:12]:>12}" for c in cols))
     for r in table:
-        print(" ".join(f"{(round(r[c], 3) if isinstance(r[c], float) else r[c])!s:>12}" for c in cols))
+        print(" ".join(f"{(round(r.get(c), 3) if isinstance(r.get(c), float) else r.get(c))!s:>12}" for c in cols))
     print()
     for c, eps in rows.items():
         bad = {k: (e["outcome"], e["first_rule"]) for k, e in eps.items() if e["outcome"] != "goal_completion"}
