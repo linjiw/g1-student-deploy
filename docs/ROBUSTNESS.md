@@ -257,7 +257,7 @@ follows the robot) plus the nine earlier courses, three seeds each:
 | door | 2/3 (1 collision) | 3/3 (ducks, pelvis 0.52 m) | 3/3 | 3/3 (around the frame; 0/3 before the route fix) |
 | rope-behind | 3/3 | 0/3, stands | 0/3, stands | 0/3, stands |
 | door-rope | 3/3 | 0/3, stands | 0/3, stands | 0/3 (2 stand; in 1 the robot drifted 0.11 m back into the static rope during 7 s of standing) |
-| the nine earlier courses | 20/27 (9 falls) | 25/27 | 26/27 | 26/27 |
+| the nine earlier courses | 15/27 (9 falls) | 25/27 | 26/27 | 26/27 |
 
 Without guards, the static simulated rope is escaped by lunging forward. On the robot the rope followed, and the
 same choice backed the robot off into an E-stop. With the guards, an object hugging the robot means the robot
