@@ -257,3 +257,32 @@ margin: 1 near-only cell inside the 10 cm band, 0.20 m behind the pelvis at 1.17
 the back. It is joined to evidence outside the band, so the mask hides nothing (0 masked, 0 refused) and the strap
 stays visible to the planner. At 3 cm: 2 such cells (0.15 and 0.20 m behind), still 0 masked. SONIC's stand pose
 (H3) is not measured yet (captures, §3).
+
+## 11. The safety rope and spotter behind the robot (lab-g1, 2026-10-24)
+
+**What failed.** Both door attempts planned nothing safe from the first plan: the rope from the back hook ran back to the
+spotter at 1.0-1.3 m, the MID-360 saw it as a line of cells from 0.19 m behind the pelvis, and the height field made it a
+column touching the robot (it follows the robot, so the memory never clears it). Re-planning the exact inputs with the
+rear half blanked: 13-16/16 safe candidates, chosen pelvis 0.41-0.50 m (it ducks).
+
+**Next robot day.** Rope vertical from overhead (>= 1.8 m, above the back hook; the inverted MID-360 barely sees above head
+height), spotter >= 1 m behind and to the side; Arm -> Start SONIC -> rope up, spotter back -> **Clear map** (panel `c`)
+-> check the map around the robot -> GO. Beams and doors: the rope has to be passed over the beam.
+
+**Rear blind (`--rear-blind-deg 180`, off by default).** Real-time deploy-kit simulation, deploy guards, lookahead 1.0,
+one run each (runs/sim-studio, videos in runs/sim-studio/videos):
+
+| run | full lidar | rear 180 deg blind |
+|---|---|---|
+| door twin, goal 2.5 m | arrived 25 s, around the left post | arrived 5 s, around the left post |
+| door, 2.6 m / 0.5 m left | arrived 43 s, around the left post | arrived 34 s, under the beam, **49 N brush**, 8 no-safe |
+| door, 3.0 m / 0.5 m right | arrived 5 s, under the beam | arrived 9 s, under the beam |
+| stop before the door 0.9 m | 1.8 s | 5.4 s |
+| start spot 1.5 / 2.0 / 2.0 + 0.5 left | 1.6 / 2.0 / 2.1 s, no guard events | 2.0 / 2.7 / 2.3 s, 2-12 envelope corrections each |
+| slalom 3.4 m | 5.6 s, 1 correction | 10.2 s, 12 reselects + 2 drops, no contact |
+| pillar, wall detour | 3.7 s, 4.2 s | 4.2 s, 4.1 s |
+
+13/13 arrived either way; the blind rear half makes the frozen planner's first choices crouchier and slower (more envelope
+corrections), presumably because an unseen rear half is outside what it was trained on. In lock-step (no real-time
+chain) any rear sector broke the slalom (0-1/3). Use it for straight tests with a tether, not for weaving. Next software
+step to try: blank only the *near* rear (< ~1 m: rope, spotter), keeping the far rear observed.
