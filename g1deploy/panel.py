@@ -136,7 +136,7 @@ pre { margin:0; white-space:pre-wrap; font:12px/1.4 ui-monospace, Menlo, monospa
 <div class="card" id="armcard" style="display:none"><button class="act go" style="width:100%" onclick="confirm('ARM: start the runner? It releases Unitree\'s controller (the gantry takes the weight) and ramps the joints to the stand pose.') && send({act:'arm'})">Arm: start runner<small>releases Unitree's controller, ramps to the stand pose</small></button></div>
 <div class="grid">
   <button class="act" onclick="confirm('Start SONIC control? The robot stands on SONIC.') && send({act:'s'})">Start SONIC<small>s · stand on SONIC</small></button>
-  <button class="act go" onclick="confirm('GO: hand control to the student planner?') && send({act:'g'})">GO<small>g · student walks to goal</small></button>
+  <button class="act go" id="gobtn" onclick="confirm('GO: hand control to the student planner?') && send({act:'g'})">GO<small id="gohint">g · student walks to goal</small></button>
   <button class="act" onclick="send({act:'h'})">Stand<small>h · student settles to a stand</small></button>
   <button class="act" onclick="send({act:'t'})">Takeover<small>t · SONIC's own planner (= D-up)</small></button>
 </div>
@@ -166,6 +166,9 @@ async function tick() {
     pill($('runner'), s.runner, s.runner === 'E-STOP' ? 'bad' : s.runner === 'CONTROL' ? 'ok' : 'warn');
     $('driving').textContent = s.driving;
     $('armcard').style.display = s.runner === 'not started' ? 'block' : 'none';
+    const ready = s.runner === 'CONTROL';
+    $('gobtn').disabled = !ready; $('gobtn').style.opacity = ready ? 1 : .45;
+    $('gohint').textContent = ready ? 'g · student walks to goal' : 'press Start SONIC first';
     $('phase').textContent = s.phase || '-';
     pill($('remote'), s.remote.connected ? ('ok' + (s.remote.last ? ' · ' + s.remote.last : '')) : 'not seen',
          s.remote.connected ? 'ok' : 'bad');

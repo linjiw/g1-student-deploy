@@ -413,6 +413,12 @@ class Session:
                 threading.Timer(1.5, lambda: (self.dir / "release.flag").touch()).start()
                 self.event("sim: gantry releases in 1.5 s")
         elif key == "g":
+            if not st["control"] or st["estop"]:
+                # the stream must never be on before SONIC controls the robot: SONIC would take control tracking
+                # plans anchored on the hanging robot (seen in simulation 2026-10-24: the robot ended crouched)
+                self.event("GO refused: Start SONIC first (runner not in CONTROL)" if not st["estop"]
+                           else "GO refused: runner is in E-STOP")
+                return
             if st["iface"] != "ZMQ":
                 r.key("#")
                 time.sleep(0.2)
