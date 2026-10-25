@@ -1,0 +1,97 @@
+{
+ "task_id": "door-rope",
+ "family": "door-rope",
+ "scene_boxes_world": [
+  {
+   "center_xy": [
+    1.5,
+    0.55
+   ],
+   "half_xy": [
+    0.05,
+    0.05
+   ],
+   "yaw": 0.0,
+   "z_bottom": 0.0,
+   "z_top": 2.0,
+   "velocity_xy": [
+    0.0,
+    0.0
+   ],
+   "t_ref": 0.0
+  },
+  {
+   "center_xy": [
+    1.5,
+    -0.55
+   ],
+   "half_xy": [
+    0.05,
+    0.05
+   ],
+   "yaw": 0.0,
+   "z_bottom": 0.0,
+   "z_top": 2.0,
+   "velocity_xy": [
+    0.0,
+    0.0
+   ],
+   "t_ref": 0.0
+  },
+  {
+   "center_xy": [
+    1.5,
+    0.0
+   ],
+   "half_xy": [
+    0.05,
+    0.6
+   ],
+   "yaw": 0.0,
+   "z_bottom": 1.17,
+   "z_top": 1.4,
+   "velocity_xy": [
+    0.0,
+    0.0
+   ],
+   "t_ref": 0.0
+  },
+  {
+   "center_xy": [
+    -0.5,
+    0.0
+   ],
+   "half_xy": [
+    0.3,
+    0.01
+   ],
+   "yaw": 0.0,
+   "z_bottom": 1.0,
+   "z_top": 1.3,
+   "velocity_xy": [
+    0.0,
+    0.0
+   ],
+   "t_ref": 0.0
+  }
+ ],
+ "goal_world_xy": [
+  3.0,
+  0.0
+ ],
+ "deadline_s": 16.0,
+ "initial_state_record": "/home/robotixx/g1-student-deploy/sim/courses/stand_start.npz",
+ "initial_frame": 0,
+ "initial_root_xy": [
+  0.0,
+  0.0
+ ],
+ "ground_z_m": 0.0,
+ "goal_radius_m": 0.4,
+ "goal_speed_m_s": 2.0,
+ "goal_hold_s": 0.1,
+ "fall_height_m": 0.38,
+ "fall_tilt_rad": 0.8,
+ "obstacle_contact_threshold_n": 5.0,
+ "source": "tools/robust_panel.py (authored course; not an evaluation packet)"
+}

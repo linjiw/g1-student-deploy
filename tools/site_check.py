@@ -71,6 +71,7 @@ def main(argv=None):
     ap.add_argument("--body", default=None)
     ap.add_argument("--png", default=None)
     ap.add_argument("--json", default=None)
+    ap.add_argument("--rear-blind-range-m", type=float, default=None)
     ap.add_argument("--rear-blind-deg", type=float, default=None,
                     help="ignore this rear lidar sector, as the node does (robot profile key rear_blind_deg)")
     args = ap.parse_args(argv)
@@ -86,6 +87,7 @@ def main(argv=None):
         mount_path = str(ROOT / mount_path)
     os.environ.setdefault("G1_BODY_MODEL", args.body or prof.get("body", "dex3"))
     rear_blind = args.rear_blind_deg if args.rear_blind_deg is not None else float(prof.get("rear_blind_deg") or 0.0)
+    rear_range = args.rear_blind_range_m if args.rear_blind_range_m is not None else float(prof.get("rear_blind_range_m") or 0.0)
 
     flow = bundle.load_flow()
     cfg = bundle.student_config()
@@ -109,7 +111,8 @@ def main(argv=None):
             if memory is None:
                 memory = CloudMemory(snap["qpos"][:2], rng=np.random.default_rng(0), **dict(pcfg.sensor))
                 memory.latency = 0.0
-                conv = CloudFromSensorFrame(memory.body_filter, mount, rear_blind_deg=rear_blind)
+                conv = CloudFromSensorFrame(memory.body_filter, mount, rear_blind_deg=rear_blind,
+                                            rear_blind_range_m=rear_range)
             pts, org = conv(c["points"], c["t_s"], c["wall"], state.qpos_at)
             memory.add_cloud(0.0, pts, org, None)
             memory.step(time.monotonic() - t0)

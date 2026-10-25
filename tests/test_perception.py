@@ -98,3 +98,20 @@ def test_rear_blind_sector_drops_returns_behind_the_torso():
         conv = CloudFromSensorFrame(BodyFilter(margin_m=0.05), mount, rear_blind_deg=deg)
         pw, _ = conv(p_s, np.zeros(len(p_s)), 100.0, lambda t: q)
         assert len(pw) + conv.stats["self_removed"] == kept and conv.stats["rear_blind"] == 5 - kept
+
+
+def test_near_rear_blind_keeps_far_rear_returns():
+    """`rear_blind_range_m=1.0`: the rope/spotter close behind is dropped, a wall 2 m behind is kept."""
+    from pathlib import Path
+
+    from g1deploy.perception.cloud_memory import BodyFilter
+    from g1deploy.perception.unitree_lidar import CloudFromSensorFrame, Mount
+
+    mount = Mount.load(Path(__file__).resolve().parents[1] / "robots/lab-g1/mount.json")
+    p_t = np.array([[2.0, 0.0, -0.5], [-0.5, 0.0, -0.1], [-0.6, 0.3, -0.2], [-2.0, 0.0, -0.5], [-1.5, 1.2, -0.5]])
+    p_s = (p_t - mount.pos_torso) @ mount.rot_torso
+    q = np.zeros(36)
+    q[2], q[3] = 0.78, 1.0
+    conv = CloudFromSensorFrame(BodyFilter(margin_m=0.05), mount, rear_blind_deg=180.0, rear_blind_range_m=1.0)
+    pw, _ = conv(p_s, np.zeros(len(p_s)), 100.0, lambda t: q)
+    assert conv.stats["rear_blind"] == 2 and len(pw) + conv.stats["self_removed"] == 3

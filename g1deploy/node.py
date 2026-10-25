@@ -465,7 +465,8 @@ class StudentNode:
 
         mount = Mount.load(self.args.mount_calib) if self.args.mount_calib else Mount.nominal()
         self.from_sensor = CloudFromSensorFrame(self.memory.body_filter, mount, transport_s=self.args.lidar_transport_s,
-                                                rear_blind_deg=self.args.rear_blind_deg)
+                                                rear_blind_deg=self.args.rear_blind_deg,
+                                                rear_blind_range_m=self.args.rear_blind_range_m)
 
     def perception_loop(self, cloud, state, t0, stop):
         """Clouds -> memory, and the route refresh (A* on the memory grid, up to ~0.2 s) - both off the 50 Hz loop."""
@@ -946,6 +947,9 @@ def parse(argv=None):
     ap.add_argument("--rear-blind-deg", type=float, default=0.0,
                     help="drop lidar returns from this rear sector of torso azimuth (180 = the back half: spotter, "
                          "rope and gantry are never fused); robot sessions only")
+    ap.add_argument("--rear-blind-range-m", type=float, default=0.0,
+                    help="with --rear-blind-deg: drop only rear returns closer than this (horizontal, from the torso); "
+                         "0 = the whole rear sector")
     ap.add_argument("--self-margin", type=float, default=None,
                     help="self-filter margin override (m); default: CloudMemory's")
     ap.add_argument("--seed", type=int, default=0)

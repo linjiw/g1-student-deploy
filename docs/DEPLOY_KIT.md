@@ -286,3 +286,26 @@ one run each (runs/sim-studio, videos in runs/sim-studio/videos):
 corrections), presumably because an unseen rear half is outside what it was trained on. In lock-step (no real-time
 chain) any rear sector broke the slalom (0-1/3). Use it for straight tests with a tether, not for weaving. Next software
 step to try: blank only the *near* rear (< ~1 m: rope, spotter), keeping the far rear observed.
+
+**Near-rear blind (`--rear-blind-deg 180 --rear-blind-range-m 1.0`, 2026-10-25).** Only rear returns closer than 1 m
+(horizontal, from the torso) are dropped: the rope and the spotter, while the far rear stays observed. Same real-time
+runs (one each unless noted; `corr` = guard envelope corrections; `under`/`around` = how the robot passed the door):
+
+| scene | full lidar | rear 180° blind | near rear < 1 m blind |
+|---|---|---|---|
+| **rope behind** (static 2 cm rope 0.2-0.8 m behind, 1.0-1.3 m high) | **never walks**: 273 plans, all no-safe | 2 s, 8 corr | **2 s, clean** |
+| **door + rope** | **never walks**: 265 no-safe | 4 s, under | **5 s, under, clean** |
+| door (authored, 1.0 m, beam 1.17 m) | 5 s, under | 5 s, under | 5 s, under |
+| lab door twin 2.5 m | 25 s, around | 5 s, around | 8 s, under |
+| lab door twin 2.6 m / 0.5 L | 43 s, around | 34 s, under, 49 N | 5 s, around |
+| lab door twin 3.0 m / 0.5 R (3 runs) | 3/3 arrived, 0 N (2 under) | 9 s, under | 3/3 arrived, 2 clean under, **1 touch 191 N** |
+| stop before the door 0.9 m | 2 s | 5 s | 4 s |
+| start spot 1.5 / 2.0 / 2.0 + 0.5 L | 2 / 2 / 2 s | 2 / 3 / 2 s, 3-12 corr | 2 / 2 / 2 s, 0-5 corr |
+| slalom | 6 s, 1 corr | 10 s, 14 corr | **5 s, clean** |
+| pillar / wall detour | 4 / 4 s | 4 / 4 s | 4 / 4 s |
+
+The static rope reproduces the robot's failure exactly (full lidar: no motion at all); the near-rear blind removes it
+and behaves like full lidar elsewhere (slalom included), unlike the full rear blind. One 0.1 s 191 N touch in three
+runs of the irregular scanned door (crouched at the end of a partly seen beam) against none with full lidar: too few
+runs to call, so validate on the robot with the 2 m open walk before any door. On the robot (rope attached):
+`--rear-blind-deg 180 --rear-blind-range-m 1.0` (robot profile keys `rear_blind_deg`, `rear_blind_range_m`).
