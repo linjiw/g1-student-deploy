@@ -79,3 +79,22 @@ def test_mount_calibration_recovers_injected_error():
     pw, _ = conv(frames[0], np.linspace(0, 0.1, len(frames[0])), 1.0, lambda t: q)
     floor = pw[np.abs(pw[:, 2]) < 0.15]
     assert abs(floor[:, 2].mean()) < 0.01
+
+
+def test_rear_blind_sector_drops_returns_behind_the_torso():
+    """`rear_blind_deg=180` (node --rear-blind-deg): the spotter, rope and gantry behind the robot are never fused;
+    returns ahead and to the sides are unchanged (inverted lab-g1 mount)."""
+    from pathlib import Path
+
+    from g1deploy.perception.cloud_memory import BodyFilter
+    from g1deploy.perception.unitree_lidar import CloudFromSensorFrame, Mount
+
+    mount = Mount.load(Path(__file__).resolve().parents[1] / "robots/lab-g1/mount.json")
+    p_t = np.array([[2.0, 0.0, -0.5], [-2.0, 0.0, -0.5], [0.3, 1.5, -0.5], [-0.3, 1.5, -0.5], [-0.2, 0.0, 0.1]])
+    p_s = (p_t - mount.pos_torso) @ mount.rot_torso
+    q = np.zeros(36)
+    q[2], q[3] = 0.78, 1.0
+    for deg, kept in ((0.0, 5), (180.0, 2)):
+        conv = CloudFromSensorFrame(BodyFilter(margin_m=0.05), mount, rear_blind_deg=deg)
+        pw, _ = conv(p_s, np.zeros(len(p_s)), 100.0, lambda t: q)
+        assert len(pw) + conv.stats["self_removed"] == kept and conv.stats["rear_blind"] == 5 - kept

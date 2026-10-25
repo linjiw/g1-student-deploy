@@ -148,16 +148,28 @@ class TorsoFK:
 class CloudFromSensorFrame:
     """Raw sensor-frame frames -> world points + per-point origins, deskewed with the node's own odometry."""
 
-    def __init__(self, body_filter, mount: Mount | None = None, transport_s=0.01, slice_s=0.005):
+    def __init__(self, body_filter, mount: Mount | None = None, transport_s=0.01, slice_s=0.005, rear_blind_deg=0.0):
         self.bf, self.fk = body_filter, TorsoFK(body_filter)
         self.mount = mount or Mount.nominal()
         self.transport, self.slice = transport_s, slice_s
-        self.stats = {"frames": 0, "points": 0, "self_removed": 0}
+        # Rear blind sector: returns from the back `rear_blind_deg` of torso-frame azimuth are dropped before
+        # anything is fused. The robot walks forward; behind it are the spotter, the safety rope and the gantry,
+        # which the memory would otherwise keep as obstacles touching the robot (lab-g1 door runs, 2026-10-24).
+        self.front_half_deg = 180.0 - 0.5 * float(rear_blind_deg)
+        self.stats = {"frames": 0, "points": 0, "self_removed": 0, "rear_blind": 0}
 
     def __call__(self, pts_s, t_s, recv_wall, qpos_at):
         """qpos_at(t_wall) -> 36-D qpos (odometry pelvis pose + joints) or None."""
         if len(pts_s) == 0:
             return np.zeros((0, 3)), np.zeros((0, 3))
+        if self.front_half_deg < 180.0:
+            p_t = pts_s @ self.mount.rot_torso.T + self.mount.pos_torso
+            front = np.abs(np.degrees(np.arctan2(p_t[:, 1], p_t[:, 0]))) <= self.front_half_deg
+            self.stats["rear_blind"] += int((~front).sum())
+            pts_s, t_s = pts_s[front], t_s[front]
+            if len(pts_s) == 0:
+                self.stats["frames"] += 1
+                return np.zeros((0, 3)), np.zeros((0, 3))
         t_wall = recv_wall - self.transport - (t_s.max() - t_s)
         bins = np.floor((t_wall - t_wall.min()) / self.slice).astype(int)
         out_p, out_o = [], []

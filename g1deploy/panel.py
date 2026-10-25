@@ -17,7 +17,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-KEYS = {"s", "g", "h", "t"}
+KEYS = {"s", "g", "h", "t", "c"}
 
 
 def start_panel(sess, port, host="127.0.0.1", token=None):
@@ -140,6 +140,7 @@ pre { margin:0; white-space:pre-wrap; font:12px/1.4 ui-monospace, Menlo, monospa
   <button class="act" onclick="send({act:'h'})">Stand<small>h · student settles to a stand</small></button>
   <button class="act" onclick="send({act:'t'})">Takeover<small>t · SONIC's own planner (= D-up)</small></button>
 </div>
+<div class="card"><button class="act" style="width:100%" onclick="confirm('Clear the map? Only while standing, with nobody and nothing close to the robot. The node maps again from here; GO waits 10 s.') && send({act:'c'})">Clear map<small>c · forget the lidar memory, map again from here (nothing close to the robot)</small></button></div>
 <div class="card goal">
   <div><label>ahead (m)</label><br><input id="ga" type="number" step="0.1" value="2.0"></div>
   <div><label>left (m)</label><br><input id="gl" type="number" step="0.1" value="0.0"></div>

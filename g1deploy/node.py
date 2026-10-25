@@ -356,6 +356,9 @@ class PlannerPool:
 
 
 # ---------------------------------------------------------------------------------------------- control
+CLEAR_MAP_SCAN_S = 10.0  # after clear_map: standing frames fused before a walk may start
+
+
 class ControlServer:
     """Operator commands over ZMQ REP (`--control`, default tcp://*:5562), JSON in / JSON out:
       {"cmd": "status"}                       -> live status (phase, goal distance, tilt, latency, ...)
@@ -364,6 +367,9 @@ class ControlServer:
       {"cmd": "goal", "ahead": x, "left": y}  -> new goal relative to the current pose (then "go")
       {"cmd": "goal", "frame": "odom", "x": x, "y": y, "seq": n}
                                               -> new goal in the odometry frame; status echoes `goal_seq`
+      {"cmd": "clear_map"}                    -> standing only: forget the lidar memory and map again from here
+                                                 (a spotter or rope bar that stood close is not an obstacle);
+                                                 the next walk waits for CLEAR_MAP_SCAN_S of fresh frames
       {"cmd": "quit"}                         -> stand, then exit
     Used by the operator console (g1deploy/console.py) in simulation and on the robot."""
 
@@ -456,7 +462,8 @@ class StudentNode:
         from g1deploy.perception.unitree_lidar import CloudFromSensorFrame, Mount
 
         mount = Mount.load(self.args.mount_calib) if self.args.mount_calib else Mount.nominal()
-        self.from_sensor = CloudFromSensorFrame(self.memory.body_filter, mount, transport_s=self.args.lidar_transport_s)
+        self.from_sensor = CloudFromSensorFrame(self.memory.body_filter, mount, transport_s=self.args.lidar_transport_s,
+                                                rear_blind_deg=self.args.rear_blind_deg)
 
     def perception_loop(self, cloud, state, t0, stop):
         """Clouds -> memory, and the route refresh (A* on the memory grid, up to ~0.2 s) - both off the 50 Hz loop."""
@@ -727,6 +734,16 @@ class StudentNode:
                 if hasattr(self, "route"):
                     del self.route  # re-planned from the memory on the next refresh
                 emit("goal", frame=frame, goal_odom=self.goal.tolist(), seq=self.goal_seq)
+            elif cmd == "clear_map":
+                if self.phase in ("RUN", "PRESCAN"):
+                    emit("command_refused", cmd=cmd, reason="stand first: the walk plans on this map")
+                    continue
+                with self.mem_lock:
+                    self.make_memory(q[:2])
+                if hasattr(self, "route"):
+                    del self.route
+                self.map_ready_tick = self.tick + int(CLEAR_MAP_SCAN_S / DT)
+                emit("map_cleared", xy=np.round(q[:2], 3).tolist(), scan_s=CLEAR_MAP_SCAN_S)
             elif cmd == "quit":
                 if self.active is not None and self.phase == "RUN":
                     self.stand(self.tick, "quit")
@@ -817,8 +834,8 @@ class StudentNode:
             if self.phase == "WAIT" and (start_event is None or start_event.is_set()):
                 self.phase, prescan_until = "PRESCAN", self.tick + int(a.prescan_s / DT)
                 emit("prescan")
-            elif (self.phase == "PRESCAN" and self.tick >= prescan_until and cloud_age < a.cloud_timeout
-                  and hasattr(self, "route")):
+            elif (self.phase == "PRESCAN" and self.tick >= max(prescan_until, getattr(self, "map_ready_tick", -1))
+                  and cloud_age < a.cloud_timeout and hasattr(self, "route")):
                 self.collect(self.tick)  # drain results still in flight from a previous run (they are dropped)
                 if self.pool.free():
                     self.phase = "RUN"
@@ -912,6 +929,9 @@ def parse(argv=None):
     ap.add_argument("--guards", choices=sorted(G.PRESETS), default="off",
                     help="deploy-side guards (g1deploy/guards.py): deploy = self mask, split guidance boxes, walk envelope, "
                          "calm fallback, anchor check; walls = deploy + low overheads as walls (H5-H6, no ducking)")
+    ap.add_argument("--rear-blind-deg", type=float, default=0.0,
+                    help="drop lidar returns from this rear sector of torso azimuth (180 = the back half: spotter, "
+                         "rope and gantry are never fused); robot sessions only")
     ap.add_argument("--self-margin", type=float, default=None,
                     help="self-filter margin override (m); default: CloudMemory's")
     ap.add_argument("--seed", type=int, default=0)

@@ -151,3 +151,22 @@ def test_rejected_first_plan_is_replanned(node):
     finally:
         node.sane = orig
     assert "plan_dropped" in ev and "run" in ev and ev.index("plan_dropped") < ev.index("run")
+
+
+def test_clear_map_only_while_standing(node):
+    """`clear_map` (operator: a spotter stood close) is refused while the walk plans on the map, and after the stand
+    replaces the memory; the next walk then waits for fresh frames."""
+    st, cl = FakeState(), FakeCloud()
+    threading.Timer(1.0, lambda: node.commands.append({"cmd": "clear_map"})).start()
+    threading.Timer(4.0, lambda: setattr(st, "xy", np.array([3.0, 0.0]))).start()
+    seen = {}
+
+    def until(ev):
+        if "stand" in ev and "sent" not in seen:
+            seen["sent"], seen["memory"] = True, node.memory
+            node.commands.append({"cmd": "clear_map"})
+        return "map_cleared" in ev
+
+    ev, _ = _run(node, st, cl, until)
+    assert "command_refused" in ev and "map_cleared" in ev
+    assert node.memory is not seen["memory"] and node.map_ready_tick > node.tick - int(10.0 / 0.02) - 5

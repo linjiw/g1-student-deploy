@@ -238,7 +238,7 @@ class Session:
         meta = session_meta(a, iface)
         meta.update(mode=a.mode, task=getattr(self, "task", None), goal=list(a.goal), t0=self.t0,
                     replay=a.replay, odom=a.odom, lidar=None if sim else a.lidar, body=a.body, guards=a.guards,
-                    goal_lookahead=a.goal_lookahead)
+                    goal_lookahead=a.goal_lookahead, rear_blind_deg=a.rear_blind_deg)
         (self.dir / "session.json").write_text(json.dumps(meta, indent=1) + "\n")
         self.launch = (iface, onnx, motions, planner, py, sim)
         if getattr(a, "arm", False):  # the runner waits for the panel's Arm: recorder, lidar, remote, panel run first
@@ -285,6 +285,8 @@ class Session:
             node_cmd += ["--guards", a.guards]
         if a.self_margin is not None:
             node_cmd += ["--self-margin", str(a.self_margin)]
+        if a.rear_blind_deg:
+            node_cmd += ["--rear-blind-deg", str(a.rear_blind_deg)]
         env = dict(self.env, G1_BODY_MODEL=a.body)
         self.procs["node"] = Proc("node", node_cmd, self.dir / "node.log", env)
         self.event(f"node: student planner, goal {a.goal[0]:.1f} m ahead {a.goal[1]:+.1f} m left, odom {a.odom}")
@@ -442,6 +444,10 @@ class Session:
             self.estop("operator key")
             if not self.args.replay:
                 self.node_cmd(cmd="quit")
+        elif key == "c":
+            if not self.args.replay:
+                self.node_cmd(cmd="clear_map")
+                self.event("operator: CLEAR MAP (the node maps again from here; walks wait 10 s)")
         elif key == "r" and self.args.mode == "sim":
             (self.dir / "release.flag").touch()
             self.event("sim: gantry released")
@@ -575,7 +581,7 @@ def run_console(args):
     if args.panel:
         from g1deploy.panel import start_panel
 
-        _, token = start_panel(sess, args.panel)
+        _, token = start_panel(sess, args.panel, token=os.environ.get("G1_PANEL_TOKEN") or None)
         sess.panel_url = f"http://127.0.0.1:{args.panel}/?t={token}"
         (sess.dir / "panel_url.txt").write_text(sess.panel_url + "\n")
         sess.event(f"panel: port {args.panel} (tailnet / this PC only), token in panel_url.txt")
@@ -698,7 +704,7 @@ def apply_robot_profile(args):
     if not path.exists():
         raise SystemExit(f"no robot profile {path} (see robots/README.md)")
     prof = json.loads(path.read_text())
-    for key in ("iface", "lidar", "body", "mount_calib", "odom"):
+    for key in ("iface", "lidar", "body", "mount_calib", "odom", "rear_blind_deg"):
         if getattr(args, key, None) is None and prof.get(key) is not None:
             val = prof[key]
             if key == "mount_calib" and not Path(val).is_absolute():
@@ -747,6 +753,9 @@ def main(argv=None):
         p.add_argument("--no-record-lidar", dest="record_lidar", action="store_false",
                        help="record everything but the raw lidar frames (~1.5 MB/s)")
         p.add_argument("--no-report", dest="report", action="store_false")
+        p.add_argument("--rear-blind-deg", type=float, default=None,
+                       help="ignore this rear sector of the lidar (180 = back half: spotter, rope, gantry); robot "
+                            "profile key rear_blind_deg")
         p.add_argument("--arm", action="store_true", help="start the runner only when the panel's Arm is pressed "
                                                             "(recorder, lidar, remote watcher and panel come up first)")
         p.add_argument("--panel", type=int, default=8770 if mode == "robot" else 0, metavar="PORT",
