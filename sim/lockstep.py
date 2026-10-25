@@ -280,7 +280,7 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
         return m
 
     if route_source == "sensor":
-        route = flow.route.SensorRoute(start_q[:2], goal_xy, memory, **route_cfg)
+        route = flow.route.SensorRoute(start_q[:2], goal_xy, G.route_memory(memory, gcfg), **route_cfg)
     else:
         route = flow.route.Route(start_q[:2], goal_xy, boxes, **route_cfg)
     goal_fn = make_goal_fn(route, lookahead, ep["goal_heading"], float(ep["steer_lookahead_m"]), ep.get("turn_min_frac"),
@@ -293,6 +293,7 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
     pending = []  # [(ready_tick, plan, anchor_tick, anchor_q, anchor_dq)], oldest first
     measured_until = -1  # anchor check: plan from the measured state until this tick
     drops = dropped_total = 0  # walking envelope drops in a row / in all
+    latch = G.CalmLatch(gcfg)  # a no-safe streak from a standstill stays calm
     last_request = -10**9
     plans, references, realized, pre_q, est_q, wall = [], [], [], [], [], []
     outcome, error = None, None
@@ -328,7 +329,7 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
                 guide_boxes = sm.memory_boxes(memory, grow_overhead_m=pcfg.guide_grow_overhead_m) \
                     if pcfg.guide_w > 0 and pcfg.guide_source == "sensor" and not gcfg.any() else None
                 predictive = anchor_mode == "predict" and lat_ticks > 0 and active is not None
-                standing = active is None or G.is_standing(history[-6:], gcfg)
+                standing = active is None or latch.active or G.is_standing(history[-6:], gcfg)
                 forced = False
                 if predictive and gcfg.anchor_check_m is not None and (
                         tick < measured_until or active[0]["rule"] in G.FALLBACK_RULES or active[0].get("no_safe_candidate")):
@@ -344,7 +345,8 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
                     plan = G.plan_guarded(planner, plan_hist, boxes, goal_fn, G.memory_view(memory, gcfg.self_mask), gcfg,
                                           measured_q=qpos, standing=standing, prev=prev,
                                           guide_grow_overhead_m=pcfg.guide_grow_overhead_m,
-                                          allow_drop=active is not None and drops < gcfg.max_drops)
+                                          allow_drop=active is not None and drops < gcfg.max_drops and not latch.active,
+                                          calm_move_max_m=latch.budget(qpos[:2]))
                     if plan.get("rejected") and active is None:
                         plan = dict(plan, **G.stand_plan(plan_hist[-1], len(plan["qpos"])), rule="stand_rejected")
                     elif plan.get("rejected"):  # dropped, as by the node: the active plan keeps playing
@@ -366,6 +368,8 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
                 if plan is not None:
                     latency = time.perf_counter() - tp
                     drops = 0
+                    if gcfg.any():
+                        plan["calm_latch"] = latch.update(plan, qpos[:2])
                     plan["predicted"] = bool(predictive)
                     if dump_memory and not plans:
                         _dump_memory(out / "memory_first.npz", memory)
@@ -384,6 +388,7 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
                                       plan_root_z=plan["qpos"][:, 2].tolist(),
                                       no_safe_candidate=plan.get("no_safe_candidate"), candidate_pool=plan.get("candidate_pool"),
                                       predicted=plan["predicted"], guard=plan.get("guard"),
+                                      calm_hold=latch.active, calm_latch=plan.get("calm_latch"),
                                       plan_knee_max_rad=float(plan["qpos"][:, [7 + k for k in G.KNEES]].max()),
                                       plan_tilt_max_rad=G.plan_metrics(plan)["tilt"]))
                     plan["_log"] = plans[-1]

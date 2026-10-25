@@ -16,6 +16,10 @@ evaluation packet:
   dense        6 x 7 m room with 26 furniture boxes along the walls and in the middle, clear lane
   wall-start   start 0.42 m beside a long wall, goal along it (the self mask must not hide a real wall)
   wall-close   the same wall 0.33 m from the pelvis: closer than any GO site would allow, the self mask's edge
+  rope-behind  a 2 cm "safety rope" from 0.2 m behind the pelvis, 1.0-1.3 m high (the lab door test, 2026-10-24;
+               static here, on the robot it follows the robot)
+  door         a 1.0 m wide door with its beam underside at 1.17 m, 1.5 m ahead (ducking: --guards deploy)
+  door-rope    the door with the rope behind: the lab test that E-stopped
 
 Conditions (`--conditions`, comma separated, see CONDITIONS): self-filter margin, guard preset, head
 occlusion bands. Results: <out>/<condition>/<course>__s<seed>/ (score.json, plans.json, closed_loop.npz),
@@ -70,6 +74,10 @@ def walls(x0, x1, y0, y1, t=0.05, h=WALL_H):
             box(x0 - t, cy, t, hy, h), box(x1 + t, cy, t, hy, h)]
 
 
+ROPE = box(-0.5, 0.0, 0.3, 0.01, 1.3, 1.0)
+DOOR = [box(1.5, 0.55, 0.05, 0.05, 2.0), box(1.5, -0.55, 0.05, 0.05, 2.0), box(1.5, 0.0, 0.05, 0.6, 1.4, 1.17)]
+
+
 def courses():
     out = {
         "open-2m": dict(boxes=[], goal=[2.0, 0.0], deadline=12.0),
@@ -84,6 +92,9 @@ def courses():
                       goal=[2.5, 0.2], deadline=14.0),
         "wall-start": dict(boxes=[box(1.5, 0.52, 3.0, 0.1, WALL_H)], goal=[3.0, 0.0], deadline=14.0),
         "wall-close": dict(boxes=[box(1.5, 0.43, 3.0, 0.1, WALL_H)], goal=[3.0, -0.1], deadline=14.0),
+        "rope-behind": dict(boxes=[ROPE], goal=[2.0, 0.0], deadline=12.0),
+        "door": dict(boxes=DOOR, goal=[3.0, 0.0], deadline=16.0),
+        "door-rope": dict(boxes=DOOR + [ROPE], goal=[3.0, 0.0], deadline=16.0),
     }
     rng = np.random.default_rng(20261023)
     dense = walls(-1.5, 4.5, -3.5, 3.5)
