@@ -5,6 +5,8 @@
  "body": "dex3",
  "odom": "leg",
  "mount_calib": "robots/lab-g1/mount.json",
+ "rear_blind_deg": 180,
+ "rear_blind_range_m": 1.0,
  "facts": {
   "measured": "2026-10-23 on this deploy PC (read-only bring-up)",
   "lowstate_hz": 1000,
@@ -34,6 +36,7 @@
   "lidar_clock": "Livox frame stamps = frame start, within a few ms of this PC's clock (header - receive = -0.104 s at 10 Hz)",
   "link_drop": "2026-10-23 ~18:30: eno1 lost carrier (robot powered down or cable out on the robot side)",
   "site_check_2026_10_23": "current gantry spot, goal 2 m ahead: NO-GO (harness/gantry box behind the pelvis, merged furniture boxes 2 m behind/left, ceiling cells near the start). Twin: student crouched and fell 3/3 in real time. Pick a start in the open area ahead (front sector clear ~3.5 m) and re-run g1 site there",
-  "lidar_driver_mode": "after the 18:30 power cycle livox_ros_driver2 publishes ~10 full frames/s (before: ~2 kHz single packets); the adapter handles both"
+  "lidar_driver_mode": "after the 18:30 power cycle livox_ros_driver2 publishes ~10 full frames/s (before: ~2 kHz single packets); the adapter handles both",
+  "rear_blind": "default since 2026-10-25: the safety rope and the spotter behind the robot made every plan no-safe at the door (2026-10-24); lidar returns behind the torso and closer than 1.0 m are dropped before fusion (DEPLOY_KIT.md \u00a711). Override per session: --rear-blind-deg 0"
  }
 }

@@ -309,3 +309,4 @@ and behaves like full lidar elsewhere (slalom included), unlike the full rear bl
 runs of the irregular scanned door (crouched at the end of a partly seen beam) against none with full lidar: too few
 runs to call, so validate on the robot with the 2 m open walk before any door. On the robot (rope attached):
 `--rear-blind-deg 180 --rear-blind-range-m 1.0` (robot profile keys `rear_blind_deg`, `rear_blind_range_m`).
+**Default for lab-g1 since 2026-10-25** (`robots/lab-g1.json`); `--rear-blind-deg 0` turns it off for a session.
