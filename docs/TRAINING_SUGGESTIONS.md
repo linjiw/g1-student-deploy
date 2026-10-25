@@ -1,7 +1,7 @@
 # Deployment findings for training and distillation (lab-g1, 2026-10-23 to 10-25)
 
 What the first real deployment of the Flow student taught us, written for the planner's training and distillation
-line. Each item is: what we saw (with numbers and where the data is), then what training could change. The deploy-side
+line (owner from 2026-10-25: the Flow driver session "Code workspace"). Each item is: what we saw (with numbers and where the data is), then what training could change. The deploy-side
 fixes already in place are listed so training can absorb them instead of the deployment carrying them forever.
 
 Deployed: `student-s2-kcsc_s0` (bundle deploy-2026-10-23), K 16, ODE 10, 2 chunks, sensor map / selection / guidance,
@@ -83,6 +83,10 @@ memory does.
 safe candidate. Deploy side: guards split components into rectangles of their own cells (`split_boxes`).
 **Training.** Train and evaluate with the same split guidance the robot uses (or make the guidance robust to a box
 containing the start), otherwise train and deploy see different guidance in every cluttered room.
+**Status (Flow, 2026-10-25).** Already solved in Flow's newer students: ST1 and later configs carry
+`sensor_boxes.split: "obb"` (near_m 3.5, float_min 0.4, split_pad 0, guide_near_m 2.0). The deployed student-s2-kcsc
+(10-08) predates it, which is why the deploy guard re-implements it; a bundle built from the newer perception block
+absorbs it.
 
 ### 1.7 Odometry
 **Seen.** Leg odometry under-counted real walks by 20–40 %: 1.5 m goal (leg 1.43 m, LIO 1.86 m), 2.0 m goal (leg
