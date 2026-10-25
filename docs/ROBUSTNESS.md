@@ -231,6 +231,40 @@ the band toward the gantry. At 3 cm there were two such cells, still not masked.
 acted yet; it acted only in the 3 cm lab twin, and the strap stays visible as intended. SONIC's own stand pose is
 the capture still missing, listed for H3 in DEPLOY_KIT.md.
 
+## The lab door test (2026-10-24) and two guard changes
+
+On the robot the door test (beam underside 1.17 m, opening 1.0 m, `--guards deploy`) had nothing safe from the
+first plan. The safety rope from the back hook to a spotter 0.6 m behind showed up as a column of cells from
+0.19 m behind the pelvis. The self mask rightly kept it: 17–20 cells, extending past the band. The guards held a
+calm stand three times, then took a calm stop. The robot then no longer read as standing, so the frozen
+max-clearance fallback streamed every 0.35 s for 6 s and backed the robot off 0.3 m, chasing clearance from a rope
+that follows it, until the operator's E-stop.
+
+Two changes in this branch:
+- **CalmLatch.** A no-safe streak that began from a standstill stays calm until a safe candidate appears. Every plan
+  is judged as from a standstill, and there are no walking drops. Together, the streak's calm stops move the pelvis
+  at most 0.25 m from where it began; after that the robot only settles to stand. The node reports `calm_hold` and
+  `calm_release`, and the status carries `calm_hold`.
+- **Walls mode now routes around overheads too.** The sensor route plans on support only. Under `--guards walls`
+  it led straight at a door beam that the planner, seeing a wall, would not pass, and the head hit the beam. The
+  route now reads the same walls (`WallsRouteMemory`).
+
+The authored door courses (`door`, `rope-behind`, `door-rope`; the rope is static here, while on the robot it
+follows the robot) plus the nine earlier courses, three seeds each:
+
+| course | kit, no guards | kit + deploy | kit + deploy, slow | kit + walls, slow |
+|---|---|---|---|---|
+| door | 2/3 (1 collision) | 3/3 (ducks, pelvis 0.52 m) | 3/3 | 3/3 (around the frame; 0/3 before the route fix) |
+| rope-behind | 3/3 | 0/3, stands | 0/3, stands | 0/3, stands |
+| door-rope | 3/3 | 0/3, stands | 0/3, stands | 0/3 (2 stand; in 1 the robot drifted 0.11 m back into the static rope during 7 s of standing) |
+| the nine earlier courses | 20/27 (9 falls) | 25/27 | 26/27 | 26/27 |
+
+Without guards, the static simulated rope is escaped by lunging forward. On the robot the rope followed, and the
+same choice backed the robot off into an E-stop. With the guards, an object hugging the robot means the robot
+stands and reports `calm_hold`: safe, but no progress. The real fix is clearing what is behind the robot, or
+blinding the rear sector (`--rear-blind-deg`, on deploy-kit's integration branch) for robots with a spotter
+behind. Adding the latch changed no outcome on the nine earlier courses.
+
 ## Recommended use on the ladder
 
 | rung | node flags | course limits |

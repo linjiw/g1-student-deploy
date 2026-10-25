@@ -174,3 +174,34 @@ def test_a_walk_that_cannot_start_says_why(node):
     cl.stop = True
     ev, _ = _run(node, st, cl, lambda e: "prescan_blocked" in e, timeout=10.0)
     assert "prescan_blocked" in ev and "run" not in ev
+
+
+def test_a_calm_streak_keeps_the_robot_standing_for_the_guards(node):
+    """After a calm plan with nothing safe, the next request is judged as from a standstill (no walking drops), with
+    the streak's remaining travel, even if the robot moved; a safe plan releases it."""
+    from g1deploy.guards import CalmLatch, stand_plan
+
+    q = FakeState()._q()
+    moved = q.copy()
+    moved[0] += 0.4  # well past the standing speed over the 6-frame window
+    node.history = [q.astype(np.float32)] * 3 + [moved.astype(np.float32)] * 3
+    node.active = (dict(stand_plan(q, 32), rule="calm_stop", no_safe_candidate=True), 0, q, np.zeros(29))
+    node.calm_latch = CalmLatch(node.guards)
+    node.calm_latch.update({"rule": "calm_stand", "guard": {"no_safe": True}}, (0.0, 0.0))
+    if not hasattr(node, "memory"):
+        node.make_memory(q[:2])
+    node.route_now = lambda xy, t: None
+    sent = []
+    real_submit = node.pool.submit
+    node.pool.submit = lambda worker, job: sent.append(job)
+    try:
+        node.stream_end, node.consecutive_drops = 400, 0
+        node.request(100, None)
+        assert sent[-1]["standing"] is True and sent[-1]["allow_drop"] is False
+        assert sent[-1]["calm_move_max_m"] == 0.0  # 0.4 m from where the streak began: settle only
+    finally:
+        node.pool.submit = real_submit
+        node.jobs.clear()
+        node.measured_jobs.clear()
+        node.anchor_checks.clear()
+        node.calm_latch = CalmLatch(node.guards)

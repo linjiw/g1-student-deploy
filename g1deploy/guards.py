@@ -23,8 +23,10 @@ real robot's memory reaches the planner, not to the student itself:
   calm fallback  with no safe candidate, the frozen rule streams the highest-clearance candidate of any
                  pool: a 0.8-1.2 m motion from a standstill, then a crouch. From a standstill here it is the
                  best stop-pool candidate that stays near, inside the envelope and at least as clear as
-                 standing still (never predicted contact), else a settle-to-stand from the anchor. While
-                 walking, the frozen choice stays if it is inside the envelope.
+                 standing still (never predicted contact), else a settle-to-stand from the anchor. A streak
+                 that began from a standstill stays calm until a safe candidate appears (CalmLatch), its calm
+                 stops within `calm_turn_max_m` in all. While walking, the frozen choice stays if it is inside
+                 the envelope.
   anchor check   the next plan is anchored on the measured state, not a prediction, after a calm plan or
                  when a predicted anchor missed the measured pose by more than `anchor_check_m`.
   overhead walls (H5-H6 only, `--guards walls`) every remembered overhead cell lower than standing head
@@ -200,6 +202,32 @@ def overhead_walls(view, cfg):
     sup[low] = cfg.wall_top_m
     ceil[low] = np.nan
     return MemoryView(sup, ceil, view.lo, view.res, view.n, view.near_only), int(low.sum())
+
+
+class WallsRouteMemory:
+    """What the sensor route reads under `--guards walls`: the memory with every low overhead as a wall.
+
+    SensorRoute plans on `support` only (overheads stay off its grid, the student ducks under them). With overheads
+    turned into walls for the planner but not for the route, the route led straight at a door beam the planner then
+    refused to pass, and the robot's head hit the beam (authored door course, 3/3 contacts). Reads are live: the
+    route's own refresh sees the memory as it is now."""
+
+    def __init__(self, memory, cfg):
+        self._memory, self._cfg = memory, cfg
+
+    def __getattr__(self, name):
+        return getattr(self._memory, name)
+
+    @property
+    def support(self):
+        m, cfg = self._memory, self._cfg
+        low = np.isfinite(m.ceiling) & (m.ceiling < cfg.ceiling_below_m)
+        return np.where(low, cfg.wall_top_m, m.support) if low.any() else m.support
+
+
+def route_memory(memory, cfg):
+    """The memory the sensor route should read under these guards."""
+    return WallsRouteMemory(memory, cfg) if cfg.overhead_walls else memory
 
 
 # ------------------------------------------------------------------------------------------ guidance boxes
@@ -414,7 +442,45 @@ def stand_clearance(planner, plan, clearance_fn):
     return float(clearance_fn(q[None], planner.cfg.datum_offset_m)[0])
 
 
-def guard_selection(planner, out, qpos_hist, view, cfg, *, standing, clearance_fn=None, allow_drop=True):
+class CalmLatch:
+    """A no-safe streak that began from a standstill stays calm until a safe candidate appears.
+
+    Lab door test, 2026-10-24: a safety rope from the back hook to a spotter left nothing safe. After three calm stands
+    and one calm stop the robot no longer read as standing, so the frozen max-clearance fallback streamed every 0.35 s
+    for 6 s and backed the robot off 0.3 m, chasing clearance from a rope that follows it, until the E-stop. While
+    latched, every plan is judged as from a standstill (calm path, no walking drops), and the calm stops of one streak
+    together may move the pelvis at most `calm_turn_max_m` from where it began; then only settle-to-stand."""
+
+    def __init__(self, cfg):
+        self.cfg, self.origin, self.plans = cfg, None, 0
+
+    @property
+    def active(self):
+        return self.origin is not None
+
+    def budget(self, xy):
+        """Pelvis travel left for calm stops (m), None when not latched."""
+        if self.origin is None:
+            return None
+        return max(0.0, self.cfg.calm_turn_max_m - float(np.linalg.norm(np.asarray(xy, dtype=float)[:2] - self.origin)))
+
+    def update(self, plan, xy):
+        """After a plan is streamed. Returns "hold" when a streak starts, "release" when it ends, else None."""
+        no_safe = bool((plan.get("guard") or {}).get("no_safe") or plan.get("no_safe_candidate"))
+        if no_safe:
+            if self.origin is None and plan.get("rule") in CALM_RULES:
+                self.origin, self.plans = np.asarray(xy, dtype=float)[:2].copy(), 1
+                return "hold"
+            self.plans += self.origin is not None
+            return None
+        if self.origin is not None:
+            self.origin = None
+            return "release"
+        return None
+
+
+def guard_selection(planner, out, qpos_hist, view, cfg, *, standing, clearance_fn=None, allow_drop=True,
+                    calm_move_max_m=None):
     """Envelope + calm fallback over the planner's own pools (see module docstring). Returns the plan.
 
     The envelope is checked on materialized plans (leg grounding changes the knees): the frozen choice first, then
@@ -465,8 +531,9 @@ def guard_selection(planner, out, qpos_hist, view, cfg, *, standing, clearance_f
     floor = max(0.0, stand_cl) if stand_cl is not None else 0.0
     move = np.linalg.norm(m["xy"][:, -1] - anchor[:2], axis=1)
     stop = (kinds == "stop") & raw_ok & (clearance >= floor)
-    if standing:
-        stop &= move <= cfg.calm_turn_max_m
+    if standing:  # inside a calm streak, what the streak's earlier calm stops have not used yet
+        limit = cfg.calm_turn_max_m if calm_move_max_m is None else min(cfg.calm_turn_max_m, calm_move_max_m)
+        stop &= move <= limit
     for i in sorted(np.flatnonzero(stop), key=lambda i: (-clearance[i], move[i]))[:cfg.envelope_tries]:
         cand = materialize(planner, pools, int(i))
         if not env_on or inside(plan_metrics(cand), cfg):
@@ -508,7 +575,7 @@ def speed_xy(hist):
 
 
 def plan_guarded(planner, hist, boxes, goal_fn, view, cfg, *, measured_q=None, standing=False, prev=None,
-                 guide_grow_overhead_m=0.0, allow_drop=True):
+                 guide_grow_overhead_m=0.0, allow_drop=True, calm_move_max_m=None):
     """One plan through the guards: view -> (self mask, overhead walls) -> map / guidance / selector -> frozen
     planner -> envelope + calm. `view`: a MemoryView (memory_view(memory))."""
     from g1deploy import bundle
@@ -541,7 +608,8 @@ def plan_guarded(planner, hist, boxes, goal_fn, view, cfg, *, measured_q=None, s
     out = planner.plan(np.asarray(hist), boxes, goal_fn, map_fn, sel, prev=prev, guide_boxes=guide)
     t2 = time.perf_counter()
     if cfg.envelope or cfg.calm:
-        out = guard_selection(planner, out, hist, view, cfg, standing=standing, clearance_fn=sel, allow_drop=allow_drop)
+        out = guard_selection(planner, out, hist, view, cfg, standing=standing, clearance_fn=sel, allow_drop=allow_drop,
+                              calm_move_max_m=calm_move_max_m)
     info["ms"] = {"view": round(1e3 * (t1 - t0), 1), "plan": round(1e3 * (t2 - t1), 1),
                   "select": round(1e3 * (time.perf_counter() - t2), 1)}
     out.setdefault("guard", {}).update(info)

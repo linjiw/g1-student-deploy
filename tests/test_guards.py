@@ -403,3 +403,39 @@ def test_presets_round_trip():
     assert not G.preset("off").any() and G.preset("deploy").calm and G.preset("walls").overhead_walls
     assert G.preset({"preset": "deploy", "max_knee_rad": 1.5}).max_knee_rad == 1.5
     json.dumps(G.DEPLOY.describe())
+
+
+def test_calm_latch_holds_a_no_safe_streak_until_something_is_safe():
+    latch = G.CalmLatch(G.DEPLOY)
+    assert not latch.active and latch.budget((0, 0)) is None
+    walking_fallback = {"rule": "stop_max_clearance", "no_safe_candidate": True}
+    assert latch.update(walking_fallback, (0, 0)) is None and not latch.active  # a walking fallback does not latch
+    calm = {"rule": "calm_stand", "guard": {"no_safe": True}}
+    assert latch.update(calm, (0, 0)) == "hold" and latch.active
+    assert latch.budget((0.1, 0.0)) == pytest.approx(G.DEPLOY.calm_turn_max_m - 0.1)
+    assert latch.budget((0.4, 0.0)) == 0.0
+    assert latch.update(walking_fallback, (0.1, 0)) is None and latch.active  # still nothing safe: still calm
+    assert latch.update({"rule": "safe_min_goal_distance", "no_safe_candidate": False}, (0.1, 0)) == "release"
+    assert not latch.active
+
+
+def test_calm_stops_share_one_travel_budget():
+    p = shell_planner()
+    out = no_safe(p, [(1.2, 0.8, 0.04)], [(0.15, 0.0, 0.0)])
+    got = G.guard_selection(p, out, [standing_q()], empty_view(), G.DEPLOY, standing=True, calm_move_max_m=0.2)
+    assert got["rule"] == "calm_stop"
+    got = G.guard_selection(p, out, [standing_q()], empty_view(), G.DEPLOY, standing=True, calm_move_max_m=0.1)
+    assert got["rule"] == "calm_stand"  # the streak already used its travel: settle, do not back off further
+
+
+def test_walls_route_sees_low_overheads_as_walls():
+    v = empty_view()
+    v.support[:] = 0.0
+    v.ceiling[cell(v, (1.5, 0.0))] = 1.17  # a door beam
+    v.ceiling[cell(v, (1.5, 1.0))] = 2.0  # a high ceiling
+    assert G.route_memory(v, G.DEPLOY) is v  # deploy: the route ducks under overheads, as frozen
+    r = G.route_memory(v, G.PRESETS["walls"])
+    assert r.support[cell(v, (1.5, 0.0))] == 1.5 and r.support[cell(v, (1.5, 1.0))] == 0.0
+    assert r.res == v.res and r.n == v.n
+    v.ceiling[cell(v, (0.5, 0.0))] = 0.95  # read live: a table seen later
+    assert r.support[cell(v, (0.5, 0.0))] == 1.5

@@ -302,7 +302,8 @@ def _worker(conn, pdict, episode, seed, impl="fused", precision="fp32", guards=N
             if gcfg.any():
                 plan = G.plan_guarded(planner, hist, [], goal_fn, view, gcfg, measured_q=job.get("measured"),
                                       standing=bool(job.get("standing")), guide_grow_overhead_m=pc.guide_grow_overhead_m,
-                                      allow_drop=bool(job.get("allow_drop", True)))
+                                      allow_drop=bool(job.get("allow_drop", True)),
+                                      calm_move_max_m=job.get("calm_move_max_m"))
             else:
                 plan = planner.plan(np.asarray(hist), [], goal_fn, map_fn, sel, prev=None, guide_boxes=guide)
             out = {k: plan[k] for k in ("qpos", "rotation", "joint_velocity", "rule", "chosen_clearance_m")}
@@ -438,6 +439,7 @@ class StudentNode:
         self.measured_jobs, self.last_streamed_req = {}, -10**9  # measured job id -> requested while standing
         self.self_mask_plans, self.self_mask_max = 0, 0
         self.consecutive_drops = 0
+        self.calm_latch = G.CalmLatch(self.guards)
         self.goal_seq = None
         self.pool = PlannerPool(args.inflight, self.pdict, self.episode, args.seed, args.planner_impl,
                                 args.planner_precision, self.guards.describe() if self.guards.any() else None)
@@ -495,7 +497,8 @@ class StudentNode:
                 if not hasattr(self, "route"):
                     if self.args.route == "sensor":
                         with self.mem_lock:
-                            r = self.flow.route.SensorRoute(xy, self.goal, self.memory, **self.route_cfg)
+                            r = self.flow.route.SensorRoute(xy, self.goal, G.route_memory(self.memory, self.guards),
+                                                            **self.route_cfg)
                             r.refresh(xy, t, force=True)
                     else:
                         boxes = json.loads(Path(self.args.boxes).read_text()) if self.args.boxes else []
@@ -521,12 +524,14 @@ class StudentNode:
                 or self.active[0].get("no_safe_candidate")):
             lead, measured = 0, True  # never extrapolate a fallback or a plan the robot did not follow
         hist = self.history if lead == 0 else predicted_history(self.history, self.active, now_tick, lead, len(self.history))
-        standing, allow_drop = first, not first
+        standing, allow_drop, calm_budget = first, not first, None
         if self.guards.any():
-            standing = first or G.is_standing(self.history, self.guards)
+            latch = self.calm_latch
+            standing = first or latch.active or G.is_standing(self.history, self.guards)
+            calm_budget = latch.budget(self.history[-1][:2])
             # a walking drop keeps the current plan playing: only while it has stream left to cover the next plan
             ahead = self.stream_end - now_tick if self.stream_end >= 0 else 0
-            allow_drop = (not first and self.consecutive_drops < self.guards.max_drops
+            allow_drop = (not first and not latch.active and self.consecutive_drops < self.guards.max_drops
                           and ahead > lead + int(math.ceil(self.latency_est / DT)) + LOOKAHEAD_FRAMES)
         route = self.route_now(np.asarray(self.history[-1][:2], dtype=float), now_tick * DT)
         with self.mem_lock:
@@ -537,7 +542,7 @@ class StudentNode:
                                   "arrival_anchor": np.asarray(self.history[-1]).copy(),
                                   "navigation_generation": self.navigation_generation,
                                   "measured": np.asarray(self.history[-1], dtype=np.float64).copy(),
-                                  "standing": standing, "allow_drop": allow_drop})
+                                  "standing": standing, "allow_drop": allow_drop, "calm_move_max_m": calm_budget})
         self.jobs[jid] = (now_tick + lead, np.asarray(hist[-1], dtype=np.float64),
                           self.flow.feed.finite_difference_dq(hist), now_tick, first)
         if lead and self.guards.anchor_check_m is not None:
@@ -606,6 +611,12 @@ class StudentNode:
                 emit("plan_dropped", reason=reason or "stale", anchor_tick=anchor_tick)
                 continue
             self.consecutive_drops = 0
+            if self.guards.any():
+                latched = self.calm_latch.update(plan, self.history[-1][:2])
+                if latched == "hold":
+                    emit("calm_hold", tick=now_tick, rule=plan["rule"])  # nothing safe: calm until something is
+                elif latched == "release":
+                    emit("calm_release", tick=now_tick, plans=self.calm_latch.plans)
             peak = float(np.abs(plan["joint_velocity"]).max())
             if peak > self.args.max_joint_vel:
                 plan = dict(plan, joint_velocity=np.clip(plan["joint_velocity"], -self.args.max_joint_vel,
@@ -678,6 +689,7 @@ class StudentNode:
                     self.phase, prescan_until = "PRESCAN", self.tick + int(self.args.prescan_s / DT)
                     self.pending_stand, self.jobs = None, {}
                     self.last_streamed_anchor = self.tick
+                    self.calm_latch = G.CalmLatch(self.guards)
                     if self.streamer is not None:
                         self.streamer.last_end = None  # after a takeover the runner starts a new stream window
                     emit("prescan")
@@ -727,6 +739,7 @@ class StudentNode:
         self.measured_until, self.anchor_checks = -1, []
         self.measured_jobs, self.last_streamed_req = {}, -10**9
         self.consecutive_drops = 0
+        self.calm_latch = G.CalmLatch(self.guards)
         self.prescan_blocked_next = -1
         if self.streamer is not None:
             self.streamer.last_end = None  # the runner resets playback on the new run's first chunk anyway
@@ -789,6 +802,7 @@ class StudentNode:
                                yaw_rad=float(math.atan2(2 * (w_ * z_ + x_ * y_), 1 - 2 * (y_ * y_ + z_ * z_))),
                                guards=self.args.guards, guard_counts=dict(self.guard_counts), last_guard=self.last_guard,
                                self_mask_plans=self.self_mask_plans, self_mask_max_cells=self.self_mask_max,
+                               calm_hold=getattr(self, "calm_latch", None) is not None and self.calm_latch.active,
                                goal_dist_m=float(np.linalg.norm(q[:2] - self.goal)), pelvis_z_m=float(q[2]),
                                tilt_rad=float(tilt), xy=q[:2].tolist(), plans=len(self.log),
                                latency_s=self.log[-1]["latency_s"] if self.log else None, latency_est_s=self.latency_est,
