@@ -33,6 +33,7 @@ import argparse
 import hashlib
 import json
 import os
+import queue
 import select
 import signal
 import socket
@@ -135,8 +136,9 @@ def cyclone_xml(iface, path):
 class Proc:
     """A child process in its own session, stdout stamped with time.monotonic() into a log file."""
 
-    def __init__(self, name, cmd, log, env, stdin=False):
-        self.name, self.log_path = name, Path(log)
+    def __init__(self, name, cmd, log, env, stdin=False, on_line=None):
+        self.name, self.log_path, self.on_line = name, Path(log), on_line
+        self.key_lock = threading.Lock()
         self.f = open(self.log_path, "w", buffering=1)
         self.p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, cwd=str(ROOT),
                                   stdin=subprocess.PIPE if stdin else subprocess.DEVNULL, start_new_session=True)
@@ -149,13 +151,19 @@ class Proc:
             t = time.monotonic()
             self.f.write(f"{t:.3f} {line}\n")
             self.lines.append((t, line))
+            if self.on_line is not None:
+                try:
+                    self.on_line(line)
+                except Exception as exc:  # a bad line must not stop the pump (it also feeds the log)
+                    self.f.write(f"{t:.3f} [console] on_line error: {exc!r}\n")
             if len(self.lines) > 4000:
                 del self.lines[:2000]
 
     def key(self, s):
-        if self.p.poll() is None:
-            self.p.stdin.write(s.encode())
-            self.p.stdin.flush()
+        with self.key_lock:
+            if self.p.poll() is None:
+                self.p.stdin.write(s.encode())
+                self.p.stdin.flush()
 
     def alive(self):
         return self.p.poll() is None
@@ -187,6 +195,9 @@ class Session:
         self.frames = open(self.dir / "console_frames.jsonl", "w", buffering=1)
         self.req = None
         self.t0 = time.monotonic()
+        self.inbox = queue.Queue()  # panel buttons and remote takeover -> the main loop (E-stop never waits here)
+        self.remote = {"connected": False, "samples": 0, "last": None}
+        self.panel_url = None
 
     # -- processes ----------------------------------------------------------------------------------
     def start(self):
@@ -217,7 +228,11 @@ class Session:
                 self.event("sim: LIO stand-in on :5561 (odom + registered cloud)")
         elif a.lidar == "livox":
             self.start_livox(iface)
-        if not sim and a.odom == "zmq" and subprocess.run(["pgrep", "-f", "adapters/dds_lio_bridge.py"],
+        if not sim:  # the remote's Select / D-up in every runner input mode (g1deploy/remote_watch.py)
+            self.procs["remote"] = Proc("remote", [py, "-u", "g1deploy/remote_watch.py", "--iface", iface],
+                                        self.dir / "remote_watch.log", self.env, on_line=self.on_remote)
+            self.event("remote watcher: Select = E-STOP and D-up = takeover, also while the student streams")
+        if not sim and a.odom == "zmq" and subprocess.run(["pgrep", "-f", "^[^ ]*python[^ ]* -u [^ ]*adapters/dds_lio_bridge.py"],
                                                           capture_output=True).returncode:
             self.event("odom zmq: NO LIO bridge on :5561, the node will wait for odometry (`g1 lio start`, standing)")
         meta = session_meta(a, iface)
@@ -225,6 +240,17 @@ class Session:
                     replay=a.replay, odom=a.odom, lidar=None if sim else a.lidar, body=a.body, guards=a.guards,
                     goal_lookahead=a.goal_lookahead)
         (self.dir / "session.json").write_text(json.dumps(meta, indent=1) + "\n")
+        self.launch = (iface, onnx, motions, planner, py, sim)
+        if getattr(a, "arm", False):  # the runner waits for the panel's Arm: recorder, lidar, remote, panel run first
+            self.event("ARM to start the runner: it releases Unitree's controller and ramps to the stand pose")
+            return
+        self.start_runner()
+
+    def start_runner(self):
+        a = self.args
+        iface, onnx, motions, planner, py, sim = self.launch
+        if "runner" in self.procs:
+            return
         runner_cmd = [str(RUNNER), iface, str(onnx), f"{motions}/", "--obs-config", str(OBS_CONFIG),
                       "--input-type", "gamepad_manager", "--planner-file", str(planner),
                       "--zmq-host", "localhost", "--zmq-port", "5556", "--zmq-topic", "pose"]
@@ -368,6 +394,9 @@ class Session:
 
     # -- operator actions ---------------------------------------------------------------------------------
     def act(self, key):
+        if "runner" not in self.procs:
+            self.event(f"[{key}] ignored: the runner is not started (ARM first)")
+            return
         r, st = self.procs["runner"], self.runner_state
         if key == "s":
             if self.args.mode == "sim" and self.args.remote_start:
@@ -410,16 +439,64 @@ class Session:
                 self.node_cmd(cmd="stand")
             self.event("operator: TAKEOVER -> SONIC planner")
         elif key == "o":
-            r.key("o")
+            self.estop("operator key")
             if not self.args.replay:
                 self.node_cmd(cmd="quit")
-            self.event("operator: E-STOP (damping)")
         elif key == "r" and self.args.mode == "sim":
             (self.dir / "release.flag").touch()
             self.event("sim: gantry released")
         elif key == "?":
             for line in HELP.splitlines():
                 self.event(line.strip())
+
+    def estop(self, source):
+        """Runner damping now: its global `o` works in every input interface (keyboard, gamepad, ZMQ stream).
+        Safe from any thread; the node is told to quit by the main loop."""
+        r = self.procs.get("runner")
+        if r is None or not r.alive():
+            self.event(f"E-STOP ({source}): no runner running, nothing holds the motors")
+            return
+        r.key("o")
+        first = not self.runner_state["estop"]
+        self.runner_state["estop"] = True
+        self.event(f"E-STOP ({source}): runner damping")
+        if first and source != "operator key":
+            self.inbox.put(("node_quit", None, source))
+
+    def on_remote(self, line):
+        """remote_watch.py output (pump thread): Select stops at once; D-up queues a takeover while streaming."""
+        try:
+            m = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if m.get("remote") == "status":
+            if bool(m.get("connected")) != self.remote["connected"]:
+                self.event("remote: " + ("connected" if m.get("connected") else "NOT SEEN (no remote bytes in lowstate)"))
+            self.remote.update(connected=bool(m.get("connected")), samples=m.get("samples", 0))
+        elif m.get("remote") == "press":
+            b = m.get("button")
+            self.remote["last"] = b
+            if b == "Select":
+                self.estop("remote Select")
+            elif b == "Up" and self.runner_state["iface"] == "ZMQ":  # in gamepad mode the runner reads D-up itself
+                self.inbox.put(("key", "t", "remote D-up"))
+            elif b in ("Start", "F1", "Up"):
+                self.event(f"remote: {b}")
+
+    def panel_state(self):
+        st, ns = self.runner_state, self.node_status
+        runner = ("not started" if "runner" not in self.procs else "E-STOP" if st["estop"] else "CONTROL"
+                  if st["control"] else "INIT done" if st["init"] else "booting")
+        src = "Unitree controller" if "runner" not in self.procs else "student stream" if (
+            st["iface"] == "ZMQ" and st["stream"]) else (
+            "SONIC planner" if st["iface"] == "GAMEPAD" and st["control"] else "SONIC reference")
+        return {"t": time.monotonic() - self.t0, "mode": "ROBOT " + str(self.args.iface) if self.args.mode == "robot"
+                else "SIMULATION", "runner": runner, "driving": src, "phase": ns.get("phase"),
+                "goal_dist_m": ns.get("goal_dist_m"), "latency_s": ns.get("latency_s"),
+                "pelvis_z_m": ns.get("pelvis_z_m"), "tilt_rad": ns.get("tilt_rad"), "cloud_age_s": ns.get("cloud_age_s"),
+                "record": self.record_line().strip(), "events": [f"{t:6.1f}  {e}" for t, e in self.events[-12:]][::-1],
+                "dir": str(self.dir), "remote": dict(self.remote),
+                "procs": {k: p.alive() for k, p in self.procs.items()}}
 
     def new_goal(self, ahead, left):
         if self.args.replay:
@@ -436,7 +513,8 @@ class Session:
 
         def hz(k):
             v = s.get(k, {})
-            return "-" if not v.get("count") else f"{v.get('rate_hz') or 0:.0f}" if (v.get("age_s") or 9) < 1.0 else "STALE"
+            age = v.get("age_s")
+            return "-" if not v.get("count") else f"{v.get('rate_hz') or 0:.0f}" if age is not None and age < 1.0 else "STALE"
         mb = sum((v.get("bytes") or 0) for v in s.values() if isinstance(v, dict)) / 1e6
         err = " ERR" if self.rec_stats.get("errors") else ""
         return (f" record : lowstate {hz('lowstate')} Hz  lowcmd {hz('lowcmd')}  lidar {hz('lidar')}  "
@@ -476,7 +554,7 @@ class Session:
         if "node" in self.procs and not self.args.replay:
             self.node_cmd(cmd="quit")
             time.sleep(0.5)
-        for name in ("node", "runner", "sim", "lio", "lidar", "livox", "rec"):  # the recorder last: it sees the end
+        for name in ("node", "runner", "sim", "lio", "lidar", "livox", "remote", "rec"):  # the recorder last: it sees the end
             if name in self.procs:
                 self.procs[name].stop(signal.SIGTERM if name in ("sim", "lio") else signal.SIGINT)
         self.frames.close()
@@ -494,6 +572,13 @@ def run_console(args):
         if interactive and input("Type 'yes' to start the runner on the robot: ").strip() != "yes":
             return 1
     sess.start()
+    if args.panel:
+        from g1deploy.panel import start_panel
+
+        _, token = start_panel(sess, args.panel)
+        sess.panel_url = f"http://127.0.0.1:{args.panel}/?t={token}"
+        (sess.dir / "panel_url.txt").write_text(sess.panel_url + "\n")
+        sess.event(f"panel: port {args.panel} (tailnet / this PC only), token in panel_url.txt")
     steps = [s.strip() for s in args.script.split(",") if s.strip()] if args.script else []
     old = termios.tcgetattr(sys.stdin) if interactive else None
     if interactive:
@@ -510,8 +595,31 @@ def run_console(args):
                     sys.stdout.write("\033[H\033[2J" + text + "\n")
                     sys.stdout.flush()
                 last_draw = now
-            if not sess.procs["runner"].alive() and not steps:
+            if ("runner" in sess.procs and not sess.procs["runner"].alive() and not steps
+                    and not getattr(sess, "_runner_gone", False)):
                 sess.event("runner exited")
+                sess._runner_gone = True
+            panel_quit = False
+            while True:
+                try:
+                    kind, val, src = sess.inbox.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == "key":
+                    sess.event(f"{src}: [{val}]")
+                    sess.act(val)
+                elif kind == "goal":
+                    sess.new_goal(*val)
+                elif kind == "node_quit" and not args.replay and "node" in sess.procs:
+                    sess.node_cmd(cmd="quit")
+                elif kind == "quit":
+                    sess.event(f"{src}: end session")
+                    panel_quit = True
+                elif kind == "arm":
+                    sess.event(f"{src}: ARM, starting the runner")
+                    sess.start_runner()
+            if panel_quit:
+                break
             if steps:
                 kind, _, val = steps[0].partition(":")
                 done = False
@@ -639,6 +747,11 @@ def main(argv=None):
         p.add_argument("--no-record-lidar", dest="record_lidar", action="store_false",
                        help="record everything but the raw lidar frames (~1.5 MB/s)")
         p.add_argument("--no-report", dest="report", action="store_false")
+        p.add_argument("--arm", action="store_true", help="start the runner only when the panel's Arm is pressed "
+                                                            "(recorder, lidar, remote watcher and panel come up first)")
+        p.add_argument("--panel", type=int, default=8770 if mode == "robot" else 0, metavar="PORT",
+                       help="operator web panel on 127.0.0.1:PORT (E-STOP, start, GO, stand, takeover, goal; "
+                            "robot default 8770, 0 = off): g1deploy/panel.py")
         p.add_argument("--debug-plans", action="store_true", help="node writes every plan's exact inputs and result "
                                                                    "to <session>/plans (tools/debug_plan.py)")
         p.add_argument("--guards", choices=("off", "deploy", "walls"), default="off",

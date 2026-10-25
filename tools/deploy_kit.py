@@ -45,6 +45,9 @@ LIO_CONFIG = ROOT / "config/lio/fastlio_mid360_g1.yaml"
 LIO_REPLAY_DOMAIN = 77  # replays: loopback only, a domain no robot participant uses
 FASTLIO = Path(LIVOX_WS).parent / "fast_lio/lib/fast_lio/fastlio_mapping"
 ADAPTER_PGREP = "^/usr/bin/python3 .*livox_to_utlidar"
+# anchored at the executable: an unanchored `pgrep -f` also matches the shell that runs it
+FASTLIO_PGREP = "^[^ ]*fastlio_mapping"
+BRIDGE_PGREP = "^[^ ]*python[^ ]* -u [^ ]*adapters/dds_lio_bridge.py"
 
 
 def profile(args):
@@ -450,7 +453,7 @@ def cmd_lio(args):
         print(f"the robot must stand still: scoring FAST-LIO's /Odometry on {iface} for {args.seconds:.0f} s ...", flush=True)
         return subprocess.run(["bash", "-c", ros + f"exec /usr/bin/python3 -u {ROOT}/tools/lio_replay.py --probe-only "
                                f"--seconds {args.seconds} --out {out}"], env=env).returncode
-    if any(alive(p) for p in pids.values()) or sh("pgrep -f fastlio_mapping") or sh("pgrep -f adapters/dds_lio_bridge.py"):
+    if any(alive(p) for p in pids.values()) or sh(f"pgrep -f '{FASTLIO_PGREP}'") or sh(f"pgrep -f '{BRIDGE_PGREP}'"):
         raise SystemExit("FAST-LIO or the LIO bridge already runs: `g1 lio status`, `g1 lio stop`")
     adapter = sh(f"pgrep -af '{ADAPTER_PGREP}'")
     if not adapter:
