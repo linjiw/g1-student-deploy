@@ -678,6 +678,8 @@ class StudentNode:
                 plan = dict(plan, joint_velocity=np.clip(plan["joint_velocity"], -self.args.max_joint_vel,
                                                          self.args.max_joint_vel))
                 emit("dq_clipped", max_rad_s=peak, anchor_tick=anchor_tick)
+            if self.log:
+                self.log[-1]["switch"] = self.switch_offsets(plan, anchor_tick, now_tick, lat)
             self.active = (plan, anchor_tick, anchor_q, anchor_dq)
             self.last_streamed_anchor = max(anchor_tick, self.last_streamed_anchor)
             self.last_streamed_req = max(req_tick, self.last_streamed_req)
@@ -686,6 +688,49 @@ class StudentNode:
                 self.stream_end = self.streamer.send_plan(plan, anchor_tick, anchor_q, anchor_dq, start, self.limits)[1]
             if first:
                 emit("run", tick=now_tick, first_plan_s=lat)
+
+    def switch_offsets(self, plan, anchor_tick, now_tick, latency_s):
+        """What a plan switch asks of SONIC at this landing: the new plan's frame for now against the measured state
+        (pelvis xy / z / yaw, the largest arm joint step per side, wrist positions), the arm mode the rules plugin
+        set before and after, the plan's latency. Logged per streamed plan (node_plans.json `switch`)."""
+        q = np.asarray(plan["qpos"], dtype=np.float64)
+        frame = q[int(np.clip(now_tick - anchor_tick - 1, 0, len(q) - 1))]
+        meas = np.asarray(self.history[-1], dtype=np.float64)
+
+        def yaw(v):
+            w, x, y, z = v[3:7]
+            return math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+
+        arm = np.abs(frame[7:] - meas[7:])
+        out = {"latency_s": round(float(latency_s), 3), "frame": int(now_tick - anchor_tick - 1),
+               "pelvis_xy_m": round(float(np.linalg.norm(frame[:2] - meas[:2])), 3),
+               "pelvis_z_m": round(float(frame[2] - meas[2]), 3),
+               "yaw_rad": round(float(math.remainder(yaw(frame) - yaw(meas), 2 * math.pi)), 3),
+               "arm_max_rad": [round(float(arm[15:22].max()), 3), round(float(arm[22:29].max()), 3)]}
+        wr = self.wrist_positions(frame), self.wrist_positions(meas)
+        if wr[0] is not None and wr[1] is not None:
+            out["wrist_m"] = [round(float(np.linalg.norm(wr[0][k] - wr[1][k])), 3) for k in range(2)]
+        prev = self.active[0].get("rules_info") if self.active is not None else None
+        now = plan.get("rules_info")
+        if prev is not None or now is not None:
+            out["arm_mode"] = [(prev or {}).get("arm_posture"), (now or {}).get("arm_posture")]
+        return out
+
+    def wrist_positions(self, qpos36):
+        """World positions of both wrist_yaw_link bodies (MuJoCo FK of the self-filter model), or None."""
+        bf = getattr(getattr(self, "memory", None), "body_filter", None)
+        if bf is None:
+            return None
+        if getattr(self, "_fk", None) is None:
+            m = bf.model
+            ids = [bf.mujoco.mj_name2id(m, bf.mujoco.mjtObj.mjOBJ_BODY, f"{s}_wrist_yaw_link") for s in ("left", "right")]
+            self._fk = (bf.mujoco.MjData(m), ids)  # own data: the perception thread poses the filter's
+        d, ids = self._fk
+        d.qpos[:] = 0
+        d.qpos[:7] = qpos36[:7]
+        d.qpos[bf.adr] = qpos36[7:36]
+        bf.mujoco.mj_kinematics(bf.model, d)
+        return d.xpos[ids].copy()
 
     def ceiling_near(self, xy, radius_m=0.8, below_m=1.35):
         """Is a remembered overhead obstacle lower than standing head height within `radius_m`? (Standing up there
