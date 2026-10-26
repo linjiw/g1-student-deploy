@@ -52,9 +52,9 @@ def test_graph_follows_the_guide_margin():
         assert dist(f[m], e[same]) < 0.1 * dist(f[m], e[other]), m
 
 
-def test_large_pool_runs_in_candidate_batches():
-    """A pool whose candidates x guidance boxes exceed max_pairs (here 48 x 64 > 1024) runs as 16-candidate replays of
-    one graph, equal to an unsplit eager pass. (Real rooms: 48 x 300 boxes, bucket 512; unsplit that is > 13 GB.)"""
+def test_large_pool_runs_unsplit():
+    """A pool whose candidates x guidance boxes exceed max_pairs (here 48 x 64 > 1024) runs off the graphs in one pass,
+    like the evaluated sampler: no 16-candidate graph, the result equal to an eager pass."""
     from g1deploy.fastplan import fast_planner_class
 
     flow = bundle.load_flow()
@@ -78,5 +78,5 @@ def test_large_pool_runs_in_candidate_batches():
     for p in (fast, eager):
         p.generator.manual_seed(3)
         out.append(p._sample_guided(cond, anchor, xy, yaw, obs))
-    assert set(key[:2] for key in fast._graphs) == {(16, 64)}  # it ran split, on one graph
+    assert not fast._graphs  # off the graphs, not split into graph-sized batches
     assert out[0].shape == out[1].shape and float((out[0] - out[1]).abs().mean()) < 1e-3

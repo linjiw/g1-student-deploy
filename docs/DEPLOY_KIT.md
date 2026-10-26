@@ -325,10 +325,12 @@ git-ignored).
 **Fast planner, per-replan margins.** `guide_margin_m` is now an input of the captured CUDA graphs. A plugin may
 change it per replan; before this, a graph kept the margin it was captured with (`tests/test_fastplan_margin.py`).
 Graph buckets now go up to 512 guidance boxes: finer box decompositions of a real room give 40–320 boxes within
-2 m. A pool whose candidates × padded boxes exceed `MAX_PAIRS` runs as replays of a 16-candidate graph. Candidates
-are independent in the sampler, and the noise is drawn once for the whole pool. Unsplit, 48 candidates × 512 boxes
-need more than 13 GB on this 16 GB GPU, and a replay ran out of memory. Guidance cost is linear in the box count:
-about 0.5 s per 16-candidate pool at about 300 boxes on the 4070 Ti SUPER, against about 0.04 s at 16.
+2 m. A pool whose candidates × padded boxes exceed `MAX_PAIRS` runs off the graphs in one pass. Splitting it into
+graph-sized candidate batches was tried and reverted: it changes the denoiser's GEMM shapes, and the normalised
+guidance amplifies the last-bit differences up to 4e-3 in the raw state on 48 candidates. Unsplit, 48 candidates ×
+512 boxes need more than 13 GB of GPU memory. A bundle that needs that must bound its guidance memory another way, in
+its plugin's planner class. Guidance cost is linear in the box count: about 0.5 s per 16-candidate pool at about 300
+boxes on the 4070 Ti SUPER, against about 0.04 s at 16.
 
 **Offline replays** (`tools/replay_plans.py`). These re-plan a recorded session's states with the node's own job
 function (`node.plan_job`), for any bundle or plugin. Inputs are the `--debug-plans` dumps (exact history and goal)
