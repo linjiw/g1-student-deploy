@@ -642,13 +642,17 @@ class StudentNode:
                                  late_ticks=now_tick - anchor_tick, rule=plan["rule"], rejected=reason,
                                  no_safe=plan.get("no_safe_candidate"), guard=guard.get("action"),
                                  self_masked=guard.get("self_masked_cells"), self_mask_refused=guard.get("self_mask_refused"),
-                                 guide_boxes=guard.get("guide_boxes"), guard_ms=guard.get("ms")))
+                                 guide_boxes=guard.get("guide_boxes"), guard_ms=guard.get("ms"),
+                                 chosen_clearance_m=plan.get("chosen_clearance_m"),
+                                 rules_info=plan.get("rules_info")))  # a deploy rules plugin's per-plan report
             dump = getattr(getattr(self, "args", None), "debug_dump", None)
             if dump:
                 np.savez_compressed(Path(dump) / f"plan_{jid:04d}_out.npz", qpos=plan["qpos"],
                                     rule=plan["rule"], rejected=str(reason), latency_s=lat, landed_tick=now_tick,
                                     anchor_tick=anchor_tick, guard=json.dumps(guard, default=str),
-                                    no_safe=bool(plan.get("no_safe_candidate")), measured=measured is not None)
+                                    no_safe=bool(plan.get("no_safe_candidate")), measured=measured is not None,
+                                    chosen_clearance_m=float(plan.get("chosen_clearance_m") or np.nan),
+                                    rules_info=json.dumps(plan.get("rules_info"), default=float))
             if measured is not None:
                 # anchored on the measured state, earlier than the predicted anchor of the plan it replaces: ordered
                 # by request; a stand (anchor pushed 10**6 ahead) still blocks it
