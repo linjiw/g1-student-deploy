@@ -413,6 +413,8 @@ class ControlServer:
 class StudentNode:
     guards = G.GuardConfig()  # off unless --guards (instances built without __init__ in tests stay off too)
     rules, rules_state = None, None  # a bundle's deploy rules plugin (set in __init__) and its state across replans
+    last_landing_tick = 0
+    offsets = ()  # track_offset rows (a list from reset_run_state on)
 
     def __init__(self, args):
         self.args = args
@@ -680,6 +682,7 @@ class StudentNode:
                 emit("dq_clipped", max_rad_s=peak, anchor_tick=anchor_tick)
             if self.log:
                 self.log[-1]["switch"] = self.switch_offsets(plan, anchor_tick, now_tick, lat)
+            self.last_landing_tick = now_tick
             self.active = (plan, anchor_tick, anchor_q, anchor_dq)
             self.last_streamed_anchor = max(anchor_tick, self.last_streamed_anchor)
             self.last_streamed_req = max(req_tick, self.last_streamed_req)
@@ -702,7 +705,14 @@ class StudentNode:
             return math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
 
         arm = np.abs(frame[7:] - meas[7:])
-        out = {"latency_s": round(float(latency_s), 3), "frame": int(now_tick - anchor_tick - 1),
+        jump = None
+        if self.active is not None:  # the reference discontinuity: the old plan's frame for now vs the new one's
+            old, old_anchor = np.asarray(self.active[0]["qpos"], dtype=np.float64), self.active[1]
+            j = now_tick - old_anchor - 1
+            if 0 <= j < len(old):
+                d = np.abs(frame[7:] - old[j][7:])
+                jump = [round(float(d[15:22].max()), 3), round(float(d[22:29].max()), 3)]
+        out = {"latency_s": round(float(latency_s), 3), "frame": int(now_tick - anchor_tick - 1), "ref_jump_rad": jump,
                "pelvis_xy_m": round(float(np.linalg.norm(frame[:2] - meas[:2])), 3),
                "pelvis_z_m": round(float(frame[2] - meas[2]), 3),
                "yaw_rad": round(float(math.remainder(yaw(frame) - yaw(meas), 2 * math.pi)), 3),
@@ -715,6 +725,25 @@ class StudentNode:
         if prev is not None or now is not None:
             out["arm_mode"] = [(prev or {}).get("arm_posture"), (now or {}).get("arm_posture")]
         return out
+
+    def track_offset(self, now_tick):
+        """The landing metric between landings: the playing plan's frame for now vs the measured body (arm joints per
+        side, wrists), every 10 ticks of RUN (node_plans.json `offsets`). A persistent offset (anchoring on predicted
+        frames that SONIC lags) and a jolt at the switch read differently here."""
+        plan, anchor = self.active[0], self.active[1]
+        q = np.asarray(plan["qpos"], dtype=np.float64)
+        j = now_tick - anchor - 1
+        if not 0 <= j < len(q):
+            return
+        meas = np.asarray(self.history[-1], dtype=np.float64)
+        d = np.abs(q[j][7:] - meas[7:])
+        row = {"tick": int(now_tick), "since_landing": int(now_tick - self.last_landing_tick),
+               "arm_max_rad": [round(float(d[15:22].max()), 3), round(float(d[22:29].max()), 3)],
+               "pelvis_xy_m": round(float(np.linalg.norm(q[j][:2] - meas[:2])), 3)}
+        wr = self.wrist_positions(q[j]), self.wrist_positions(meas)
+        if wr[0] is not None and wr[1] is not None:
+            row["wrist_m"] = [round(float(np.linalg.norm(wr[0][k] - wr[1][k])), 3) for k in range(2)]
+        self.offsets.append(row)
 
     def wrist_positions(self, qpos36):
         """World positions of both wrist_yaw_link bodies (MuJoCo FK of the self-filter model), or None."""
@@ -852,6 +881,7 @@ class StudentNode:
         self.consecutive_drops = 0
         self.calm_latch = G.CalmLatch(self.guards)
         self.rules_state, self.next_due = None, getattr(self, "replan", 8)
+        self.offsets, self.last_landing_tick = [], 0
         self.prescan_blocked_next = -1
         if self.streamer is not None:
             self.streamer.last_end = None  # the runner resets playback on the new run's first chunk anyway
@@ -947,6 +977,8 @@ class StudentNode:
                     self.prescan_blocked_next = self.tick + int(5.0 / DT)
             elif self.phase == "RUN":
                 self.collect(self.tick)
+                if self.active is not None and self.tick % 10 == 5:
+                    self.track_offset(self.tick)
                 while self.anchor_checks and self.anchor_checks[0][0] <= self.tick:
                     _, predicted = self.anchor_checks.pop(0)  # the predicted anchor vs the pose it was meant for
                     miss = float(np.linalg.norm(predicted - q[:2]))
@@ -1095,7 +1127,8 @@ def main(argv=None):
         emit("node_exit", result=result, plans=len(node.log), overruns=node.overruns, skipped=node.skipped,
              ticks=node.tick, max_lag_s=round(node.max_lag_s, 4))
         if args.log:
-            Path(args.log).write_text(json.dumps(dict(result=result, plans=node.log, overruns=node.overruns,
+            Path(args.log).write_text(json.dumps(dict(result=result, plans=node.log, offsets=list(node.offsets),
+                                                      overruns=node.overruns,
                                                       skipped=node.skipped, ticks=node.tick, max_lag_s=node.max_lag_s),
                                                  indent=1, default=float) + "\n")
         if args.dump_memory and hasattr(node, "memory"):
