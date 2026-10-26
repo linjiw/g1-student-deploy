@@ -353,3 +353,16 @@ G1_STUDENT_BUNDLE=$PWD/bundle-x G1_DEPLOY_RULES=path/to/rules.py .venv/bin/pytho
     runs/robot-day-20261024/h5-1 --every 3 --out runs/replays/h5-1_x.json
 .venv/bin/python tools/compare_replays.py runs/replays/*.json
 ```
+
+**Door risk: torso pitch near the tilt E-stop (sim, 2026-10-26).**
+- In the deploy-kit door scenes (lab door twin, authored door, door + rope, all rear-blind settings), 24 kcsc door
+  passes arrived. Each run's peak real pelvis tilt was 0.49 rad median, 0.63 p90 and 0.73 at most: most of the 0.75 rad
+  node E-stop (`--tilt-estop`).
+- One run in 25 crossed it: lab door twin, goal 3.0 / −0.5. For 15 s at the door, the chosen plans stayed "safe" while
+  their own planned tilt climbed from 0.49 to 0.81 rad (knees up to 2.48 rad).
+- The guards' walk envelope (tilt ≤ 0.6) is waived within 2 m of a low ceiling, so the student may duck. It cannot
+  simply stay on: successful passes stream plans planned up to 0.8–0.99 rad.
+- The E-stop then damps the joints, and the robot falls.
+- **On the robot at a door:** expect forward-pitched ducks close to the limit. The gantry or rope must be ready to catch
+  a damped collapse there. Stop the pass, with the remote's Select or the panel, if the robot rocks back and forth
+  under the beam for more than a few seconds.
