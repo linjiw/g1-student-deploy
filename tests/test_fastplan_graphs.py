@@ -1,6 +1,8 @@
-"""The fast planner reads guide_margin_m at replay time (g1deploy/fastplan.py): a per-replan override of the margin
-must reach a captured CUDA graph, which would otherwise keep the value it was captured with."""
+"""Fast planner graphs (g1deploy/fastplan.py): guide_margin_m is read at replay time (a per-replan override must
+reach a captured CUDA graph, which would otherwise keep the value it was captured with), and pools with more
+candidates x guidance boxes than one graph holds run in candidate batches with the same result."""
 
+import numpy as np
 import pytest
 import torch
 
@@ -48,3 +50,33 @@ def test_graph_follows_the_guide_margin():
     for m, other in ((0.05, 0.02), (0.02, 0.05), ("again", 0.02)):
         same = 0.05 if m == "again" else m
         assert dist(f[m], e[same]) < 0.1 * dist(f[m], e[other]), m
+
+
+def test_large_pool_runs_in_candidate_batches():
+    """A pool whose candidates x guidance boxes exceed max_pairs (here 48 x 64 > 1024) runs as 16-candidate replays of
+    one graph, equal to an unsplit eager pass. (Real rooms: 48 x 300 boxes, bucket 512; unsplit that is > 13 GB.)"""
+    from g1deploy.fastplan import fast_planner_class
+
+    flow = bundle.load_flow()
+    cfg = bundle.student_config()
+    P = flow.planner
+    pc = dict(cfg["planner"], device="cuda", seed=7, candidates=16)
+    fast = fast_planner_class()(P.PlannerConfig(**pc), max_pairs=1024)
+    eager = fast_planner_class()(P.PlannerConfig(**pc), graphs=False, fuse=False, max_pairs=10**9)
+    k = 48
+    hist = torch.zeros(fast.history, 65)
+    hist[:, 0] = 0.79 + fast.cfg.datum_offset_m
+    hist[:, 3] = -1.0
+    xy, yaw = torch.zeros(k, 2, device="cuda"), torch.zeros(k, device="cuda")
+    goal = torch.tensor([[1.0, 0.0, 1.0, 0.0]], device="cuda").repeat(k, 1)
+    cond, anchor = fast._condition(hist.cuda()[None].repeat(k, 1, 1), xy, yaw, goal, torch.zeros(0, 9, device="cuda"))
+    rng = np.random.default_rng(0)
+    boxes = [box(float(x), float(y), 0.05, 0.05, 0.0, 0.6) for x, y in rng.uniform(-1.5, 1.5, (80, 2))
+             if np.hypot(x, y) > 0.4][:60]
+    obs = P.pack_world([P.box_obstacle(b, fast.cfg.datum_offset_m) for b in boxes], "cuda")
+    out = []
+    for p in (fast, eager):
+        p.generator.manual_seed(3)
+        out.append(p._sample_guided(cond, anchor, xy, yaw, obs))
+    assert set(key[:2] for key in fast._graphs) == {(16, 64)}  # it ran split, on one graph
+    assert out[0].shape == out[1].shape and float((out[0] - out[1]).abs().mean()) < 1e-3

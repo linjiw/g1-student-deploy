@@ -39,10 +39,12 @@ PAD_ROW = (1.0e4, 1.0e4, -1.0e4, 0.0, 0.1, 0.1, 0.1, 0.0, 0.0)  # far, finite, m
 # (lab-g1 2026-10-23: 29 boxes after 5 s standing). Above the largest bucket the planner used to leave the graphs and
 # hand torch.compile a new shape per box count: seconds per recompile, then the recompile limit (an 11 s plan in a
 # rehearsal of that room). Padded slots are masked (+inf distance), so the bucket never changes a plan.
-BUCKETS = (8, 16, 32, 64, 128, 256)  # 256: finer box decompositions of a real room (150-240 boxes within 2 m)
+# 256-512: finer box decompositions of a real room (150-320 boxes within 2 m); pools whose candidates x bucket exceed
+# MAX_PAIRS run in candidate batches (_sample_guided)
+BUCKETS = (8, 16, 32, 64, 128, 256, 512)
 PRECISIONS = ("fp32", "tf32", "bf16")  # denoiser forward only; fp32 = the evaluated arithmetic
 MAX_PAIRS = 12288  # candidates x padded obstacles per graph (48 x 256); one shared pool sized by the largest graph
-RECOMPILE_LIMIT = 64  # torch.compile'd pieces see one shape per (candidates, bucket): 2 x 7 here, default limit is 8
+RECOMPILE_LIMIT = 64  # torch.compile'd pieces see one shape per (candidates, bucket): ~16 here, default limit is 8
 
 
 # ---------------------------------------------------------------------------------------- numpy geometry
@@ -473,14 +475,28 @@ def _build_class():
             n = int(guide_obs.shape[0])
             guided = n > 0  # the eager sampler skips guidance without obstacles (incl. the tilt term)
             n_pad = next((s for s in self.buckets if s >= n), None) if guided else 0
-            if not self.use_graphs or n_pad is None or b * max(n_pad, 1) > self.max_pairs:
-                # off the graphs: still pad to a power of two so compiled pieces see few distinct shapes
-                packed, valid = self._pack(guide_obs, (1 << max(n - 1, 0).bit_length()) if guided else 0)
-                return self._loop(x, cond, anchor_raw, xy0, yaw0, packed, valid, guided, self._margin())
-            key = (b, n_pad, tuple(sorted((k_, tuple(v_.shape)) for k_, v_ in cond.items())))
-            gr = self._graphs.get(key)
+            graphs = self.use_graphs and n_pad is not None
+            if n_pad is None:  # beyond the largest bucket: off the graphs, padded to a power of two (few shapes)
+                n_pad = 1 << max(n - 1, 0).bit_length()
+            sub = b
+            if b * max(n_pad, 1) > self.max_pairs:
+                # candidates are independent in the sampler (per-sample guidance and normalisation), so a large pool
+                # runs in batches that fit: the noise is drawn above, once, for all of them
+                k = self.cfg.candidates
+                sub = k if k * n_pad <= self.max_pairs else max(1, self.max_pairs // n_pad)
             packed, valid = self._pack(guide_obs, n_pad)
             margin = self._margin()
+            outs = []
+            for i in range(0, b, sub):
+                sl = slice(i, i + sub)
+                args = (x[sl], {k_: v_[sl] for k_, v_ in cond.items()}, anchor_raw[sl], xy0[sl], yaw0[sl], packed, valid,
+                        guided, margin)
+                outs.append(self._replay(*args) if graphs else self._loop(*args))
+            return outs[0] if len(outs) == 1 else torch.cat(outs)
+
+        def _replay(self, x, cond, anchor_raw, xy0, yaw0, packed, valid, guided, margin):
+            key = (x.shape[0], packed.shape[0], tuple(sorted((k_, tuple(v_.shape)) for k_, v_ in cond.items())))
+            gr = self._graphs.get(key)
             if gr is None:
                 gr = self._graphs[key] = self._capture(x, cond, anchor_raw, xy0, yaw0, packed, valid, guided, margin)
             inp = gr.inputs
@@ -535,9 +551,7 @@ def _build_class():
                 goal = torch.tensor([[1.0, 0.0, 1.0, 0.0]], device=self.device).repeat(k, 1)
                 world = torch.zeros(0, 9, device=self.device)
                 cond, anchor_raw = self._condition(hist_k, xy, yaw, goal, world, None)
-                for n in (0,) + tuple(buckets):  # 0: no obstacles seen yet (unguided graph)
-                    if k * n > self.max_pairs:
-                        continue
+                for n in (0,) + tuple(buckets):  # 0: no obstacles seen yet (unguided graph); large pools run split
                     obs = torch.tensor([PAD_ROW], device=self.device).repeat(n, 1)
                     gen = self.generator.get_state()
                     self._sample_guided(cond, anchor_raw, xy, yaw, obs)
