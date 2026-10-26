@@ -259,6 +259,40 @@ def route_copy(route):
     return r
 
 
+def plan_job(planner, flow, job, episode, gcfg, rules=None):
+    """One planner job (the worker's body; tools/replay_plans.py runs it offline). `rules`: the bundle's deploy rules
+    plugin (bundle.load_rules), which then plans the job; None: the deployed student's path."""
+    from sim.lockstep import make_goal_fn
+
+    if rules is not None:
+        return rules.plan_job(planner, flow, job, episode, gcfg)
+    pc = planner.cfg
+    sm, cb = flow.sensor_map, flow.callback
+    hist, route, view = job["hist"], job["route"], job["memory"]
+    sel = sm.HeightFieldSelector(view, planner.certifier.tree, planner.certifier.bodies, planner.shapes)
+
+    def map_fn(xy, yaw):
+        m, _ = view.ego_map(xy, yaw, pc.datum_offset_m, pc.support_clip_m or 0.8)
+        return m
+
+    guide = sm.memory_boxes(view, grow_overhead_m=pc.guide_grow_overhead_m) if pc.guide_w > 0 and not gcfg.any() else None
+    goal_fn = make_goal_fn(route, episode["goal_lookahead_m"], episode["goal_heading"], episode["steer_lookahead_m"],
+                           None, cb.goal_vector, cb.route_goal_heading,
+                           arrival_radius_m=episode["arrival_radius_m"],
+                           arrival_scope=job["navigation_generation"])
+    goal_fn.arrival_anchor = job["arrival_anchor"]
+    if gcfg.any():
+        plan = G.plan_guarded(planner, hist, [], goal_fn, view, gcfg, measured_q=job.get("measured"),
+                              standing=bool(job.get("standing")), guide_grow_overhead_m=pc.guide_grow_overhead_m,
+                              allow_drop=bool(job.get("allow_drop", True)),
+                              calm_move_max_m=job.get("calm_move_max_m"))
+    else:
+        plan = planner.plan(np.asarray(hist), [], goal_fn, map_fn, sel, prev=None, guide_boxes=guide)
+    out = {k: plan[k] for k in ("qpos", "rotation", "joint_velocity", "rule", "chosen_clearance_m")}
+    out.update({k: plan[k] for k in ("no_safe_candidate", "candidate_pool", "guard", "rejected") if k in plan})
+    return out
+
+
 def _worker(conn, pdict, episode, seed, impl="fused", precision="fp32", guards=None):
     import os
     import signal
@@ -270,44 +304,21 @@ def _worker(conn, pdict, episode, seed, impl="fused", precision="fp32", guards=N
 
     torch.set_num_threads(4)
     flow = bundle.load_flow()
-    from sim.lockstep import make_goal_fn
 
     from g1deploy.fastplan import build_planner
 
     # compiled + captured now (~25 s with a warm cache), not on the first plan of a walk
-    planner = build_planner(flow.planner.PlannerConfig(**dict(pdict, seed=seed)), impl, precision)
-    pc = planner.cfg
-    sm, cb = flow.sensor_map, flow.callback
+    rules = bundle.load_rules(bundle.student_config(), episode["goal_lookahead_m"])
+    planner = build_planner(flow.planner.PlannerConfig(**dict(pdict, seed=seed)), impl, precision, rules=rules)
     gcfg = G.preset(guards)
     conn.send("ready")
     while True:
         job = conn.recv()
         if job is None:
             break
-        hist, route, view = job["hist"], job["route"], job["memory"]
         t0 = time.monotonic()
-        sel = sm.HeightFieldSelector(view, planner.certifier.tree, planner.certifier.bodies, planner.shapes)
-
-        def map_fn(xy, yaw):
-            m, _ = view.ego_map(xy, yaw, pc.datum_offset_m, pc.support_clip_m or 0.8)
-            return m
-
-        guide = sm.memory_boxes(view, grow_overhead_m=pc.guide_grow_overhead_m) if pc.guide_w > 0 and not gcfg.any() else None
-        goal_fn = make_goal_fn(route, episode["goal_lookahead_m"], episode["goal_heading"], episode["steer_lookahead_m"],
-                               None, cb.goal_vector, cb.route_goal_heading,
-                               arrival_radius_m=episode["arrival_radius_m"],
-                               arrival_scope=job["navigation_generation"])
-        goal_fn.arrival_anchor = job["arrival_anchor"]
         try:
-            if gcfg.any():
-                plan = G.plan_guarded(planner, hist, [], goal_fn, view, gcfg, measured_q=job.get("measured"),
-                                      standing=bool(job.get("standing")), guide_grow_overhead_m=pc.guide_grow_overhead_m,
-                                      allow_drop=bool(job.get("allow_drop", True)),
-                                      calm_move_max_m=job.get("calm_move_max_m"))
-            else:
-                plan = planner.plan(np.asarray(hist), [], goal_fn, map_fn, sel, prev=None, guide_boxes=guide)
-            out = {k: plan[k] for k in ("qpos", "rotation", "joint_velocity", "rule", "chosen_clearance_m")}
-            out.update({k: plan[k] for k in ("no_safe_candidate", "candidate_pool", "guard", "rejected") if k in plan})
+            out = plan_job(planner, flow, job, episode, gcfg, rules)
         except Exception as exc:  # reported, never fatal to the node
             out = {"error": f"{type(exc).__name__}: {exc}"}
         conn.send((job["id"], out, time.monotonic() - t0))
@@ -401,6 +412,7 @@ class ControlServer:
 # ---------------------------------------------------------------------------------------------- node
 class StudentNode:
     guards = G.GuardConfig()  # off unless --guards (instances built without __init__ in tests stay off too)
+    rules, rules_state = None, None  # a bundle's deploy rules plugin (set in __init__) and its state across replans
 
     def __init__(self, args):
         self.args = args
@@ -412,8 +424,13 @@ class StudentNode:
         if args.goal_lookahead:
             self.episode["goal_lookahead_m"] = args.goal_lookahead
         self.replan = int(self.episode["replan_ticks"])
-        variant = cfg["route_variants"][args.route]
-        self.route_cfg = variant.get("route", {})
+        self.rules = bundle.load_rules(cfg, self.episode["goal_lookahead_m"])  # None: the deployed format
+        if args.route is None:
+            args.route = "rules" if self.rules is not None else "sensor"
+        elif self.rules is not None and args.route != "rules":
+            raise SystemExit("this bundle plans with its deploy rules: --route rules (the default)")
+        self.rules_state, self.next_due = None, self.replan
+        self.route_cfg = {} if self.rules is not None else cfg["route_variants"][args.route].get("route", {})
         self.pdict = dict(cfg["planner"], device=args.device)
         if args.candidates:
             self.pdict["candidates"] = args.candidates  # faster planner; evaluate first (jobs/g4v.sh)
@@ -503,16 +520,19 @@ class StudentNode:
             if snap is not None and self.phase in ("PRESCAN", "RUN"):
                 xy, t = np.asarray(snap["qpos"][:2], dtype=float), time.monotonic() - t0
                 if not hasattr(self, "route"):
-                    if self.args.route == "sensor":
+                    if self.args.route in ("sensor", "rules"):
                         with self.mem_lock:
-                            r = self.flow.route.SensorRoute(xy, self.goal, G.route_memory(self.memory, self.guards),
-                                                            **self.route_cfg)
+                            mem = G.route_memory(self.memory, self.guards)
+                            if self.rules is not None:
+                                r = self.rules.make_route(self.flow, xy, self.goal, mem)
+                            else:
+                                r = self.flow.route.SensorRoute(xy, self.goal, mem, **self.route_cfg)
                             r.refresh(xy, t, force=True)
                     else:
                         boxes = json.loads(Path(self.args.boxes).read_text()) if self.args.boxes else []
                         r = self.flow.route.Route(xy, self.goal, boxes, **self.route_cfg)
                     self.route = r
-                elif self.args.route == "sensor" and t - self.route.last_refresh >= self.route.period_s:
+                elif self.args.route in ("sensor", "rules") and t - self.route.last_refresh >= self.route.period_s:
                     with self.mem_lock:
                         fresh = copy.copy(self.route)
                         fresh.refresh(xy, t, force=True)  # assigns new arrays on the copy; readers keep theirs
@@ -544,6 +564,8 @@ class StudentNode:
         route = self.route_now(np.asarray(self.history[-1][:2], dtype=float), now_tick * DT)
         with self.mem_lock:
             view = memory_view(self.memory, True) if self.guards.self_mask else memory_view(self.memory)
+            if self.rules is not None:
+                view = self.rules.extend_view(view, self.memory)
         jid = self.next_id
         self.next_id += 1
         dump = getattr(getattr(self, "args", None), "debug_dump", None)
@@ -556,12 +578,15 @@ class StudentNode:
                                 route_found=bool(getattr(route, "found", False)),
                                 navigation_generation=self.navigation_generation,
                                 arrival_anchor=np.asarray(self.history[-1]), measured=measured, standing=standing,
-                                allow_drop=allow_drop, guards=str(self.guards.describe() if self.guards.any() else ""))
+                                allow_drop=allow_drop, guards=str(self.guards.describe() if self.guards.any() else ""),
+                                rules_state=json.dumps(self.rules_state, default=float),
+                                **{f"view_{k}": v for k, v in view.extra.items() if isinstance(v, np.ndarray)})
         self.pool.submit(worker, {"id": jid, "hist": [np.asarray(h) for h in hist], "route": route, "memory": view,
                                   "arrival_anchor": np.asarray(self.history[-1]).copy(),
                                   "navigation_generation": self.navigation_generation,
                                   "measured": np.asarray(self.history[-1], dtype=np.float64).copy(),
-                                  "standing": standing, "allow_drop": allow_drop, "calm_move_max_m": calm_budget})
+                                  "standing": standing, "allow_drop": allow_drop, "calm_move_max_m": calm_budget,
+                                  "rules_state": self.rules_state})
         self.jobs[jid] = (now_tick + lead, np.asarray(hist[-1], dtype=np.float64),
                           self.flow.feed.finite_difference_dq(hist), now_tick, first)
         if lead and self.guards.anchor_check_m is not None:
@@ -593,6 +618,8 @@ class StudentNode:
                 emit("plan_error", error=out["error"])
                 continue
             plan = out
+            if "rules_state" in out:  # the deploy rules' state across replans and when to replan next
+                self.rules_state, self.next_due = out["rules_state"], int(out.get("next_due", self.replan))
             measured = self.measured_jobs.pop(jid, None) if self.guards.any() else None
             if first or measured:
                 anchor_tick = now_tick  # computed while standing still: start it when it lands
@@ -775,6 +802,7 @@ class StudentNode:
         self.measured_jobs, self.last_streamed_req = {}, -10**9
         self.consecutive_drops = 0
         self.calm_latch = G.CalmLatch(self.guards)
+        self.rules_state, self.next_due = None, getattr(self, "replan", 8)
         self.prescan_blocked_next = -1
         if self.streamer is not None:
             self.streamer.last_end = None  # the runner resets playback on the new run's first chunk anyway
@@ -886,7 +914,7 @@ class StudentNode:
                 elif cloud_age > a.cloud_timeout:
                     self.phase = "STOPPED"
                     self.stand(self.tick, f"cloud stale {cloud_age:.2f}s")
-                elif self.pool.free() and self.tick - self.last_request >= self.replan:
+                elif self.pool.free() and self.tick - self.last_request >= getattr(self, "next_due", self.replan):
                     # also with no active plan: a first plan dropped by sane() must be asked for again (it used to
                     # leave the robot standing in RUN forever; tests/test_node_supervisor.py)
                     self.request(self.tick, self.pool.free()[0])
@@ -916,7 +944,8 @@ def parse(argv=None):
     ap.add_argument("--mount-calib", default=None, help="calibrated MID-360 mount JSON (tools/calibrate_mount.py)")
     ap.add_argument("--lidar-transport-s", type=float, default=0.01, help="driver + network delay of the last point")
     ap.add_argument("--stream-bind", default="tcp://*:5556")
-    ap.add_argument("--route", choices=("sensor", "privileged"), default="sensor")
+    ap.add_argument("--route", choices=("sensor", "rules", "privileged"), default=None,
+                    help="default: sensor; rules (the only choice then) for a bundle with a deploy rules plugin")
     ap.add_argument("--boxes", default=None, help="JSON list of boxes for --route privileged (a measured course)")
     ap.add_argument("--goal-lookahead", type=float, default=None, help="override (sets walking speed; 1.5 evaluated)")
     ap.add_argument("--device", default="cuda")

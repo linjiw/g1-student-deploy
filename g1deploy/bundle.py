@@ -51,9 +51,19 @@ def verify(root: Path = ROOT, quick: bool = True) -> list[str]:
     return problems
 
 
+def needs_rules(cfg: dict) -> bool:
+    """A bundle whose student config is not the deployed format (no `route_variants`): its per-replan rules come
+    from a deploy rules plugin (`load_rules`), never guessed here."""
+    return "route_variants" not in cfg
+
+
 def student_config(root: Path = ROOT) -> dict:
     cfg = json.loads((root / "config/student.json").read_text())
-    cfg["planner"]["run"] = str(root / cfg["planner"]["run"])
+    for k, v in cfg["planner"].items():  # artifact paths are bundle-relative (the model run and any others)
+        if isinstance(v, str) and v.startswith("flow/artifacts/") and (root / v).exists():
+            cfg["planner"][k] = str(root / v)
+    if needs_rules(cfg):
+        return cfg
     # A partially observed wall is a surface, not a complete obstacle extent.
     # Reuse SensorRoute's masked uncertainty growth so short unobserved gaps
     # beside known obstacles are not immediately treated as reliable corridors.
@@ -104,3 +114,27 @@ def load_flow(root: Path = ROOT):
     ns.root = root
     _LOADED = ns
     return ns
+
+
+def load_rules(cfg: dict, lookahead_m: float | None = None):
+    """The bundle's deploy rules plugin, or None for the deployed format.
+
+    A plugin is a Python file (`G1_DEPLOY_RULES`, set by `g1 sim|robot --rules PATH`) with `load(cfg, lookahead_m)`
+    returning an object with: `make_route(flow, xy, goal, memory)` (the node's route), `extend_view(view, memory)`
+    (extra memory layers its planner reads), `planner_class(base)` (a subclass of the fast planner), `prepare(planner)`
+    and `plan_job(planner, flow, job, episode, guards)` (one planner job -> the node's result dict, with
+    `rules_state` carried to the next job and `next_due`, ticks to the next replan). Plugins of unpublished bundles
+    live outside this public repository. A bundle that needs rules never runs without them."""
+    path = os.environ.get("G1_DEPLOY_RULES")
+    if not path:
+        if needs_rules(cfg):
+            raise BundleError(f"the bundle at {ROOT} needs its deploy rules plugin: set G1_DEPLOY_RULES (g1 --rules)")
+        return None
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("g1_deploy_rules", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault("g1_deploy_rules", module)
+    spec.loader.exec_module(module)
+    return module.load(cfg, lookahead_m)
+

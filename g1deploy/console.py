@@ -104,12 +104,15 @@ def _git(*args, cwd=ROOT):
 
 def session_meta(args, iface):
     """Provenance of a session: what code, bundle, runner, calibration and machine produced it."""
-    manifest = ROOT / "bundle/MANIFEST.json"
+    broot = Path(getattr(args, "bundle", None) or os.environ.get("G1_STUDENT_BUNDLE") or ROOT / "bundle")
+    manifest = broot / "MANIFEST.json"
     meta = {"started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "argv": sys.argv[1:], "host": socket.gethostname(),
             "iface": iface, "robot": getattr(args, "robot", None), "operator": args.operator, "note": args.note,
             "git": {"commit": _git("rev-parse", "HEAD"), "branch": _git("branch", "--show-current"),
                     "describe": _git("describe", "--tags", "--always"),
                     "dirty": [l[3:] for l in (_git("status", "--porcelain", "--untracked-files=no") or "").splitlines()]},
+            "bundle": str(broot.resolve()),
+            "deploy_rules": getattr(args, "rules", None) or os.environ.get("G1_DEPLOY_RULES"),
             "bundle_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest() if manifest.exists() else None,
             "runner_commit": _git("rev-parse", "HEAD", cwd=LUCID), "runner": str(RUNNER)}
     mc = getattr(args, "mount_calib", None)
@@ -184,6 +187,10 @@ class Proc:
 class Session:
     def __init__(self, args):
         self.args, self.env = args, _env()
+        if getattr(args, "bundle", None):  # the node's planner bundle (G1_STUDENT_BUNDLE); SONIC files are shared
+            self.env["G1_STUDENT_BUNDLE"] = str(Path(args.bundle).resolve())
+        if getattr(args, "rules", None):  # its deploy rules plugin (bundle.load_rules)
+            self.env["G1_DEPLOY_RULES"] = str(Path(args.rules).resolve())
         stamp = time.strftime("%Y%m%d-%H%M%S")
         label = f"-{args.robot}" if getattr(args, "robot", None) else ""
         self.dir = Path(args.record) if args.record else SESSIONS / f"{args.mode}-{stamp}{label}"
@@ -779,6 +786,9 @@ def main(argv=None):
                        help="deploy-side guards (docs/ROBUSTNESS.md): deploy = self mask, split guidance boxes, walk "
                             "envelope, calm fallback, anchor check; walls = deploy + low overheads as walls (H5-H6)")
         p.add_argument("--self-margin", type=float, default=None, help="self-filter margin override (m)")
+        p.add_argument("--bundle", default=None, help="planner bundle directory (default bundle/)")
+        p.add_argument("--rules", default=None, help="the bundle's deploy rules plugin (a .py file; needed by bundles "
+                                                     "whose student config is not the deployed format)")
         p.add_argument("--operator", default=os.environ.get("G1_OPERATOR"), help="who runs the session (metadata)")
         p.add_argument("--note", default=None, help="free text stored with the session (course, conditions, ...)")
         if mode == "sim":

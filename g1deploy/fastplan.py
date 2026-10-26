@@ -39,10 +39,10 @@ PAD_ROW = (1.0e4, 1.0e4, -1.0e4, 0.0, 0.1, 0.1, 0.1, 0.0, 0.0)  # far, finite, m
 # (lab-g1 2026-10-23: 29 boxes after 5 s standing). Above the largest bucket the planner used to leave the graphs and
 # hand torch.compile a new shape per box count: seconds per recompile, then the recompile limit (an 11 s plan in a
 # rehearsal of that room). Padded slots are masked (+inf distance), so the bucket never changes a plan.
-BUCKETS = (8, 16, 32, 64, 128)
+BUCKETS = (8, 16, 32, 64, 128, 256)  # 256: finer box decompositions of a real room (150-240 boxes within 2 m)
 PRECISIONS = ("fp32", "tf32", "bf16")  # denoiser forward only; fp32 = the evaluated arithmetic
-MAX_PAIRS = 6144  # candidates x padded obstacles per graph (48 x 128); one shared pool sized by the largest graph
-RECOMPILE_LIMIT = 64  # torch.compile'd pieces see one shape per (candidates, bucket): 2 x 6 here, default limit is 8
+MAX_PAIRS = 12288  # candidates x padded obstacles per graph (48 x 256); one shared pool sized by the largest graph
+RECOMPILE_LIMIT = 64  # torch.compile'd pieces see one shape per (candidates, bucket): 2 x 7 here, default limit is 8
 
 
 # ---------------------------------------------------------------------------------------- numpy geometry
@@ -235,15 +235,21 @@ def make_planner(pcfg, fast=True, **kw):
     return fast_planner_class()(pcfg, **kw) if fast else _planner_module().FlowPlanner(pcfg)
 
 
-def build_planner(pcfg, impl="fused", precision="fp32", warm=True):
-    """`impl` eager | graph | fused, `precision` fp32 | tf32 | bf16 (fast planner only); compiled + captured."""
+def build_planner(pcfg, impl="fused", precision="fp32", warm=True, rules=None):
+    """`impl` eager | graph | fused, `precision` fp32 | tf32 | bf16 (fast planner only); compiled + captured.
+    `rules`: a deploy rules plugin (bundle.load_rules) - its planner class, built on this one, and its preparation."""
     if impl == "eager":
         if precision != "fp32":
             raise ValueError("the eager planner runs fp32 only")
-        return make_planner(pcfg, fast=False)
-    planner = make_planner(pcfg, fuse=impl == "fused", precision=precision)
-    if warm and planner.device.type == "cuda":
-        planner.warmup()  # compile + capture now (~25 s warm cache), not on the first plan of a walk
+        base = _planner_module().FlowPlanner
+        planner = (rules.planner_class(base) if rules is not None else base)(pcfg)
+    else:
+        cls = fast_planner_class() if rules is None else rules.planner_class(fast_planner_class())
+        planner = cls(pcfg, fuse=impl == "fused", precision=precision)
+        if warm and planner.device.type == "cuda":
+            planner.warmup()  # compile + capture now (~25 s warm cache), not on the first plan of a walk
+    if rules is not None:
+        rules.prepare(planner)
     return planner
 
 
@@ -307,8 +313,10 @@ def _build_class():
         def _loop(self, *a):
             return (self._fused_loop if self.fuse else self._guided_loop)(*a)
 
-        def _guided_loop(self, x, cond, anchor_raw, xy0, yaw0, packed, valid, guided):
-            """`FlowPlanner._sample_guided` after the noise draw (same operations)."""
+        def _guided_loop(self, x, cond, anchor_raw, xy0, yaw0, packed, valid, guided, margin):
+            """`FlowPlanner._sample_guided` after the noise draw (same operations). `margin`: guide_margin_m as a
+            0-d float32 tensor, a graph input: a per-replan override of guide_margin_m would otherwise be ignored,
+            since a Python float is baked into the captured graph and the compiled kernels."""
             kin, idx = self._guide_setup()
             b, h = x.shape[0], self.horizon
             prior = torch.zeros_like(x)
@@ -329,8 +337,7 @@ def _build_class():
                         pos, rot, _ = self._integrate(m, anchor_raw, xy0, yaw0)
                         bp, br = kin.forward(pos, rot, m[..., 7:36])
                         st, en, rad = kin.capsules(bp, br)
-                        pen = batched_capsule_penetration(st[..., idx, :], en[..., idx, :],
-                                                          rad[idx] + self.cfg.guide_margin_m, obs_b)
+                        pen = batched_capsule_penetration(st[..., idx, :], en[..., idx, :], rad[idx] + margin, obs_b)
                         loss = pen.pow(2).sum()
                         if self.cfg.guide_tilt_max_rad is not None:
                             tilt = torch.acos(rot[..., 2, 2].clamp(-1.0, 1.0))
@@ -398,7 +405,7 @@ def _build_class():
                 tokens = tokens[:, m.n_history:]
             return m.out(m.norm(tokens))
 
-        def _guide_loss(self, xg, vd, t, anchor_raw, xy0, yaw0, packed, valid):
+        def _guide_loss(self, xg, vd, t, anchor_raw, xy0, yaw0, packed, valid, margin):
             """The guidance objective of `FlowPlanner._sample_guided` (squared capsule penetration)."""
             kin, idx = self._guide_setup()
             b = xg.shape[0]
@@ -407,14 +414,14 @@ def _build_class():
             pos, rot, _ = self._integrate(m, anchor_raw, xy0, yaw0)
             bp, br = kin.forward(pos, rot, m[..., 7:36])
             st, en, rad = kin.capsules(bp, br)
-            pen = batched_capsule_penetration(st[..., idx, :], en[..., idx, :], rad[idx] + self.cfg.guide_margin_m, obs_b)
+            pen = batched_capsule_penetration(st[..., idx, :], en[..., idx, :], rad[idx] + margin, obs_b)
             loss = pen.pow(2).sum()
             if self.cfg.guide_tilt_max_rad is not None:
                 tilt = torch.acos(rot[..., 2, 2].clamp(-1.0, 1.0))
                 loss = loss + (tilt - self.cfg.guide_tilt_max_rad).clamp_min(0).pow(2).sum()
             return loss
 
-        def _fused_loop(self, x, cond, anchor_raw, xy0, yaw0, packed, valid, guided):
+        def _fused_loop(self, x, cond, anchor_raw, xy0, yaw0, packed, valid, guided, margin):
             self._guide_setup()
             b, h = x.shape[0], self.horizon
             prior = torch.zeros_like(x)
@@ -432,7 +439,8 @@ def _build_class():
                 if guided and lo <= t <= hi:
                     with torch.enable_grad():
                         xg = x.detach().requires_grad_(True)
-                        g, = torch.autograd.grad(self._loss(xg, v.detach(), tts[i], anchor_raw, xy0, yaw0, packed, valid), xg)
+                        g, = torch.autograd.grad(self._loss(xg, v.detach(), tts[i], anchor_raw, xy0, yaw0, packed, valid,
+                                                            margin), xg)
                     rms = g.pow(2).mean((1, 2), keepdim=True).sqrt()
                     v = v + self.cfg.guide_w * torch.where(rms > 0, g / rms.clamp_min(1e-12), torch.zeros_like(g))
                 x = x - v / steps
@@ -448,8 +456,17 @@ def _build_class():
             packed[:n] = guide_obs
             return packed, self._slots[:n_pad] < n
 
+        def _margin(self):
+            m = getattr(self, "_margin_t", None)
+            if m is None:
+                m = self._margin_t = torch.zeros((), dtype=torch.float32, device=self.device)
+            m.fill_(float(self.cfg.guide_margin_m))  # in place: captured graphs read this tensor
+            return m
+
         @torch.no_grad()
-        def _sample_guided(self, cond, anchor_raw, xy0, yaw0, guide_obs):
+        def _sample_guided(self, cond, anchor_raw, xy0, yaw0, guide_obs, **kw):
+            if any(v is not None for key, v in kw.items() if key != "t0"):  # a newer bundle's options: its own sampler
+                return super()._sample_guided(cond, anchor_raw, xy0, yaw0, guide_obs, **kw)
             b = anchor_raw.shape[0]
             cond = {k_: v_ for k_, v_ in cond.items() if k_ != "null"}
             x = torch.randn(b, self.horizon, ps.DIM, generator=self.generator, device=self.device)
@@ -459,12 +476,13 @@ def _build_class():
             if not self.use_graphs or n_pad is None or b * max(n_pad, 1) > self.max_pairs:
                 # off the graphs: still pad to a power of two so compiled pieces see few distinct shapes
                 packed, valid = self._pack(guide_obs, (1 << max(n - 1, 0).bit_length()) if guided else 0)
-                return self._loop(x, cond, anchor_raw, xy0, yaw0, packed, valid, guided)
+                return self._loop(x, cond, anchor_raw, xy0, yaw0, packed, valid, guided, self._margin())
             key = (b, n_pad, tuple(sorted((k_, tuple(v_.shape)) for k_, v_ in cond.items())))
             gr = self._graphs.get(key)
             packed, valid = self._pack(guide_obs, n_pad)
+            margin = self._margin()
             if gr is None:
-                gr = self._graphs[key] = self._capture(x, cond, anchor_raw, xy0, yaw0, packed, valid, guided)
+                gr = self._graphs[key] = self._capture(x, cond, anchor_raw, xy0, yaw0, packed, valid, guided, margin)
             inp = gr.inputs
             inp["x"].copy_(x)
             for k_, v_ in cond.items():
@@ -477,15 +495,15 @@ def _build_class():
             gr.graph.replay()
             return gr.out.clone()
 
-        def _capture(self, x, cond, anchor_raw, xy0, yaw0, packed, valid, guided):
+        def _capture(self, x, cond, anchor_raw, xy0, yaw0, packed, valid, guided, margin):
             t0 = time.perf_counter()
             inp = {"x": x.clone(), "cond": {k_: v_.clone() for k_, v_ in cond.items()},
                    "anchor_raw": anchor_raw.clone(), "xy0": xy0.clone(), "yaw0": yaw0.clone(),
                    "packed": packed.clone(), "valid": valid.clone()}
 
-            def run():
+            def run():  # `margin` is the planner's own tensor (refilled in place before every replay)
                 return self._loop(inp["x"], inp["cond"], inp["anchor_raw"], inp["xy0"], inp["yaw0"],
-                                  inp["packed"], inp["valid"], guided)
+                                  inp["packed"], inp["valid"], guided, margin)
 
             side = torch.cuda.Stream(self.device)
             side.wait_stream(torch.cuda.current_stream(self.device))
@@ -573,9 +591,14 @@ def _build_class():
             return np.concatenate([pos_h, quat.reshape(k, -1, 4), joints_h], -1), pos_h
 
         @torch.no_grad()
-        def _candidates(self, hist0, xy0, yaw0, goal_fn, k, world, map_fn=None, guide_obs=None):
+        def _candidates(self, hist0, xy0, yaw0, goal_fn, k, world, map_fn=None, guide_obs=None, **kw):
             """`FlowPlanner._candidates` with one host sync per chunk; while chunk c samples on the GPU, the
-            CPU runs the height-field selection on chunk c-1's frames (exact: frames are independent)."""
+            CPU runs the height-field selection on chunk c-1's frames (exact: frames are independent).
+
+            Keyword options of a newer bundle's `_candidates` that this loop does not implement run the bundle's own
+            method when set (not None); a deploy rules plugin's planner class covers that bundle's config options."""
+            if any(v is not None for key, v in kw.items() if key != "prior_t"):
+                return super()._candidates(hist0, xy0, yaw0, goal_fn, k, world, map_fn, guide_obs, **kw)
             sel = self._overlap_selector()
             hist = hist0.to(self.device)[None].repeat(k, 1, 1)
             xy = xy0.to(self.device)[None].repeat(k, 1)

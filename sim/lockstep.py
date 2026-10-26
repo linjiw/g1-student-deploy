@@ -63,12 +63,14 @@ def write_json(path, value):
 
 
 def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac, goal_vector, route_goal_heading,
-                 *, arrival_radius_m=None, arrival_scope=None):
+                 *, arrival_radius_m=None, arrival_scope=None, heading_offset_rad=0.0):
     """Source pursuit semantics with a deployment occupancy-prefix guard.
 
     Shared by this rehearsal and g1deploy.node's planner workers. The long
     pursuit ray can overshoot a route bend; return to the visible route when
     that ray enters occupied cells, falling back to its free prefix if needed.
+    `heading_offset_rad`: added to the pursuit heading (e.g. a deploy rules
+    plugin's sideways mode); not to a latched arrival heading.
     """
     from g1deploy.goal_guard import REVISION, limit_goal, update_arrival_latch
 
@@ -125,6 +127,8 @@ def make_goal_fn(route, lookahead, heading_mode, steer_lookahead, turn_min_frac,
         hold_heading = arrival_state is not None
         if hold_heading:
             heading = arrival_state["heading_rad"]
+        elif heading_offset_rad:
+            heading = heading + heading_offset_rad
         diagnostics["arrival_heading_held"] += hold_heading
         diagnostics["queries"] += 1
         diagnostics["limited"] += status == "limited_at_occupied_grid"

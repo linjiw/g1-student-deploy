@@ -114,9 +114,28 @@ def preset(name_or_cfg):
 class MemoryView:
     """Picklable copy of the memory layers with the frozen `SensorMapMemory.ego_map` semantics."""
 
-    def __init__(self, support, ceiling, lo, res, n, near_only=None):
+    def __init__(self, support, ceiling, lo, res, n, near_only=None, extra=None):
         self.support, self.ceiling, self.lo, self.res, self.n = support, ceiling, lo, res, n
         self.near_only = near_only
+        # further memory attributes a bundle's planner reads (a deploy rules plugin's extend_view), kept by with_layers
+        self.extra = dict(extra or {})
+        for k, v in self.extra.items():
+            setattr(self, k, v)
+
+    def with_layers(self, support, ceiling):
+        """The same view with new support / ceiling layers (the guards' masks), extra attributes kept."""
+        return MemoryView(support, ceiling, self.lo, self.res, self.n, self.near_only, self.extra)
+
+    def extended(self, **extra):
+        return MemoryView(self.support, self.ceiling, self.lo, self.res, self.n, self.near_only, dict(self.extra, **extra))
+
+    @property
+    def centers(self):
+        """Cell centres, (n * n, 2), as SensorMapMemory builds them (computed here, not pickled per plan)."""
+        if getattr(self, "_centers", None) is None:
+            gx, gy = np.meshgrid(np.arange(self.n), np.arange(self.n), indexing="ij")
+            self._centers = np.stack([gx, gy], -1).reshape(-1, 2) * self.res + self.lo
+        return self._centers
 
     def ego_map(self, xy, yaw, datum_offset_m, support_clip_m=0.8, obstacle_threshold_m=0.05):
         from g1deploy import bundle
@@ -190,7 +209,7 @@ def self_mask(view, planner, measured_q, cfg):
     sup, ceil = view.support.copy(), view.ceiling.copy()
     sup[hide & np.isfinite(sup)] = 0.0  # the robot stands there: ground
     ceil[hide & np.isfinite(ceil)] = np.inf  # seen open (NaN would let overhead growth re-cover it)
-    return MemoryView(sup, ceil, view.lo, view.res, view.n, view.near_only), {"self_masked_cells": count}
+    return view.with_layers(sup, ceil), {"self_masked_cells": count}
 
 
 def overhead_walls(view, cfg):
@@ -201,7 +220,7 @@ def overhead_walls(view, cfg):
     sup, ceil = view.support.copy(), view.ceiling.copy()
     sup[low] = cfg.wall_top_m
     ceil[low] = np.nan
-    return MemoryView(sup, ceil, view.lo, view.res, view.n, view.near_only), int(low.sum())
+    return view.with_layers(sup, ceil), int(low.sum())
 
 
 class WallsRouteMemory:

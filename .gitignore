@@ -3,6 +3,10 @@ __pycache__/
 *.pyc
 bundle/*
 !bundle/MANIFEST.json
+# private bundles (unpublished configs and checkpoints, MANIFEST included) and their deploy rules plugins: never in
+# this public repo (private/ has its own git history)
+bundle-*/
+private/
 runs/
 *.mp4
 .cache/

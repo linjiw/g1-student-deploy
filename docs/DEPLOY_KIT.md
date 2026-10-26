@@ -310,3 +310,40 @@ runs of the irregular scanned door (crouched at the end of a partly seen beam) a
 runs to call, so validate on the robot with the 2 m open walk before any door. On the robot (rope attached):
 `--rear-blind-deg 180 --rear-blind-range-m 1.0` (robot profile keys `rear_blind_deg`, `rear_blind_range_m`).
 **Default for lab-g1 since 2026-10-25** (`robots/lab-g1.json`); `--rear-blind-deg 0` turns it off for a session.
+
+## 12. Other bundles, deploy rules plugins, offline replays (2026-10-26)
+
+**Another bundle.** `./g1 sim|robot --bundle DIR` runs the node on that bundle (`G1_STUDENT_BUNDLE`; SONIC files must
+match the deployed ones). The session records the bundle path and its MANIFEST hash. A bundle whose student config is
+not the deployed format (no `route_variants`) also needs its **deploy rules plugin**: `--rules FILE.py`
+(`G1_DEPLOY_RULES`). The node never runs such a bundle without one. The plugin interface is in
+`g1deploy/bundle.load_rules`: it supplies the route, extra memory layers for the planner's view, a planner class built
+on the fast planner, and the planner job itself. The node's guards are passed in, and its state is carried from one
+replan to the next. Plugins for unpublished bundles are kept outside this public repository (`private/` is
+git-ignored).
+
+**Fast planner, per-replan margins.** `guide_margin_m` is now an input of the captured CUDA graphs. A plugin may
+change it per replan; before this, a graph kept the margin it was captured with (`tests/test_fastplan_margin.py`).
+Graph buckets now go up to 256 guidance boxes: finer box decompositions of a real room give 150–240 boxes within 2 m.
+
+**Offline replays** (`tools/replay_plans.py`). These re-plan a recorded session's states with the node's own job
+function (`node.plan_job`), for any bundle or plugin. Inputs are the `--debug-plans` dumps (exact history and goal)
+and the node's lidar memory, rebuilt from the recorded raw frames:
+- on the node's grid;
+- each frame deskewed and registered with the pose of its own time;
+- the node's pelvis position from its status stream and the measured plan histories;
+- IMU orientation and joints from rt/lowstate;
+- the session's mount calibration.
+
+Each row reports how well the rebuild matches the node's own memory at that plan. On lab-g1 h5-1: occupied-cell IoU
+0.98 / 0.96 standing, 0.87 / 0.74 late in the walk, where 5 Hz status poses replace the node's 200 Hz leg odometry.
+Kcsc's offline rules then match the live ones. (Registering every frame with the pose of the replay instant instead
+gave IoU 0.32: frames from the first seconds land tilted.) `tools/compare_replays.py` tabulates runs (no-safe,
+fallbacks, advance, pelvis, latency, rebuild IoU, plugin flags); `--rear-blind-deg / --rear-blind-range-m` re-fuse
+with a lidar blind.
+
+```
+G1_STUDENT_BUNDLE=$PWD/bundle-x G1_DEPLOY_RULES=path/to/rules.py .venv/bin/python tools/replay_plans.py \
+    runs/robot-day-20261024/h5-1 --every 3 --out runs/replays/h5-1_x.json
+.venv/bin/python tools/compare_replays.py runs/replays/*.json
+```
