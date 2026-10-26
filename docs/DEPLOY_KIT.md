@@ -363,6 +363,10 @@ G1_STUDENT_BUNDLE=$PWD/bundle-x G1_DEPLOY_RULES=path/to/rules.py .venv/bin/pytho
 - The guards' walk envelope (tilt ≤ 0.6) is waived within 2 m of a low ceiling, so the student may duck. It cannot
   simply stay on: successful passes stream plans planned up to 0.8–0.99 rad.
 - The E-stop then damps the joints, and the robot falls.
-- **On the robot at a door:** expect forward-pitched ducks close to the limit. The gantry or rope must be ready to catch
-  a damped collapse there. Stop the pass, with the remote's Select or the panel, if the robot rocks back and forth
-  under the beam for more than a few seconds.
+- **Contacts:** across all 19 kcsc runs on the lab door twin (3 goals; full, rear and near-rear lidar), 6 touched the
+  frame or the furniture beside it (49–289 N); one more is the E-stop above.
+- **Not latency:** kcsc plans in about 0.1 s here. With the node logging each plan switch (`switch`, `offsets` in
+  node_plans.json), its arms run 0.3–0.7 rad (median) from the reference, before and after a switch alike.
+- **On the robot at a door:** expect forward-pitched ducks close to the limit, and side brushes. The gantry or rope must
+  be ready to catch a damped collapse there. Stop the pass, with the remote's Select or the panel, if the robot rocks
+  back and forth under the beam for more than a few seconds.
