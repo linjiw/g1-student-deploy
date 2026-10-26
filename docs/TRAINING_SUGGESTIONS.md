@@ -83,10 +83,7 @@ memory does.
 safe candidate. Deploy side: guards split components into rectangles of their own cells (`split_boxes`).
 **Training.** Train and evaluate with the same split guidance the robot uses (or make the guidance robust to a box
 containing the start), otherwise train and deploy see different guidance in every cluttered room.
-**Status (Flow, 2026-10-25).** Already solved in Flow's newer students: ST1 and later configs carry
-`sensor_boxes.split: "obb"` (near_m 3.5, float_min 0.4, split_pad 0, guide_near_m 2.0). The deployed student-s2-kcsc
-(10-08) predates it, which is why the deploy guard re-implements it; a bundle built from the newer perception block
-absorbs it.
+**Status (Flow, 2026-10-25).** Flow reports this is already handled in its newer students' perception configuration (details with the Flow team); a bundle built from it absorbs the deploy-side split.
 
 ### 1.7 Odometry
 **Seen.** Leg odometry under-counted real walks by 20–40 %: 1.5 m goal (leg 1.43 m, LIO 1.86 m), 2.0 m goal (leg
