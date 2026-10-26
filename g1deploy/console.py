@@ -24,7 +24,8 @@ usage:
                                                          (wrappers around tools/, see docs/DEPLOY_KIT.md)
 
 --script runs without a keyboard (tests, videos): comma-separated steps
-  wait:init | wait:control | wait:stream | wait:run | wait:arrived | wait:standing | sleep:S | key:K | goal:A:L
+  wait:init | wait:control | wait:ready | wait:stream | wait:run | wait:arrived | wait:standing | sleep:S | key:K | goal:A:L
+  (wait:ready = the student node is up and waiting: GO and goals are refused before that)
 """
 
 from __future__ import annotations
@@ -89,7 +90,8 @@ def resolve_task(layout):
 def mission_script(mission):
     """'A,L;A,L' -> a scripted multi-goal walk (simulation): start, walk the launch goal, then each leg."""
     legs = [tuple(float(v) for v in leg.split(",")) for leg in mission.split(";") if leg.strip()]
-    steps = ["wait:init", "sleep:1", "key:s", "wait:control", "sleep:2.5", "key:g", "wait:run", "wait:arrived"]
+    steps = ["wait:init", "sleep:1", "key:s", "wait:control", "wait:ready", "sleep:2.5", "key:g", "wait:run",
+             "wait:arrived"]
     for a, l in legs:
         steps += ["sleep:1.5", f"goal:{a}:{l}", "key:g", "wait:run", "wait:arrived"]
     return ",".join(steps + ["sleep:2", "key:t", "sleep:3"])
@@ -110,7 +112,8 @@ def session_meta(args, iface):
             "iface": iface, "robot": getattr(args, "robot", None), "operator": args.operator, "note": args.note,
             "git": {"commit": _git("rev-parse", "HEAD"), "branch": _git("branch", "--show-current"),
                     "describe": _git("describe", "--tags", "--always"),
-                    "dirty": [l[3:] for l in (_git("status", "--porcelain", "--untracked-files=no") or "").splitlines()]},
+                    # _git strips the output, and with it the first line's leading status column
+                    "dirty": [l[2:].strip() for l in (_git("status", "--porcelain", "--untracked-files=no") or "").splitlines()]},
             "bundle": str(broot.resolve()),
             "deploy_rules": getattr(args, "rules", None) or os.environ.get("G1_DEPLOY_RULES"),
             "bundle_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest() if manifest.exists() else None,
@@ -390,6 +393,13 @@ class Session:
             except (OSError, json.JSONDecodeError):
                 pass
 
+    NODE_READY = ("WAIT", "PRESCAN", "RUN", "ARRIVED", "STOPPED")  # node phases with its command socket up
+
+    def node_ready(self):
+        """The node has finished building its planner (warm-up: ~25 s for the deployed bundle, longer for bundles
+        with larger graphs) and answers commands. Before that a goal or GO would be lost."""
+        return "node" in self.procs and self.node_status.get("phase") in self.NODE_READY
+
     def node_cmd(self, **msg):
         try:
             s = self.zmq.Context.instance().socket(self.zmq.REQ)
@@ -434,6 +444,9 @@ class Session:
                 time.sleep(0.2)
             if not st["stream"]:
                 r.key("\n")  # ZMQ streaming on
+            if not self.args.replay and not self.node_ready():
+                self.event("GO refused: the student node is still starting (planner warm-up); wait for 'node: node_up'")
+                return
             if self.args.replay:
                 if "node" not in self.procs:
                     py = str(ROOT / ".venv/bin/python")
@@ -443,8 +456,10 @@ class Session:
                                               self.env)
                     self.event("operator: GO (stream on, recorded reference plays)")
                 return
-            self.node_cmd(cmd="go")
-            self.event("operator: GO (stream on, student plans)")
+            if self.node_cmd(cmd="go"):
+                self.event("operator: GO (stream on, student plans)")
+            else:
+                self.event("GO NOT DELIVERED: the node did not answer (stream is on, the student is not planning)")
         elif key == "h":
             if not self.args.replay:
                 self.node_cmd(cmd="stand")
@@ -517,15 +532,20 @@ class Session:
                 "goal_dist_m": ns.get("goal_dist_m"), "latency_s": ns.get("latency_s"),
                 "pelvis_z_m": ns.get("pelvis_z_m"), "tilt_rad": ns.get("tilt_rad"), "cloud_age_s": ns.get("cloud_age_s"),
                 "record": self.record_line().strip(), "events": [f"{t:6.1f}  {e}" for t, e in self.events[-12:]][::-1],
-                "dir": str(self.dir), "remote": dict(self.remote),
+                "dir": str(self.dir), "remote": dict(self.remote), "node_ready": self.node_ready(),
                 "procs": {k: p.alive() for k, p in self.procs.items()}}
 
     def new_goal(self, ahead, left):
         if self.args.replay:
             self.event("goal: no planner in replay mode")
             return
-        self.node_cmd(cmd="goal", ahead=ahead, left=left)
-        self.event(f"operator: new goal {ahead:.1f} m ahead {left:+.1f} m left")
+        if not self.node_ready():
+            self.event("goal refused: the student node is still starting (planner warm-up)")
+            return
+        if self.node_cmd(cmd="goal", ahead=ahead, left=left):
+            self.event(f"operator: new goal {ahead:.1f} m ahead {left:+.1f} m left")
+        else:
+            self.event("goal NOT DELIVERED: the node did not answer")
 
     # -- screen ---------------------------------------------------------------------------------------------
     def record_line(self):

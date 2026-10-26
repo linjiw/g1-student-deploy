@@ -166,9 +166,10 @@ async function tick() {
     pill($('runner'), s.runner, s.runner === 'E-STOP' ? 'bad' : s.runner === 'CONTROL' ? 'ok' : 'warn');
     $('driving').textContent = s.driving;
     $('armcard').style.display = s.runner === 'not started' ? 'block' : 'none';
-    const ready = s.runner === 'CONTROL';
+    const ready = s.runner === 'CONTROL' && s.node_ready;
     $('gobtn').disabled = !ready; $('gobtn').style.opacity = ready ? 1 : .45;
-    $('gohint').textContent = ready ? 'g · student walks to goal' : 'press Start SONIC first';
+    $('gohint').textContent = ready ? 'g · student walks to goal'
+      : (s.runner !== 'CONTROL' ? 'press Start SONIC first' : 'student node starting (planner warm-up)');
     $('phase').textContent = s.phase || '-';
     pill($('remote'), s.remote.connected ? ('ok' + (s.remote.last ? ' · ' + s.remote.last : '')) : 'not seen',
          s.remote.connected ? 'ok' : 'bad');
