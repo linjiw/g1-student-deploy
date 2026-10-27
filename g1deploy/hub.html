@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G1 Lab Hub</title>
+<style>
+:root { --bg:#f4f5f7; --fg:#15181d; --muted:#5d6572; --card:#fff; --line:#d8dce2; --btn:#e9ecf1;
+  --ok:#1b7a40; --warn:#9a5d00; --bad:#c0262d; --accent:#1f5fbf; --accent-fg:#fff; --sel:#eef3fc; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#101215; --fg:#e7e9ed; --muted:#9aa2ae;
+  --card:#191c21; --line:#2b3038; --btn:#242830; --ok:#46b46f; --warn:#e0a23c; --bad:#ff5d62; --accent:#6aa0ff;
+  --accent-fg:#0b1220; --sel:#1c2533; } }
+* { box-sizing:border-box }
+body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }
+main { max-width:1100px; margin:0 auto; padding:14px 16px 48px; }
+header { display:flex; flex-wrap:wrap; gap:6px 12px; align-items:baseline; margin-bottom:12px }
+header h1 { font-size:22px; margin:0 8px 0 0 }
+.card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin:0 0 12px; }
+h2 { font-size:13px; margin:0 0 10px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; font-weight:700 }
+.chip { display:inline-block; padding:2px 10px; border-radius:99px; border:1px solid var(--line); font-size:13px; color:var(--muted) }
+.pill { display:inline-block; padding:1px 9px; border-radius:99px; font-weight:700; font-size:13px }
+.ok { background:color-mix(in srgb, var(--ok) 16%, transparent); color:var(--ok) }
+.warn { background:color-mix(in srgb, var(--warn) 18%, transparent); color:var(--warn) }
+.bad { background:color-mix(in srgb, var(--bad) 16%, transparent); color:var(--bad) }
+.na { background:color-mix(in srgb, var(--muted) 14%, transparent); color:var(--muted) }
+.muted { color:var(--muted) } a { color:var(--accent) }
+.cols { display:grid; grid-template-columns:minmax(0, 1.25fr) minmax(0, 1fr); gap:12px; align-items:start }
+@media (max-width: 860px) { .cols { grid-template-columns:minmax(0, 1fr) } }
+.profiles { display:grid; gap:8px }
+.prof { display:block; border:1.5px solid var(--line); border-radius:10px; padding:10px 12px; cursor:pointer }
+.prof input { margin-right:8px }
+.prof.sel { border-color:var(--accent); background:var(--sel) }
+.prof .nm { font-weight:800 } .prof .ds { font-size:13px; color:var(--muted); margin-top:2px }
+.prof .tg { font-size:12.5px; margin-top:5px; display:flex; flex-wrap:wrap; gap:4px }
+.tabs { display:flex; gap:6px; margin:12px 0 10px }
+.tabs button { flex:1; padding:11px; border-radius:10px; border:1.5px solid var(--line); background:var(--btn); color:var(--fg);
+  font-weight:700; font-size:15px; cursor:pointer }
+.tabs button.on { border-color:var(--accent); background:var(--sel) }
+label.f { display:block; font-size:12.5px; color:var(--muted); margin:8px 0 3px }
+select, input[type=number], input[type=text] { padding:10px; font-size:16px; border-radius:8px; border:1px solid var(--line);
+  background:var(--bg); color:var(--fg); max-width:100% }
+.row { display:flex; gap:10px; flex-wrap:wrap; align-items:end }
+.check { display:flex; gap:10px; align-items:flex-start; padding:7px 0; border-top:1px solid var(--line) }
+.check:first-child { border-top:0 } .check input { width:22px; height:22px; margin-top:1px; flex:none }
+button.act { padding:13px 18px; border-radius:11px; border:1px solid var(--line); background:var(--btn); color:var(--fg);
+  font-size:16px; font-weight:700; cursor:pointer; min-height:48px }
+button.primary, a.primary { background:var(--accent); color:var(--accent-fg); border-color:transparent }
+a.btn { display:inline-block; text-decoration:none; padding:13px 18px; border-radius:11px; font-weight:700; font-size:16px }
+button:disabled { opacity:.45; cursor:not-allowed }
+pre { margin:0; white-space:pre-wrap; font:12px/1.45 ui-monospace,Menlo,monospace; color:var(--muted); max-height:340px; overflow:auto }
+code.cmd { display:block; margin-top:8px; padding:8px 10px; border-radius:8px; background:var(--bg); border:1px solid var(--line);
+  font:12px/1.4 ui-monospace,Menlo,monospace; color:var(--muted); word-break:break-all }
+.sess { border-top:1px solid var(--line); padding:10px 0 }
+.sess:first-child { border-top:0 }
+.sess .hd { display:flex; flex-wrap:wrap; gap:4px 10px; align-items:baseline }
+.sess .nm { font-weight:750 }
+.sess .att { font-size:13px; margin-top:4px; display:flex; flex-wrap:wrap; gap:4px 8px }
+.sess .links { font-size:13.5px; margin-top:5px; display:flex; gap:14px; flex-wrap:wrap }
+.flags { font-size:12.5px; color:var(--warn); margin-top:4px }
+#cur.live { border:2px solid var(--accent) }
+.big { font-size:18px; font-weight:800 }
+ol.plan { margin:0; padding-left:20px } ol.plan li { margin:5px 0 }
+.err { color:var(--bad); font-weight:650; margin-top:8px }
+</style></head><body>
+<main>
+<header>
+  <h1>G1 Lab Hub</h1>
+  <span class="chip" id="daychip">-</span>
+  <span id="pcchip"></span><span id="linkchip"></span><span id="studiochip"></span>
+</header>
+
+<div class="card" id="cur" style="display:none"></div>
+
+<div class="cols">
+  <div>
+    <div class="card">
+      <h2>Start a session</h2>
+      <div class="profiles" id="profiles"></div>
+      <div class="tabs"><button id="t-sim" onclick="setMode('sim')">Rehearse in sim</button>
+        <button id="t-robot" onclick="setMode('robot')">Robot session</button></div>
+      <div id="simform">
+        <label class="f" for="course">Course (sim/courses)</label>
+        <select id="course"></select>
+        <div class="muted" style="font-size:13px; margin-top:6px">lab-door-real: the scanned lab door. rp-door-rope / rp-rope-behind: the rope behind the robot.
+          Same chain as the robot: MuJoCo, the SONIC runner, the node, a simulated MID-360. The panel opens on port 8771.</div>
+      </div>
+      <div id="robotform" style="display:none">
+        <div class="row">
+          <div><label class="f" for="ga">first goal ahead (m)</label><input id="ga" type="number" step="0.1" value="1.5" style="width:110px"></div>
+          <div><label class="f" for="gl">left (m)</label><input id="gl" type="number" step="0.1" value="0.0" style="width:110px"></div>
+        </div>
+        <div class="muted" style="font-size:13px; margin:6px 0 8px">The goal can change on the panel before every GO. The runner waits for the panel's Arm.</div>
+        <div id="checklist">
+          <label class="check"><input type="checkbox" id="c-gantry"><span><b>Gantry</b>: the robot hangs in the gantry with the feet on the floor; the gantry takes the weight when the runner starts</span></label>
+          <label class="check"><input type="checkbox" id="c-estop"><span><b>E-stops</b>: physical E-stop within reach; remote on and in hand (Select = E-STOP)</span></label>
+          <label class="check"><input type="checkbox" id="c-remote"><span><b>Rope and spotter</b>: rope held high (above ~1.6 m); spotter to the side and at least 1 m back (the student can back up)</span></label>
+          <label class="check"><input type="checkbox" id="c-clear"><span><b>Clear</b>: nobody within the robot's reach; walking area clear for the goal plus ~0.5 m</span></label>
+        </div>
+      </div>
+      <label class="f" for="note">Note for this session (optional)</label>
+      <input id="note" type="text" placeholder="e.g. door attempt 1, rope held by Sam" style="width:100%">
+      <code class="cmd" id="cmd">-</code>
+      <div style="margin-top:10px"><button class="act primary" id="startbtn" onclick="start()">Start</button></div>
+      <div class="err" id="err"></div>
+    </div>
+  </div>
+  <div>
+    <div class="card">
+      <h2>Today's plan</h2>
+      <ol class="plan" id="plan">
+        <li><b>Rehearse</b> each profile in sim on <i>lab-door-real</i> or <i>rp-door-rope</i> (one walk each): the PC, bundles and panel, end to end.</li>
+        <li><b>Preflight</b>: robot on, in the gantry, mode <i>ai</i>; link up; run doctor; remote on.</li>
+        <li><b>Warm-up</b> with the baseline profile, 1.5 m ahead in the open: SONIC, the rope with the near-rear blind, the map, the temperatures.</li>
+        <li><b>Same walk</b> with the candidate profile, then 2.0 m. Watch plan latency and turns.</li>
+        <li><b>Door</b>: goal 0.5 m past the door line; rope high, spotter to the side and at least 1 m back; Clear map before each GO.</li>
+        <li><b>Stop rules</b>: any E-STOP ends the session (check the robot); ankles at 60 °C rest the robot; two caught falls stop that profile for the day.</li>
+        <li>Tag every attempt on the panel before ending the session.</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h2>Preflight</h2>
+      <div id="pre"></div>
+      <div style="margin-top:10px"><button class="act" id="docbtn" onclick="doctor()">Run doctor (read-only)</button></div>
+      <pre id="docout" style="margin-top:10px"></pre>
+    </div>
+  </div>
+</div>
+
+<div class="card"><h2>Today's sessions</h2><div id="sessions"><div class="muted">None yet.</div></div></div>
+</main>
+<script>
+const T = "__TOKEN__";
+const $ = id => document.getElementById(id);
+let S = null, mode = 'sim', profile = null, course = null, planSet = false;
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function pill(t, c) { return '<span class="pill ' + c + '">' + esc(t) + '</span>'; }
+function f(v, d) { return v === null || v === undefined ? '-' : (+v).toFixed(d); }
+const host = location.protocol + '//' + location.hostname;
+async function api(path, body) {
+  const r = await fetch(path + (path.includes('?') ? '&' : '?') + 't=' + T, body ? {method:'POST', body:JSON.stringify(body)} : {cache:'no-store'});
+  return r.json();
+}
+function req() {
+  const r = {mode, profile, note: $('note').value || undefined};
+  if (mode === 'sim') r.course = $('course').value;
+  else { r.goal = [+$('ga').value, +$('gl').value]; r.confirm = {gantry:$('c-gantry').checked, estop:$('c-estop').checked,
+         remote:$('c-remote').checked, clear:$('c-clear').checked}; }
+  return r;
+}
+function setMode(m) {
+  mode = m; $('t-sim').className = m === 'sim' ? 'on' : ''; $('t-robot').className = m === 'robot' ? 'on' : '';
+  $('simform').style.display = m === 'sim' ? '' : 'none'; $('robotform').style.display = m === 'robot' ? '' : 'none';
+  $('startbtn').textContent = m === 'sim' ? 'Start sim rehearsal' : 'Start robot session (runner waits for Arm)';
+  showCmd();
+}
+async function showCmd() {
+  if (!profile) return;
+  const r = await api('/api/command?req=' + encodeURIComponent(JSON.stringify(req())));
+  $('cmd').textContent = r.ok ? r.cmd : r.error;
+}
+async function start() {
+  $('err').textContent = '';
+  if (mode === 'robot' && !confirm('Start the robot session with ' + profile + '? Recorder, lidar and the panel come up; the runner starts only on the panel\'s Arm.')) return;
+  const r = await api('/api/start', req());
+  if (!r.ok) { $('err').textContent = r.error; return; }
+  refresh();
+}
+async function stop() {
+  if (!confirm('Stop this session? (sim, or a robot session before Arm / after E-STOP)')) return;
+  const r = await api('/api/stop', {}); if (!r.ok) alert(r.error); refresh();
+}
+async function doctor() { const r = await api('/api/doctor', {}); if (!r.ok) alert(r.error); refresh(); }
+
+function renderProfiles(list) {
+  if (!profile) { const d = list.find(p => p.name === 'deploy') || list[0]; profile = d && d.name; }
+  $('profiles').innerHTML = list.map(p => '<label class="prof' + (p.name === profile ? ' sel' : '') + '"><input type="radio" name="prof" value="' +
+    esc(p.name) + '"' + (p.name === profile ? ' checked' : '') + ' onchange="profile=this.value; render(S); showCmd()"><span class="nm">' +
+    (p.student ? esc(p.student) + ' · ' : '') + esc(p.name) + '</span>' + (p.private ? ' ' + pill('private', 'na') : '') + (p.error ? ' ' + pill('invalid', 'bad') : !p.bundle_ok ? ' ' + pill('bundle missing', 'bad') : '') +
+    '<div class="ds">' + esc(p.description || p.error || '') + '</div>' + (p.error ? '' : '<div class="tg">' +
+    [p.bundle, p.rules, 'guards ' + p.guards, p.lookahead ? 'lookahead ' + p.lookahead + ' m' : null,
+     p.blind && p.blind[0] ? 'blind ' + p.blind[0] + '° < ' + p.blind[1] + ' m' : 'full lidar'].filter(Boolean).map(t => '<span class="chip">' + esc(t) + '</span>').join('') + '</div>') +
+    '</label>').join('');
+}
+function renderCur(c) {
+  const box = $('cur');
+  if (!c) { box.style.display = 'none'; return; }
+  box.style.display = ''; box.className = 'card' + (c.running ? ' live' : '');
+  const port = c.panel_port, url = host + ':' + port + '/?t=' + T, p = c.panel || {};
+  const since = Math.round((Date.now() / 1000 - c.started) / 60);
+  box.innerHTML = '<h2>' + (c.running ? 'Session running' : 'Last session ended') + '</h2>' +
+    '<div class="big">' + esc(c.mode === 'robot' ? 'ROBOT' : 'SIM') + ' · ' + esc(c.profile) + (c.course ? ' · ' + esc(c.course) : '') + '</div>' +
+    '<div class="muted" style="margin:4px 0 10px">' + (c.running ? 'started ' + since + ' min ago' + (p.runner ? ' · runner ' + esc(p.runner) + ' · student ' + esc(p.phase || '-') +
+      ' · next: <b>' + esc(p.next || '-') + '</b> · ' + p.attempts + ' attempts' : ' · panel starting...') : 'exit ' + esc(c.exit)) + '</div>' +
+    (c.running ? '<a class="btn primary" href="' + url + '" target="_blank" rel="noopener">Open the panel</a> ' +
+      (c.mode === 'sim' || ['not started', 'E-STOP'].includes(p.runner) ? '<button class="act" onclick="stop()">Stop session</button>' : '<span class="muted">End it from the panel.</span>') : '') +
+    '<code class="cmd">' + esc(c.cmd) + '</code>';
+  $('startbtn').disabled = !!c.running;
+}
+function renderPre(s) {
+  const pc = s.pc, rl = s.robot_link, busy = pc.busy || [];
+  const gpu = pc.gpu ? 'GPU ' + f(pc.gpu.util_pct, 0) + ' %' : 'GPU -';
+  const rows = [
+    [busy.length ? 'warn' : 'ok', 'Deploy PC', busy.length ? busy.join('; ') : 'quiet · load ' + f(pc.load && pc.load[0], 1) + ' on ' + pc.cpus + ' cores · ' + gpu + ' · ' + pc.disk_free_gb + ' GB free'],
+    [rl.carrier ? 'ok' : 'bad', 'Robot link ' + rl.iface, rl.carrier ? 'cable up (robot ' + esc(rl.robot) + ')' : 'no carrier: robot off or cable out'],
+    [rl.livox_driver ? 'ok' : 'warn', 'MID-360 driver', rl.livox_driver ? 'livox_ros_driver2 running (reused)' : 'not running: the robot session starts it'],
+    [s.studio.linked ? 'ok' : 'na', 'Deploy Studio', s.studio.linked ? 'sessions appear in Replay (link ' + esc(s.studio.linked.split('/').slice(-2).join('/')) + ')' : 'no Studio data directory'],
+  ];
+  $('pre').innerHTML = rows.map(r => '<div class="check"><span>' + pill({ok:'OK', warn:'CHECK', bad:'NO-GO', na:'n/a'}[r[0]], r[0]) +
+    '</span><span><b>' + esc(r[1]) + '</b><br><span class="muted" style="font-size:13px">' + r[2] + '</span></span></div>').join('');
+  const d = s.doctor; $('docbtn').disabled = d.running;
+  $('docout').textContent = d.running ? 'doctor running...' : (d.output || '');
+}
+function renderSessions(list) {
+  if (!list.length) return;
+  $('sessions').innerHTML = list.map(x => {
+    const att = x.attempts.map(a => pill('#' + a.n + ' ' + (a.result || 'walking') + (a.tag ? ' · ' + a.tag : ''),
+      a.result === 'arrived' ? 'ok' : a.result === 'E-STOP' ? 'bad' : a.result ? 'na' : 'warn') + (a.note ? ' <span class="muted">' + esc(a.note) + '</span>' : '')).join(' ');
+    return '<div class="sess"><div class="hd"><span class="nm">' + esc(x.name) + '</span>' + pill(x.mode || '-', x.mode === 'robot' ? 'warn' : 'na') +
+      '<span class="muted">' + esc(x.profile || '') + (x.identity ? ' · ' + esc(x.identity) : '') + (x.task ? ' · ' + esc(x.task) : '') + '</span></div>' +
+      (x.note ? '<div class="muted" style="font-size:13px">' + esc(x.note) + '</div>' : '') +
+      '<div class="att">' + (att || '<span class="muted">no attempts</span>') + '</div>' +
+      (x.flags.length ? '<div class="flags">' + x.flags.slice(0, 4).map(esc).join('<br>') + '</div>' : '') +
+      '<div class="links">' + (x.report ? '<a href="/report?s=' + encodeURIComponent(x.name) + '&t=' + T + '" target="_blank">Report</a>' : '<span class="muted">' + (x.ended ? 'no report' : 'running') + '</span>') +
+      '<a href="' + host + ':' + S.studio.port + '/?session=' + encodeURIComponent(x.studio) + '" target="_blank" rel="noopener">Replay in Studio</a></div></div>';
+  }).join('');
+}
+function render(s) {
+  if (!s) return; S = s;
+  $('daychip').textContent = s.day.split('/').pop();
+  const busy = (s.pc.busy || []).length;
+  $('pcchip').innerHTML = pill(busy ? 'PC busy' : 'PC quiet', busy ? 'warn' : 'ok');
+  $('linkchip').innerHTML = pill(s.robot_link.carrier ? 'robot link up' : 'robot link down', s.robot_link.carrier ? 'ok' : 'bad');
+  $('studiochip').innerHTML = s.studio.linked ? '<a class="chip" href="' + host + ':' + s.studio.port + '/" target="_blank" rel="noopener">Deploy Studio</a>' : '';
+  renderProfiles(s.profiles);
+  const sel = $('course'); if (!sel.options.length) { sel.innerHTML = s.courses.map(c => '<option>' + esc(c) + '</option>').join(''); sel.onchange = showCmd; }
+  renderCur(s.current); renderPre(s); renderSessions(s.sessions);
+  if (s.plan && s.plan.length && !planSet) { $('plan').innerHTML = s.plan.map(x => '<li><b>' + esc(x[0]) + '</b>' + (x[1] ? ': ' + esc(x[1]) : '') + '</li>').join(''); planSet = true; }
+}
+async function refresh() { try { render(await api('/api/state')); } catch (e) { $('daychip').textContent = 'hub unreachable'; } }
+['ga', 'gl', 'note'].forEach(id => $(id).addEventListener('change', showCmd));
+setMode('sim'); refresh().then(showCmd); setInterval(refresh, 2000);
+</script></body></html>

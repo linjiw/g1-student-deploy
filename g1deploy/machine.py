@@ -19,7 +19,8 @@ from pathlib import Path
 LOAD_FRAC = 0.35  # 1-min load average above this share of the cores = busy (the bad batch: 17 / 28 = 0.6)
 GPU_UTIL = 60  # % GPU utilisation (median of a short sample) above this = busy; idle desktop + lidar stack ~35 %
 # another real-time chain: two on one DDS domain cross-talk (and on the robot, two runners)
-CHAIN = (r"sim/realtime/robot_sim\.py", r"g1deploy/node\.py", r"g1_deploy_onnx_ref", r"g1deploy/console\.py")
+# the console only as `sim` / `robot` (not `g1 lab`, the hub, nor `g1 doctor` and the other wrappers)
+CHAIN = (r"sim/realtime/robot_sim\.py", r"g1deploy/node\.py", r"g1_deploy_onnx_ref", r"g1deploy/console\.py (sim|robot)\b")
 # heavy offline jobs of this kit that compete with a real-time run; G1_HEAVY_JOBS adds regexes (comma-separated)
 HEAVY = (r"tools/replay_plans\.py", r"tools/bench_planner\.py", r"tools/profile_\w+\.py", r"tools/render_session\.py",
          r"tools/debug_plan\.py", r"tools/lio_replay\.py")

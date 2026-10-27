@@ -263,6 +263,8 @@ def build(d: Path):
     rep["truth"] = truth_section(d, session, rec_status)
     notes = d / "notes.jsonl"
     rep["notes"] = [json.loads(l) for l in notes.read_text().splitlines() if l.strip()] if notes.exists() else []
+    att = d / "attempts.jsonl"  # the panel's attempt log with the operator's tags (g1deploy/attempts.py)
+    rep["attempts"] = [json.loads(l) for l in att.read_text().splitlines() if l.strip()] if att.exists() else []
     rep["runner_csv"] = sorted(p.name for p in (d / "runner_csv").rglob("*.csv"))[:40] if (d / "runner_csv").is_dir() else None
     rep["files"] = {p.name: p.stat().st_size for p in sorted(d.iterdir()) if p.is_file()}
     rep["size_mb"] = round(sum(p.stat().st_size for p in d.rglob("*") if p.is_file()) / 1e6, 1)
@@ -334,6 +336,15 @@ def markdown(rep):
     for k, v in rep["meta"].items():
         L.append(f"- {k}: `{v}`")
     L += ["", "## Look at first", ""] + ([f"- {f}" for f in rep["flags"]] or ["- nothing flagged"])
+    if rep.get("attempts"):
+        L += ["", "## Attempts (panel)", "", "| # | goal ahead, left m | result | tag | s | walked m | max tilt | "
+              "max latency s | no-safe / plans | note |", "|---|---|---|---|---|---|---|---|---|---|"]
+        for a in rep["attempts"]:
+            g = a.get("goal_rel")
+            L.append(f"| {a.get('n')} | {'' if not g else f'{g[0]:.1f}, {g[1]:.1f}'} | {a.get('result')} | "
+                     f"{a.get('tag') or ''} | {a.get('duration_s', '')} | {a.get('walked_m', '')} | {a.get('max_tilt', '')} | "
+                     f"{a.get('max_latency_s', '')} | {a.get('no_safe_plans', 0)} / {a.get('plans', 0)} | "
+                     f"{(a.get('note') or '').replace('|', '/')} |")
     n = rep["node"]
     L += ["", "## Walks (node legs)", "", "| # | start s | end | duration s | arrive dist m | retargets |",
           "|---|---|---|---|---|---|"]

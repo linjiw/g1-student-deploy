@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G1 Lab Console</title>
+<style>
+:root { --bg:#f4f5f7; --fg:#15181d; --muted:#5d6572; --card:#fff; --line:#d8dce2; --btn:#e9ecf1;
+  --ok:#1b7a40; --warn:#9a5d00; --bad:#c0262d; --accent:#1f5fbf; --accent-fg:#fff;
+  --m-bg:#fbfbfc; --m-ground:#e3e7ec; --m-low:#e7b53c; --m-obst:#de7a35; --m-tall:#b8392a; --m-over:#3f7fdc;
+  --m-path:#0e9384; --m-goal:#1b7a40; --m-self:#a9a1c9; --m-blind:rgba(110,116,128,.22); --m-ring:rgba(80,88,100,.35); --m-robot:#15181d; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#101215; --fg:#e7e9ed; --muted:#9aa2ae;
+  --card:#191c21; --line:#2b3038; --btn:#242830; --ok:#46b46f; --warn:#e0a23c; --bad:#ff5d62; --accent:#6aa0ff;
+  --accent-fg:#0b1220; --m-bg:#14171b; --m-ground:#262b33; --m-low:#d6a83a; --m-obst:#d9783a; --m-tall:#e0574a;
+  --m-over:#5b97ef; --m-path:#2cc2ae; --m-goal:#46b46f; --m-self:#7d74a8; --m-blind:rgba(150,156,168,.20); --m-ring:rgba(170,178,190,.30);
+  --m-robot:#e7e9ed; } }
+* { box-sizing:border-box }
+body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif; }
+#estop { position:sticky; top:0; z-index:20; display:block; width:100%; margin:0; padding:20px 0; border:0;
+  background:var(--bad); color:#fff; font-size:30px; font-weight:800; letter-spacing:.08em; cursor:pointer;
+  box-shadow:0 4px 14px rgba(0,0,0,.25); }
+#estop:active { filter:brightness(.85) }
+main { max-width:1180px; margin:0 auto; padding:10px 16px 40px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin:0 0 12px; }
+h2 { font-size:13px; margin:0 0 8px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; font-weight:700 }
+.top { display:flex; flex-wrap:wrap; gap:6px 14px; align-items:baseline; margin:4px 0 10px }
+.top .title { font-weight:800; font-size:17px }
+.chip { display:inline-block; padding:2px 9px; border-radius:99px; border:1px solid var(--line); font-size:13px; color:var(--muted) }
+.chip b { color:var(--fg); font-weight:650 }
+.strip { display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); gap:8px 14px }
+.k { color:var(--muted); font-size:11.5px; text-transform:uppercase; letter-spacing:.04em }
+.v { font-weight:650; font-variant-numeric:tabular-nums; overflow-wrap:anywhere }
+.pill { display:inline-block; padding:1px 9px; border-radius:99px; font-weight:700; font-size:13.5px }
+.ok { background:color-mix(in srgb, var(--ok) 16%, transparent); color:var(--ok) }
+.warn { background:color-mix(in srgb, var(--warn) 18%, transparent); color:var(--warn) }
+.bad { background:color-mix(in srgb, var(--bad) 16%, transparent); color:var(--bad) }
+.na { background:color-mix(in srgb, var(--muted) 14%, transparent); color:var(--muted) }
+#next { border:2px solid var(--accent) }
+#next.estop { border-color:var(--bad) }
+#next .step { font-size:21px; font-weight:800; margin:2px 0 4px }
+#next .detail { color:var(--muted); margin-bottom:10px }
+.btns { display:flex; flex-wrap:wrap; gap:8px }
+button.act { padding:13px 16px; border-radius:11px; border:1px solid var(--line); background:var(--btn); color:var(--fg);
+  font-size:16px; font-weight:700; cursor:pointer; min-height:48px }
+button.act small { display:block; font-weight:500; font-size:12px; color:var(--muted) }
+button.primary { background:var(--accent); color:var(--accent-fg); border-color:transparent }
+button.primary small { color:color-mix(in srgb, var(--accent-fg) 80%, transparent) }
+button:disabled { opacity:.45; cursor:not-allowed }
+.cols { display:grid; grid-template-columns:minmax(0, 1.15fr) minmax(0, 1fr); gap:12px; align-items:start }
+@media (max-width: 820px) { .cols { grid-template-columns:minmax(0, 1fr) } }
+#mapwrap { position:relative; width:100%; aspect-ratio:1 / 1; background:var(--m-bg); border-radius:10px; overflow:hidden;
+  border:1px solid var(--line); touch-action:manipulation }
+#map { width:100%; height:100%; display:block; cursor:crosshair }
+#mapmsg { position:absolute; inset:auto 8px 8px 8px; font-size:12.5px; color:var(--muted); text-align:right; pointer-events:none }
+.legend { display:flex; flex-wrap:wrap; gap:4px 12px; font-size:12.5px; color:var(--muted); margin:8px 0 2px }
+.legend i { display:inline-block; width:11px; height:11px; border-radius:3px; margin-right:5px; vertical-align:-1px }
+.goalrow { display:flex; gap:8px; align-items:end; flex-wrap:wrap; margin-top:8px }
+.goalrow label { font-size:12px; color:var(--muted); display:block }
+.goalrow input { width:86px; padding:10px; font-size:16px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg) }
+.meter { display:grid; grid-template-columns:110px 1fr 78px; gap:8px; align-items:center; margin:7px 0 }
+.meter .lab { font-size:13px; color:var(--muted) }
+.meter .val { text-align:right; font-variant-numeric:tabular-nums; font-weight:650; font-size:14px }
+.bar { position:relative; height:10px; border-radius:5px; background:color-mix(in srgb, var(--muted) 16%, transparent) }
+.bar .fill { position:absolute; left:0; top:0; bottom:0; border-radius:5px; background:var(--ok) }
+.bar .mark { position:absolute; top:-3px; bottom:-3px; width:2px; background:var(--fg); opacity:.55 }
+.checks { list-style:none; margin:0; padding:0 }
+.checks li { display:grid; grid-template-columns:62px 1fr; gap:8px; padding:6px 0; border-top:1px solid var(--line) }
+.checks li:first-child { border-top:0 }
+.checks .t { font-weight:650 } .checks .d { color:var(--muted); font-size:13px }
+.ladder { list-style:none; margin:0; padding:0; counter-reset:s }
+.ladder li { display:grid; grid-template-columns:26px 1fr; gap:8px; padding:5px 0; align-items:start }
+.ladder .dot { width:22px; height:22px; border-radius:50%; display:grid; place-items:center; font-size:12px; font-weight:800;
+  border:2px solid var(--line); color:var(--muted) }
+.ladder li.done .dot { background:var(--ok); border-color:var(--ok); color:#fff }
+.ladder li.now .dot { border-color:var(--accent); color:var(--accent) }
+.ladder li.blocked .dot { border-color:var(--bad); color:var(--bad) }
+.ladder li.done .lbl { color:var(--muted) }
+.ladder li.now .lbl { font-weight:800 }
+.ladder .det { font-size:12.5px; color:var(--muted) }
+.att { border-top:1px solid var(--line); padding:9px 0 }
+.att:first-of-type { border-top:0 }
+.att .head { display:flex; flex-wrap:wrap; gap:4px 12px; align-items:baseline }
+.att .n { font-weight:800 }
+.att .facts { font-size:13px; color:var(--muted); margin:3px 0 6px }
+.tags { display:flex; flex-wrap:wrap; gap:6px }
+.tags button { padding:7px 11px; border-radius:99px; border:1px solid var(--line); background:var(--btn); color:var(--fg);
+  font-size:13.5px; cursor:pointer; min-height:36px }
+.tags button.on { background:var(--accent); color:var(--accent-fg); border-color:transparent }
+.note { width:100%; margin-top:6px; padding:8px; font:inherit; font-size:14px; border-radius:8px; border:1px solid var(--line);
+  background:var(--bg); color:var(--fg) }
+.grid4 { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:8px }
+pre { margin:0; white-space:pre-wrap; font:12px/1.45 ui-monospace,Menlo,monospace; color:var(--muted) }
+#conn { font-size:12px; color:var(--muted) }
+#conn.lost { color:var(--bad); font-weight:700 }
+a { color:var(--accent) }
+.muted { color:var(--muted) }
+</style></head><body>
+<button id="estop" onclick="send({act:'estop'})" aria-label="Emergency stop">E-STOP</button>
+<main>
+<div class="top">
+  <span class="title">G1 Lab Console</span>
+  <span class="chip" id="mode">-</span>
+  <span class="chip">policy <b id="profile">-</b></span>
+  <span class="chip">identity <b id="ident">-</b></span>
+  <span class="chip" id="setup">-</span>
+  <span id="conn">connecting...</span>
+  <a id="hub" href="#" style="display:none; margin-left:auto">Lab hub</a>
+</div>
+
+<div class="card"><div class="strip">
+  <div><div class="k">runner</div><div class="v" id="runner">-</div></div>
+  <div><div class="k">driving</div><div class="v" id="driving">-</div></div>
+  <div><div class="k">student</div><div class="v" id="phase">-</div></div>
+  <div><div class="k">remote</div><div class="v" id="remote">-</div></div>
+  <div><div class="k">goal left</div><div class="v" id="goal">-</div></div>
+  <div><div class="k">plans · rule</div><div class="v" id="rule">-</div></div>
+</div></div>
+
+<div class="card" id="next">
+  <h2>Next step</h2>
+  <div class="step" id="nstep">-</div>
+  <div class="detail" id="ndetail"></div>
+  <div class="btns" id="nbtns"></div>
+</div>
+
+<div class="cols">
+  <div>
+    <div class="card">
+      <h2>What the planner sees</h2>
+      <div id="mapwrap"><canvas id="map"></canvas><div id="mapmsg">waiting for the planner's map</div></div>
+      <div class="legend">
+        <span><i style="background:var(--m-ground)"></i>floor</span><span><i style="background:var(--m-low)"></i>low &lt; 0.3 m</span>
+        <span><i style="background:var(--m-obst)"></i>obstacle &lt; 1 m</span><span><i style="background:var(--m-tall)"></i>tall</span>
+        <span><i style="background:var(--m-over)"></i>overhead</span><span><i style="background:var(--m-self)"></i>self returns</span><span><i style="background:var(--m-blind)"></i>rear blind</span>
+        <span><i style="background:var(--m-path)"></i>plan</span><span><i style="background:var(--m-goal)"></i>goal</span>
+      </div>
+      <div class="muted" style="font-size:12.5px">Robot at the centre, facing up; rings every metre. Tap the map to pick a goal, then Set goal.</div>
+      <div class="goalrow">
+        <div><label for="ga">ahead (m)</label><input id="ga" type="number" step="0.1" value="2.0"></div>
+        <div><label for="gl">left (m)</label><input id="gl" type="number" step="0.1" value="0.0"></div>
+        <button class="act" id="setgoal" onclick="setGoal()">Set goal<small>relative to the robot now</small></button>
+      </div>
+    </div>
+  </div>
+  <div>
+    <div class="card"><h2>Live</h2><div id="meters"></div></div>
+    <div class="card"><h2>Checks</h2><ul class="checks" id="checks"></ul></div>
+  </div>
+</div>
+
+<div class="card"><h2>Attempts</h2><div id="attempts"><div class="muted">No attempt yet: every GO becomes one, closed on arrival, stop, E-STOP or takeover.</div></div></div>
+
+<div class="cols">
+  <div class="card"><h2>Ladder</h2><ol class="ladder" id="ladder"></ol></div>
+  <div class="card"><h2>All actions</h2><div class="grid4">
+    <button class="act" id="b-arm" onclick="doAct('arm')">Arm<small>start the runner</small></button>
+    <button class="act" onclick="doAct('s')">Start SONIC<small>s · stand on SONIC</small></button>
+    <button class="act primary" id="b-go" onclick="doAct('g')">GO<small id="gohint">g · student walks</small></button>
+    <button class="act" onclick="doAct('h')">Stand<small>h · student settles</small></button>
+    <button class="act" onclick="doAct('t')">Takeover<small>t · SONIC planner</small></button>
+    <button class="act" onclick="doAct('c')">Clear map<small>c · nobody close</small></button>
+  </div>
+  <div style="margin-top:12px"><h2>Events</h2><pre id="events"></pre></div></div>
+</div>
+
+<div class="card"><button class="act" style="width:100%" onclick="doAct('quit')">End session<small>q · stops the runner, writes the report (robot in the gantry or sitting)</small></button>
+<pre id="dir" style="margin-top:8px"></pre></div>
+</main>
+<script>
+const T = "__TOKEN__", HUB_PORT = "__HUB_PORT__";
+const $ = id => document.getElementById(id);
+let S = null, M = null, pending = null, lastOk = 0;
+const CONFIRM = {
+  arm: "ARM: start the runner? It releases Unitree's controller (the gantry takes the weight) and ramps the joints to the stand pose.",
+  s: "Start SONIC control? The robot stands on SONIC.",
+  g: "GO: hand control to the student planner?",
+  c: "Clear the map? Only while standing, with nobody and nothing close to the robot. The node maps again from here; GO waits 10 s.",
+  quit: "End the session? This stops the runner: robot in the gantry or sitting."
+};
+async function send(m) {
+  try { const r = await fetch('/act?t=' + T, {method:'POST', body:JSON.stringify(m)});
+        if (!r.ok) alert('console refused: ' + r.status); return r.ok; }
+  catch (e) { alert('console unreachable: ' + e); return false; }
+}
+function doAct(k) {
+  if (CONFIRM[k] && !confirm(CONFIRM[k])) return;
+  send({act: k});
+}
+function setGoal() {
+  const a = +$('ga').value, l = +$('gl').value;
+  if (!isFinite(a) || !isFinite(l)) return;
+  if (Math.hypot(a, l) > 4.5 && !confirm('Goal ' + Math.hypot(a, l).toFixed(1) + ' m away: sure?')) return;
+  send({act:'goal', ahead:a, left:l}).then(ok => { if (ok) pending = null; });
+}
+function f(v, d, u) { return (v === null || v === undefined || Number.isNaN(+v)) ? '-' : (+v).toFixed(d) + (u || ''); }
+function pill(text, cls) { return '<span class="pill ' + cls + '">' + text + '</span>'; }
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+const NEXT_BTNS = {
+  arm: [['arm', 'Arm: start the runner', 'primary']],
+  sonic: [['s', 'Start SONIC', 'primary']],
+  map: [['c', 'Clear map', 'primary'], ['skip-map', 'Skip (map as it is)', '']],
+  goal: [['focus-goal', 'Set a goal below', 'primary']],
+  go: [['g', 'GO', 'primary'], ['c', 'Clear map first', '']],
+  walk: [['h', 'Stand', ''], ['t', 'Takeover', '']],
+  tag: [['focus-tag', 'Tag it below', 'primary']],
+  estop: [['quit', 'End session', 'primary']],
+};
+function renderNext(s) {
+  const now = s.ladder.find(x => x.state === 'now');
+  $('next').className = 'card' + (now && now.key === 'estop' ? ' estop' : '');
+  $('nstep').textContent = now ? now.label : 'Ready';
+  $('ndetail').textContent = now ? now.detail : '';
+  const b = $('nbtns'); b.innerHTML = '';
+  for (const [k, label, cls] of (now && NEXT_BTNS[now.key]) || []) {
+    const e = document.createElement('button'); e.className = 'act ' + cls; e.textContent = label;
+    if (k === 'g' && !goReady(s)) e.disabled = true;
+    e.onclick = () => {
+      if (k === 'focus-goal') { $('ga').focus(); $('ga').scrollIntoView({block:'center'}); }
+      else if (k === 'focus-tag') { const el = document.querySelector('.att:last-of-type'); if (el) el.scrollIntoView({block:'center'}); }
+      else if (k === 'skip-map') { skipMap = true; }
+      else doAct(k);
+    };
+    b.appendChild(e);
+  }
+}
+let skipMap = false;
+function goReady(s) { return s.runner === 'CONTROL' && s.node_ready && !(s.go_settle_left_s > 0); }
+
+function meter(label, v, max, warnAt, badAt, unit, d, marks) {
+  const has = v !== null && v !== undefined && !Number.isNaN(+v);
+  const p = has ? Math.max(0, Math.min(1, v / max)) * 100 : 0;
+  const col = !has ? 'transparent' : v >= badAt ? 'var(--bad)' : v >= warnAt ? 'var(--warn)' : 'var(--ok)';
+  const mk = (marks || []).map(m => '<span class="mark" style="left:' + (m / max * 100) + '%"></span>').join('');
+  return '<div class="meter"><span class="lab">' + label + '</span><div class="bar"><div class="fill" style="width:' + p +
+    '%;background:' + col + '"></div>' + mk + '</div><span class="val">' + (has ? (+v).toFixed(d) + unit : '-') + '</span></div>';
+}
+function renderMeters(s) {
+  const n = s.node || {}, te = n.tilt_estop || 0.75, t = s.temps;
+  let h = meter('tilt', s.tilt_rad, te, 0.45, 0.6, ' rad', 2, [0.6]);
+  h += meter('plan latency', s.latency_s, 0.6, 0.25, 0.45, ' s', 2, [0.25]);
+  h += meter('lidar age', s.cloud_age_s, 1.0, 0.3, 0.6, ' s', 2, []);
+  h += meter('loop lag (max)', n.max_lag_s, 0.6, 0.35, 0.5, ' s', 2, [0.35]);
+  h += meter('pelvis height', s.pelvis_z_m, 1.0, 9, 9, ' m', 2, [0.6]);
+  if (t) { h += meter('ankles', t.ankle_c, 90, 60, 75, ' °C', 0, [60, 75]); h += meter('hottest motor', t.max_c, 90, 60, 75, ' °C', 0, [60, 75]); }
+  $('meters').innerHTML = h;
+}
+const LV = {ok:'OK', warn:'CHECK', bad:'NO-GO', na:'n/a'};
+function renderChecks(s) {
+  $('checks').innerHTML = s.checks.map(c => '<li><span>' + pill(LV[c.level], c.level) + '</span><div><div class="t">' +
+    esc(c.label) + '</div><div class="d">' + esc(c.detail) + '</div></div></li>').join('');
+}
+function renderLadder(s) {
+  $('ladder').innerHTML = s.ladder.map((x, i) => '<li class="' + x.state + '"><span class="dot">' +
+    (x.state === 'done' ? '✓' : x.key === 'estop' ? '!' : i + 1) + '</span><div><div class="lbl">' + esc(x.label) +
+    '</div>' + (x.state === 'done' ? '' : '<div class="det">' + esc(x.detail) + '</div>') + '</div></li>').join('');
+}
+let notesTouched = {};
+function renderAttempts(s) {
+  const box = $('attempts');
+  if (!s.attempts.length) return;
+  if (document.activeElement && document.activeElement.classList.contains('note')) return;  // typing: keep it
+  box.innerHTML = s.attempts.slice().reverse().map(a => {
+    const g = a.goal_rel ? f(a.goal_rel[0], 1) + ' ahead, ' + f(a.goal_rel[1], 1) + ' left' : '-';
+    const res = a.result === null ? pill('walking', 'warn') : pill(a.result, a.result === 'arrived' ? 'ok' :
+                 a.result === 'E-STOP' ? 'bad' : 'na');
+    const facts = [a.duration_s != null ? f(a.duration_s, 1, ' s') : null, a.walked_m != null ? 'walked ' + f(a.walked_m, 2, ' m') : null,
+      a.end_goal_dist_m != null ? f(a.end_goal_dist_m, 2, ' m') + ' short' : null, a.max_tilt != null ? 'tilt ≤ ' + f(a.max_tilt, 2) : null,
+      a.max_latency_s != null ? 'latency ≤ ' + f(a.max_latency_s, 2, ' s') : null,
+      a.plans ? a.no_safe_plans + ' no-safe of ' + a.plans + ' plans' : null].filter(Boolean).join(' · ');
+    const tags = s.tags.map(t => '<button class="' + (a.tag === t ? 'on' : '') + '" onclick="tag(' + a.n + ',\'' + t +
+      '\')">' + t + '</button>').join('');
+    return '<div class="att"><div class="head"><span class="n">#' + a.n + '</span>' + res + '<span>' + esc(a.profile || '') +
+      '</span><span class="muted">goal ' + g + '</span></div><div class="facts">' + facts + '</div><div class="tags">' + tags +
+      '</div><input class="note" placeholder="note (what happened, where the spotter was...)" value="' + esc(a.note) +
+      '" onchange="tag(' + a.n + ', null, this.value)"></div>';
+  }).join('');
+}
+function tag(n, t, note) {
+  const m = {act:'tag', n:n}; if (t !== null && t !== undefined) m.tag = t; if (note !== undefined) m.note = note;
+  send(m);
+}
+function render(s) {
+  S = s;
+  $('conn').textContent = 't = ' + s.t.toFixed(0) + ' s'; $('conn').className = '';
+  $('mode').textContent = s.mode; const st = s.setup || {};
+  $('profile').textContent = st.profile || '(flags)'; $('ident').textContent = st.identity || '-';
+  $('setup').textContent = [st.bundle, st.rules, 'guards ' + st.guards, st.lookahead_m ? 'lookahead ' + st.lookahead_m + ' m' : null,
+    st.rear_blind_deg ? 'blind ' + st.rear_blind_deg + '° < ' + st.rear_blind_range_m + ' m' : 'full lidar', st.task].filter(Boolean).join(' · ');
+  $('runner').innerHTML = pill(s.runner, s.runner === 'E-STOP' ? 'bad' : s.runner === 'CONTROL' ? 'ok' : 'warn');
+  $('driving').textContent = s.driving;
+  $('phase').textContent = (s.phase || '-') + (s.node && s.node.calm_hold ? ' · calm' : '');
+  $('remote').innerHTML = s.mode.startsWith('ROBOT') ? pill(s.remote.connected ? 'ok' + (s.remote.last ? ' · ' + s.remote.last : '') : 'not seen',
+      s.remote.connected ? 'ok' : 'bad') : '<span class="muted">sim</span>';
+  $('goal').textContent = f(s.goal_dist_m, 2, ' m');
+  $('rule').textContent = (s.node && s.node.plans != null ? s.node.plans : '-') + ' · ' + ((s.node && s.node.rule) || '-');
+  const ready = goReady(s);
+  $('b-go').disabled = !ready;
+  $('gohint').textContent = ready ? 'g · student walks' : (s.runner !== 'CONTROL' ? 'Start SONIC first' : !s.node_ready ? 'planner warming up' : 'SONIC settling');
+  $('b-arm').disabled = s.runner !== 'not started';
+  if (skipMap) { const m = s.ladder.find(x => x.key === 'map'); if (m && m.state === 'now') { m.state = 'done';
+      const nx = s.ladder.find(x => x.state === 'todo'); if (nx) nx.state = 'now'; } }
+  renderNext(s); renderMeters(s); renderChecks(s); renderLadder(s); renderAttempts(s);
+  $('events').textContent = s.events.join('\n'); $('dir').textContent = s.dir;
+  if (s.goal_rel && document.activeElement !== $('ga') && document.activeElement !== $('gl') && !pending) {
+    $('ga').value = (+s.goal_rel[0]).toFixed(1); $('gl').value = (+s.goal_rel[1]).toFixed(1); }
+}
+async function tick() {
+  try {
+    const r = await fetch('/state?t=' + T, {cache:'no-store'}); render(await r.json()); lastOk = Date.now();
+    if (skipMap && S && S.attempts.length && S.attempts[S.attempts.length - 1].result === null) skipMap = false;
+  } catch (e) { $('conn').textContent = 'NO CONNECTION to the console'; $('conn').className = 'lost'; }
+}
+
+// ---- map ------------------------------------------------------------------------------------------------------
+const cv = $('map'), ctx = cv.getContext('2d');
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+const FILL = {'.':'--m-ground', '1':'--m-low', '2':'--m-obst', '3':'--m-tall', '^':'--m-over', 's':'--m-self'};
+let view = null;
+function drawMap() {
+  const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  if (!r.width) return;
+  cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+  const W = cv.width, H = cv.height;
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, W, H);
+  if (!M || !M.ok) { $('mapmsg').textContent = M && M.error ? M.error : 'waiting for the planner\'s map'; return; }
+  const half = M.half, k = Math.min(W, H) / (2 * half), cx = W / 2, cy = H / 2;
+  const [rx, ry, yaw] = M.robot, c = Math.cos(yaw), s = Math.sin(yaw);
+  view = {k, cx, cy, dpr};
+  // world (dx, dy) relative to the robot -> screen: up = ahead, left = left
+  ctx.setTransform(s * k, -c * k, -c * k, -s * k, cx, cy);
+  const res = M.res, colors = {};
+  for (const key in FILL) colors[key] = css(FILL[key]);
+  for (let i = 0; i < M.rows.length; i++) {
+    const row = M.rows[i], wx = M.x0 + i * res - rx;
+    for (let j = 0; j < row.length; j++) {
+      const ch = row[j]; if (ch === ' ') continue;
+      ctx.fillStyle = colors[ch]; ctx.fillRect(wx, M.y0 + j * res - ry, res * 1.02, res * 1.02);
+    }
+  }
+  if (M.path && M.path.length > 1) {
+    ctx.strokeStyle = css('--m-path'); ctx.lineWidth = 0.05; ctx.lineJoin = 'round'; ctx.beginPath();
+    M.path.forEach((p, i) => i ? ctx.lineTo(p[0] - rx, p[1] - ry) : ctx.moveTo(p[0] - rx, p[1] - ry)); ctx.stroke();
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  // rear blind: |azimuth| > 180 - deg/2, closer than range (screen: behind = down)
+  if (M.rear_blind_deg > 0) {
+    const h = M.rear_blind_deg / 2 * Math.PI / 180, rr = (M.rear_blind_range_m || half * 1.5) * k;
+    ctx.fillStyle = css('--m-blind'); ctx.beginPath(); ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, rr, Math.PI / 2 - h, Math.PI / 2 + h); ctx.closePath(); ctx.fill();
+  }
+  ctx.strokeStyle = css('--m-ring'); ctx.lineWidth = dpr; ctx.setLineDash([4 * dpr, 4 * dpr]);
+  ctx.font = (11 * dpr) + 'px system-ui'; ctx.fillStyle = css('--m-ring');
+  for (let m = 1; m <= half; m++) { ctx.beginPath(); ctx.arc(cx, cy, m * k, 0, 2 * Math.PI); ctx.stroke(); ctx.fillText(m + ' m', cx + 3 * dpr, cy - m * k - 3 * dpr); }
+  ctx.setLineDash([]);
+  const nb = S && S.near_body;
+  if (nb && nb.close) { ctx.strokeStyle = css('--bad'); ctx.lineWidth = 2 * dpr; ctx.beginPath(); ctx.arc(cx, cy, nb.near_m * k, 0, 2 * Math.PI); ctx.stroke(); }
+  const toScreen = (wx, wy) => { const dx = wx - rx, dy = wy - ry, a = c * dx + s * dy, l = -s * dx + c * dy; return [cx - l * k, cy - a * k]; };
+  if (M.goal) {
+    const [gx, gy] = toScreen(M.goal[0], M.goal[1]);
+    ctx.strokeStyle = css('--m-goal'); ctx.lineWidth = 2 * dpr; ctx.setLineDash([6 * dpr, 5 * dpr]);
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(gx, gy); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = css('--m-goal'); ctx.beginPath(); ctx.arc(gx, gy, 7 * dpr, 0, 2 * Math.PI); ctx.fill();
+    ctx.strokeStyle = css('--m-bg'); ctx.lineWidth = 2 * dpr; ctx.stroke();
+  }
+  if (pending) {
+    const px = cx - pending[1] * k, py = cy - pending[0] * k;
+    ctx.strokeStyle = css('--accent'); ctx.lineWidth = 2.5 * dpr; ctx.beginPath(); ctx.arc(px, py, 9 * dpr, 0, 2 * Math.PI); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(px - 13 * dpr, py); ctx.lineTo(px + 13 * dpr, py); ctx.moveTo(px, py - 13 * dpr); ctx.lineTo(px, py + 13 * dpr); ctx.stroke();
+  }
+  // the robot: shoulders ~0.45 m, facing up
+  ctx.fillStyle = css('--m-robot'); ctx.strokeStyle = css('--m-bg'); ctx.lineWidth = 2 * dpr;
+  ctx.beginPath(); ctx.ellipse(cx, cy, 0.22 * k, 0.13 * k, 0, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx, cy - 0.38 * k); ctx.lineTo(cx - 0.09 * k, cy - 0.16 * k); ctx.lineTo(cx + 0.09 * k, cy - 0.16 * k); ctx.closePath(); ctx.fill();
+  const st = M.stats || {};
+  $('mapmsg').textContent = (M.phase || '') + ' · ' + (st.solid_cells ?? '-') + ' obstacle cells · ' + (st.overhead_cells ?? '-') + ' overhead';
+}
+cv.addEventListener('click', ev => {
+  if (!view) return;
+  const r = cv.getBoundingClientRect(), x = (ev.clientX - r.left) * view.dpr, y = (ev.clientY - r.top) * view.dpr;
+  const ahead = (view.cy - y) / view.k, left = (view.cx - x) / view.k;
+  pending = [Math.round(ahead * 10) / 10, Math.round(left * 10) / 10];
+  $('ga').value = pending[0].toFixed(1); $('gl').value = pending[1].toFixed(1); drawMap();
+});
+async function mapTick() {
+  if (document.hidden) return;
+  try { const r = await fetch('/map?t=' + T, {cache:'no-store'}); M = await r.json(); } catch (e) { M = {ok:false, error:'no connection'}; }
+  drawMap();
+}
+window.addEventListener('resize', drawMap);
+if (HUB_PORT) { const h = $('hub'); h.href = location.protocol + '//' + location.hostname + ':' + HUB_PORT + '/?t=' + T; h.style.display = ''; }
+setInterval(tick, 400); tick();
+setInterval(mapTick, 700); mapTick();
+</script></body></html>

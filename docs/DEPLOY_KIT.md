@@ -55,6 +55,29 @@ and `robot`; command-line flags win.
 Stop at the first failure. Gantry or spotter, the wireless remote and the physical E-stop in hand every time. Two
 people: the remote operator watches the robot, the console operator watches the screen.
 
+**The lab hub and the panel (since 2026-10-27).** `G1_PANEL_TOKEN=... ./g1 lab` serves the day's home page on
+127.0.0.1:8769 (reached from the operator's tailnet devices like the panel). It lists the deploy profiles, starts a
+sim rehearsal (`g1 sim --profile P --arm --panel 8771 --layout COURSE`) or, after a four-item checklist (gantry,
+E-stops, rope and spotter, clear area), a robot session (`g1 robot --robot NAME --profile P --arm --panel 8770`),
+and shows the day's sessions (`runs/lab-day-YYYYMMDD/`) with their attempts, report flags, report and a Deploy Studio
+replay link (the day directory is linked into Studio's `robot-sessions`). The hub never sends anything to the
+robot: the console it starts runs in its own process group (it outlives the hub), the runner still waits for the
+panel's Arm, and a robot session with the runner up is ended from its panel only. The panel (`g1deploy/panel.html`)
+keeps the sticky E-STOP and adds the robot day around it:
+- *Next step*: the ladder (systems, Arm, stand ramp, Start SONIC, planner warm, Clear map, goal, GO, the walk, its tag)
+  with the button for the step to do now (`g1deploy/workspace.py`). GO is refused before CONTROL, before the planner is
+  warm, and for 2 s after CONTROL while SONIC settles the stand.
+- *What the planner sees*: the node's memory around the robot (`{"cmd": "map"}` on the node's control port, 10 cm
+  cells, 0.7 s refresh), robot-centred and facing up, with the rear blind, the active plan and the goal; tap to pick a
+  goal. Cells seen only from up close (the self-return signature the guards mask) have their own colour.
+- *Checks*: PC quiet, recording, lowstate, lidar age, remote (robot), motor temperatures (robot: the remote watcher
+  reports the hottest motor, ankles and knees every second; warn at 60 °C, NO-GO at 75 °C), obstacle cells within
+  0.5 m outside the blind and tall cells 1.0–1.6 m behind (standing only), node loop lag, plan latency.
+- *Attempts* (`attempts.jsonl`): every GO opens one; arrival, stop, E-STOP, takeover or a stand closes it with its
+  extremes (tilt, pelvis height, latency, no-safe plans, distance walked). The operator tags it (clean, touched,
+  stumble, caught, aborted, setup issue) and adds a note.
+The terminal console and its keys work as before; the panel and the keys drive the same actions.
+
 **H0 desk (the day before or that morning).** `./g1 doctor` all ✓; `./g1 test`; one `./g1 sim --layout open-3m`
 and one `./g1 sim --layout nav-room --mission course` (also builds the TensorRT engines and planner kernels).
 

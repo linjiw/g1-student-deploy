@@ -35,7 +35,7 @@ KEYS = {
     "self_margin": (float, None),
 }
 DEFAULTS = {"guards": "off", "planner_impl": "fused", "planner_precision": "fp32", "debug_plans": False}
-INFO = ("name", "description")
+INFO = ("name", "description", "student")  # informational: not settings, not in the identity
 
 
 class ProfileError(ValueError):

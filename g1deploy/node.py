@@ -383,6 +383,8 @@ class ControlServer:
                                                  (a spotter or rope bar that stood close is not an obstacle);
                                                  the next walk waits for CLEAR_MAP_SCAN_S of fresh frames
       {"cmd": "quit"}                         -> stand, then exit
+      {"cmd": "map"}                          -> the memory around the robot as the planner sees it, for the operator
+                                                 panel (StudentNode.map_snapshot; answered here, never queued)
     Used by the operator console (g1deploy/console.py) in simulation and on the robot."""
 
     def __init__(self, node, bind):
@@ -404,6 +406,12 @@ class ControlServer:
                 continue
             if msg.get("cmd") == "status":
                 self.sock.send_string(json.dumps(self.node.status, default=float))
+            elif msg.get("cmd") == "map":
+                try:
+                    out = self.node.map_snapshot(float(msg.get("half_m", 4.0)), float(msg.get("res_m", 0.1)))
+                except Exception as exc:  # a picture for the operator: never takes the node down
+                    out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                self.sock.send_string(json.dumps(out, default=float))
             else:
                 self.node.commands.append(msg)
                 self.sock.send_string(json.dumps({"ok": True, "queued": msg.get("cmd")}))
@@ -486,6 +494,61 @@ class StudentNode:
         self.from_sensor = CloudFromSensorFrame(self.memory.body_filter, mount, transport_s=self.args.lidar_transport_s,
                                                 rear_blind_deg=self.args.rear_blind_deg,
                                                 rear_blind_range_m=self.args.rear_blind_range_m)
+
+    MAP_CODES = {" ": "unknown", ".": "ground", "1": "low < 0.3 m", "2": "obstacle < 1.0 m", "3": "tall >= 1.0 m",
+                 "^": "overhead over free floor", "s": "obstacle seen only from up close (self-return signature)"}
+
+    def map_snapshot(self, half_m=4.0, res_m=0.1):
+        """The memory around the robot for the operator panel: a robot-centred square of `half_m`, one character per
+        `res_m` cell (MAP_CODES; the highest support and the lowest ceiling of the memory cells inside), world axes:
+        rows[i][j] is the cell at x0 + (i + 0.5) res, y0 + (j + 0.5) res. Also the robot pose, the goal, the active
+        plan's pelvis path and the rear blind, so the panel can draw what the planner works with."""
+        mem = getattr(self, "memory", None)
+        st = dict(self.status)
+        if mem is None or "xy" not in st:
+            return {"ok": False, "error": "no memory yet"}
+        k = max(1, int(round(res_m / mem.res)))
+        res = k * mem.res
+        w = int(math.ceil(2 * half_m / res)) * k  # memory cells per side, a multiple of k
+        cx, cy = st["xy"]
+        i0 = int(math.floor((cx - half_m - mem.lo[0]) / mem.res))
+        j0 = int(math.floor((cy - half_m - mem.lo[1]) / mem.res))
+        sup, ceil = np.full((w, w), np.nan), np.full((w, w), np.nan)
+        near = np.zeros((w, w), dtype=bool)
+        a0, a1 = max(i0, 0), min(i0 + w, mem.n)
+        b0, b1 = max(j0, 0), min(j0 + w, mem.n)
+        if a1 > a0 and b1 > b0:
+            with self.mem_lock:
+                sup[a0 - i0:a1 - i0, b0 - j0:b1 - j0] = mem.support[a0:a1, b0:b1]
+                ceil[a0 - i0:a1 - i0, b0 - j0:b1 - j0] = mem.ceiling[a0:a1, b0:b1]
+                if hasattr(mem, "near_only"):
+                    near[a0 - i0:a1 - i0, b0 - j0:b1 - j0] = mem.near_only()[a0:a1, b0:b1]
+        m = w // k
+        with np.errstate(invalid="ignore"):
+            obs = sup > 0.05
+        n_obs = obs.reshape(m, k, m, k).sum(axis=(1, 3))
+        n_near = (obs & near).reshape(m, k, m, k).sum(axis=(1, 3))
+        sup, ceil = sup.reshape(m, k, m, k), ceil.reshape(m, k, m, k)
+        with np.errstate(invalid="ignore"):
+            hi = np.where(np.isnan(sup), -np.inf, sup).max(axis=(1, 3))
+            lo_c = np.where(np.isnan(ceil), np.inf, ceil).min(axis=(1, 3))
+        code = np.full((m, m), " ")
+        code[hi > -np.inf] = "."
+        code[(hi > 0.05) & (hi < 0.3)] = "1"
+        code[(hi >= 0.3) & (hi < 1.0)] = "2"
+        code[hi >= 1.0] = "3"
+        code[np.isfinite(lo_c) & (hi <= 0.05)] = "^"
+        code[(n_obs > 0) & (n_near == n_obs)] = "s"  # every obstacle return of the cell came from closer than near_m
+        act = self.active
+        path = None
+        if act is not None and isinstance(act[0], dict) and "qpos" in act[0]:
+            path = np.round(np.asarray(act[0]["qpos"])[::5, :2], 3).tolist()
+        return {"ok": True, "res": res, "half": m * res / 2, "x0": mem.lo[0] + i0 * mem.res,
+                "y0": mem.lo[1] + j0 * mem.res, "rows": ["".join(r) for r in code], "codes": self.MAP_CODES,
+                "robot": [cx, cy, st.get("yaw_rad", 0.0)], "goal": st.get("goal"), "path": path,
+                "phase": st.get("phase"), "rear_blind_deg": float(self.args.rear_blind_deg or 0.0),
+                "rear_blind_range_m": float(self.args.rear_blind_range_m or 0.0),
+                "stats": dict(getattr(mem, "stats", {}))}
 
     def perception_loop(self, cloud, state, t0, stop):
         """Clouds -> memory, and the route refresh (A* on the memory grid, up to ~0.2 s) - both off the 50 Hz loop."""
@@ -949,7 +1012,9 @@ class StudentNode:
                                tilt_rad=float(tilt), xy=q[:2].tolist(), plans=len(self.log),
                                latency_s=self.log[-1]["latency_s"] if self.log else None, latency_est_s=self.latency_est,
                                cloud_age_s=float(cloud_age), lidar_frames=getattr(self.from_sensor, "stats", {}).get("frames"),
-                               overruns=self.overruns, rule=self.log[-1]["rule"] if self.log else None,
+                               overruns=self.overruns, max_lag_s=round(self.max_lag_s, 3), tilt_estop=a.tilt_estop,
+                               rule=self.log[-1]["rule"] if self.log else None,
+                               no_safe=bool(self.log[-1].get("no_safe")) if self.log else None,
                                stream_ahead=int(self.stream_end - self.tick) if self.stream_end >= 0 else None,
                                standing=self.pending_stand is None and self.phase in ("ARRIVED", "STOPPED"))
 

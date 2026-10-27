@@ -21,6 +21,8 @@ usage:
   g1 robot [--robot NAME] [--profile deploy] --iface eno1 --goal 3 0 [--odom leg|zmq] [--lidar dds|livox]
            [--mount-calib mount.json] [--body dex3|rubber] [--replay EPISODE]
   (--profile: profiles/README.md; the command line wins over the profile, the profile over the robot profile)
+  g1 lab [--port 8769] [--robot lab-g1]                 the robot day's web hub: profiles, sim rehearsal, robot session,
+                                                         today's sessions (g1deploy/hub.py)
   g1 check|calibrate|bench|replay|rehearse|test|report|discover|remote|doctor|sessions|note|courses|lidar|lio ...
                                                          (wrappers around tools/, see docs/DEPLOY_KIT.md)
 
@@ -50,7 +52,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from g1deploy import machine, profiles  # noqa: E402
+from g1deploy import machine, profiles, workspace  # noqa: E402
+from g1deploy.attempts import TAGS, Attempts  # noqa: E402
 
 LUCID = Path(os.environ.get("LUCID_DEPLOY_ROOT", Path.home() / "lucid-sonic/lucid-g1-deploy"))
 RUNNER = LUCID / "runner/target/release/g1_deploy_onnx_ref"
@@ -58,6 +61,7 @@ OBS_CONFIG = LUCID / "config/observation_config_lucid_g1_1570.yaml"
 PANELS = Path(os.environ.get("G1_TASK_PANELS", "/home/linjiw/flow/artifacts/panels/test-v1"))
 COURSES = ROOT / "sim/courses"
 ROBOTS = ROOT / "robots"
+GO_SETTLE_S = 2.0  # GO waits this long after SONIC takes control (sim: the virtual gantry lets go 1.5 s after Start)
 SESSIONS = Path(os.environ.get("G1_SESSIONS", ROOT / "runs/console"))
 # ROS 2 side of the lidar adapter (robots without Unitree's lidar service: livox_ros_driver2 on this PC)
 ROS_SETUP = os.environ.get("G1_ROS_SETUP", "/opt/ros/humble/setup.bash")
@@ -213,6 +217,16 @@ class Session:
         self.inbox = queue.Queue()  # panel buttons and remote takeover -> the main loop (E-stop never waits here)
         self.remote = {"connected": False, "samples": 0, "last": None}
         self.panel_url = None
+        # the robot-day workspace (panel): attempts, motor temperatures, the node's map, the ladder's timestamps
+        prof = getattr(args, "profile", None)
+        self.attempts = Attempts(self.dir / "attempts.jsonl", prof["name"] if prof else None)
+        self.temps, self.map_lock, self.map_cache = None, threading.Lock(), (0.0, None)
+        self.goal_rel, self.goal_t = (tuple(args.goal) if getattr(args, "goal", None) else None), 0.0
+        self.cleared_t = self.control_t = None
+        try:
+            self.identity = profiles.identity(args).get("short")
+        except Exception:
+            self.identity = None
 
     # -- processes ----------------------------------------------------------------------------------
     def start(self):
@@ -353,6 +367,7 @@ class Session:
                     self.event("runner: Init Done (standing ramp complete)")
                 if "transitioning to CONTROL" in line and not st["control"]:
                     st["control"] = True
+                    self.control_t = time.monotonic() - self.t0
                     self.event("runner: SONIC in CONTROL")
             for _, line in r.lines[-60:]:
                 st = self.runner_state
@@ -391,6 +406,7 @@ class Session:
                     self.req.connect("tcp://localhost:5562")
             except self.zmq.ZMQError:
                 pass
+        self.attempts.update(time.monotonic() - self.t0, self.node_status, estop=self.runner_state["estop"])
         if "rec" in self.procs and time.monotonic() - self.rec_read > 1.0:
             self.rec_read = time.monotonic()
             try:
@@ -404,6 +420,11 @@ class Session:
         """The node has finished building its planner (warm-up: ~25 s for the deployed bundle, longer for bundles
         with larger graphs) and answers commands. Before that a goal or GO would be lost."""
         return "node" in self.procs and self.node_status.get("phase") in self.NODE_READY
+
+    def go_settle_left(self):
+        if self.control_t is None:
+            return 0.0
+        return max(0.0, GO_SETTLE_S - (time.monotonic() - self.t0 - self.control_t))
 
     def node_cmd(self, **msg):
         try:
@@ -444,6 +465,12 @@ class Session:
                 self.event("GO refused: Start SONIC first (runner not in CONTROL)" if not st["estop"]
                            else "GO refused: runner is in E-STOP")
                 return
+            settle = self.go_settle_left()
+            if settle > 0:
+                # a GO right after Start SONIC walks off a stand SONIC has not settled (sim, 2026-10-27: GO 0.2 s
+                # after CONTROL, the virtual gantry let go mid-step and the robot fell)
+                self.event(f"GO refused: SONIC is settling the stand ({settle:.1f} s left)")
+                return
             if st["iface"] != "ZMQ":
                 r.key("#")
                 time.sleep(0.2)
@@ -463,12 +490,14 @@ class Session:
                 return
             if self.node_cmd(cmd="go"):
                 self.event("operator: GO (stream on, student plans)")
+                self.attempts.start(time.monotonic() - self.t0, self.node_status, goal_rel=self.goal_rel)
             else:
                 self.event("GO NOT DELIVERED: the node did not answer (stream is on, the student is not planning)")
         elif key == "h":
             if not self.args.replay:
                 self.node_cmd(cmd="stand")
                 self.event("operator: student stand")
+                self.attempts.close(time.monotonic() - self.t0, "operator stand", self.node_status)
         elif key == "t":
             r.key("@")  # SONIC's own planner (safety reset; streaming off)
             if self.args.replay and "node" in self.procs:
@@ -476,13 +505,15 @@ class Session:
             elif not self.args.replay:
                 self.node_cmd(cmd="stand")
             self.event("operator: TAKEOVER -> SONIC planner")
+            self.attempts.close(time.monotonic() - self.t0, "takeover", self.node_status)
         elif key == "o":
             self.estop("operator key")
             if not self.args.replay:
                 self.node_cmd(cmd="quit")
         elif key == "c":
             if not self.args.replay:
-                self.node_cmd(cmd="clear_map")
+                if self.node_cmd(cmd="clear_map"):
+                    self.cleared_t = time.monotonic() - self.t0
                 self.event("operator: CLEAR MAP (the node maps again from here; walks wait 10 s)")
         elif key == "r" and self.args.mode == "sim":
             (self.dir / "release.flag").touch()
@@ -515,6 +546,8 @@ class Session:
             if bool(m.get("connected")) != self.remote["connected"]:
                 self.event("remote: " + ("connected" if m.get("connected") else "NOT SEEN (no remote bytes in lowstate)"))
             self.remote.update(connected=bool(m.get("connected")), samples=m.get("samples", 0))
+            if m.get("temps"):
+                self.temps = m["temps"]
         elif m.get("remote") == "press":
             b = m.get("button")
             self.remote["last"] = b
@@ -538,7 +571,57 @@ class Session:
                 "pelvis_z_m": ns.get("pelvis_z_m"), "tilt_rad": ns.get("tilt_rad"), "cloud_age_s": ns.get("cloud_age_s"),
                 "record": self.record_line().strip(), "events": [f"{t:6.1f}  {e}" for t, e in self.events[-12:]][::-1],
                 "dir": str(self.dir), "remote": dict(self.remote), "node_ready": self.node_ready(),
-                "procs": {k: p.alive() for k, p in self.procs.items()}}
+                "procs": {k: p.alive() for k, p in self.procs.items()}, **self.workspace()}
+
+    def workspace_ctx(self):
+        t_map, m = self.map_cache
+        prof = getattr(self.args, "profile", None)
+        return {"mode": self.args.mode, "t": time.monotonic() - self.t0, "runner_state": dict(self.runner_state),
+                "node_status": self.node_status, "node_ready": self.node_ready(), "rec_stats": self.rec_stats,
+                "procs": {k: p.alive() for k, p in self.procs.items()}, "remote": dict(self.remote),
+                "temps": self.temps, "machine_busy": (getattr(self.args, "machine", None) or {}).get("busy") or [],
+                "near_body": workspace.near_body(m) if m is not None and time.monotonic() - t_map < 5.0 else None,
+                "attempts": self.attempts.public(), "cleared_t": self.cleared_t, "control_t": self.control_t,
+                "goal_rel": self.goal_rel, "goal_t": self.goal_t, "profile": prof}
+
+    def workspace(self):
+        """The panel's robot-day view: checks, ladder, attempts and what this session runs (g1deploy/workspace.py)."""
+        ctx = self.workspace_ctx()
+        ctx["checks"] = workspace.checks(ctx)
+        a, prof = self.args, ctx["profile"]
+        ns = self.node_status
+        return {"checks": ctx["checks"], "ladder": workspace.ladder(ctx), "attempts": ctx["attempts"],
+                "near_body": ctx["near_body"], "temps": self.temps, "goal_rel": self.goal_rel,
+                "setup": {"profile": prof["name"] if prof else None, "identity": self.identity,
+                          "bundle": Path(getattr(a, "bundle", None) or ROOT / "bundle").name,
+                          "rules": Path(a.rules).name if getattr(a, "rules", None) else None, "guards": a.guards,
+                          "lookahead_m": a.goal_lookahead, "rear_blind_deg": a.rear_blind_deg,
+                          "rear_blind_range_m": a.rear_blind_range_m, "robot": getattr(a, "robot", None),
+                          "task": Path(self.task).parent.name if getattr(self, "task", None) else None},
+                "node": {k: ns.get(k) for k in ("plans", "rule", "no_safe", "max_lag_s", "overruns", "tilt_estop",
+                                                 "guards", "last_guard", "calm_hold", "stream_ahead", "standing")},
+                "tags": list(TAGS), "go_settle_left_s": round(self.go_settle_left(), 1)}
+
+    def node_map(self):
+        """The node's map for the panel (StudentNode.map_snapshot), at most every 0.4 s whoever asks."""
+        with self.map_lock:
+            t, m = self.map_cache
+            if time.monotonic() - t < 0.4 and m is not None:
+                return m
+            if not self.node_ready():
+                return {"ok": False, "error": "the student node is not up yet (it starts on Arm)"}
+            try:
+                s = self.zmq.Context.instance().socket(self.zmq.REQ)
+                s.setsockopt(self.zmq.LINGER, 0)
+                s.connect("tcp://localhost:5562")
+                s.send_string(json.dumps({"cmd": "map"}))
+                m = json.loads(s.recv()) if s.poll(800) else {"ok": False, "error": "the node did not answer"}
+                s.close(0)
+            except Exception as exc:
+                m = {"ok": False, "error": str(exc)}
+            if m.get("ok"):
+                self.map_cache = (time.monotonic(), m)
+            return m
 
     def new_goal(self, ahead, left):
         if self.args.replay:
@@ -548,6 +631,7 @@ class Session:
             self.event("goal refused: the student node is still starting (planner warm-up)")
             return
         if self.node_cmd(cmd="goal", ahead=ahead, left=left):
+            self.goal_rel, self.goal_t = (ahead, left), time.monotonic() - self.t0
             self.event(f"operator: new goal {ahead:.1f} m ahead {left:+.1f} m left")
         else:
             self.event("goal NOT DELIVERED: the node did not answer")
@@ -598,6 +682,7 @@ class Session:
         self.frames.write(json.dumps({"wall": time.monotonic(), "text": text}) + "\n")
 
     def shutdown(self):
+        self.attempts.close(time.monotonic() - self.t0, "session ended", self.node_status)
         if "node" in self.procs and not self.args.replay:
             self.node_cmd(cmd="quit")
             time.sleep(0.5)
@@ -780,6 +865,10 @@ def main(argv=None):
     if argv and argv[0] in KIT:
         return subprocess.call([str(ROOT / ".venv/bin/python"), str(ROOT / "tools/deploy_kit.py"), *argv], env=_env(),
                                cwd=str(ROOT))
+    if argv and argv[0] == "lab":  # the robot day's home page (g1deploy/hub.py)
+        from g1deploy import hub
+
+        return hub.main(argv[1:])
     if argv and argv[0] == "test":
         return subprocess.call([str(ROOT / ".venv/bin/python"), "-m", "pytest", "-q", *argv[1:]], env=_env(), cwd=str(ROOT))
     return run_console(parse_args(argv))

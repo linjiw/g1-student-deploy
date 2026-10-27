@@ -8,7 +8,9 @@ JSON line per button press; the console turns Select into the runner's global `o
 D-up into a takeover.
 
   {"remote": "press", "button": "Select", "t": ...}     on every press edge (any button)
-  {"remote": "status", "connected": true, "samples": N, "t": ...}   every --status-s, and when the link changes
+  {"remote": "status", "connected": true, "samples": N, "temps": {...}, "t": ...}
+                                                        every --status-s, and when the link changes; `temps`: the
+                                                        motors' temperatures (hottest, ankles, knees; for the panel)
 
 usage: remote_watch.py --iface eno1 [--status-s 1.0]
 """
@@ -29,6 +31,19 @@ from tools.remote_check import decode  # noqa: E402
 STALE_S = 0.5  # no lowstate for this long: the remote link counts as lost (the console shows it)
 
 
+def motor_temps(msg, names):
+    """Hottest motor, ankles and knees (deg C, the higher of each motor's two sensors) of one LowState_."""
+    t = [max(int(v) for v in s.temperature) for s in list(msg.motor_state)[:len(names)]]
+    if not t or max(t) <= 0:
+        return None
+    hot = max(range(len(t)), key=t.__getitem__)
+
+    def group(word):
+        return max((v for v, n in zip(t, names) if word in n), default=None)
+    return {"max_c": t[hot], "max_joint": names[hot].replace("_joint", ""), "ankle_c": group("ankle"),
+            "knee_c": group("knee")}
+
+
 def emit(**kw):
     print(json.dumps({**kw, "t": round(time.monotonic(), 3)}), flush=True)
 
@@ -43,11 +58,14 @@ def main(argv=None):
     from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_
 
     ChannelFactoryInitialize(args.domain, args.iface)
-    lock, latest = threading.Lock(), {"raw": None, "n": 0, "t": 0.0}
+    from g1deploy.contract import MJ_JOINTS  # the G1's motor order
+
+    lock, latest = threading.Lock(), {"raw": None, "n": 0, "t": 0.0, "msg": None}
 
     def on_low(m):
         with lock:
             latest["raw"], latest["n"], latest["t"] = bytes(m.wireless_remote), latest["n"] + 1, time.monotonic()
+            latest["msg"] = m
 
     sub = ChannelSubscriber("rt/lowstate", LowState_)
     sub.Init(on_low, 1)
@@ -62,7 +80,13 @@ def main(argv=None):
         header = live and decode(raw)[2]
         if header != connected or now - t_status >= args.status_s:
             connected, t_status = header, now
-            emit(remote="status", connected=bool(header), samples=n, lowstate=bool(live))
+            with lock:
+                msg = latest["msg"]
+            try:
+                temps = motor_temps(msg, MJ_JOINTS) if live and msg is not None else None
+            except Exception:  # temperatures are for the panel only; the stop path never depends on them
+                temps = None
+            emit(remote="status", connected=bool(header), samples=n, lowstate=bool(live), temps=temps)
         if not live:
             last = set()
             continue
