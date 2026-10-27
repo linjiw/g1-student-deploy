@@ -49,6 +49,8 @@ h2 { font-size:15px; font-weight:650; margin:0 0 10px }
 .lchip { padding:3px 9px; border-radius:99px; border:1px solid var(--line); background:color-mix(in srgb, var(--card) 85%, transparent);
   font-size:12.5px; cursor:pointer; color:var(--muted) } .lchip.on { color:var(--fg); border-color:var(--fg) }
 #goalchip { position:absolute; left:8px; bottom:8px; padding:4px 10px; border-radius:8px; background:var(--m-goal); color:#fff; font-weight:700; font-size:13.5px }
+#checklist.need { outline:2px solid var(--accent); outline-offset:4px; border-radius:8px }
+.why.strong { font-weight:700; color:var(--accent) }
 #stale { border-left:4px solid var(--bad); background:color-mix(in srgb, var(--bad) 8%, transparent); padding:8px 12px; border-radius:6px; margin-bottom:10px; font-size:14px }
 #scanning { position:absolute; inset:0; display:grid; place-items:center; background:color-mix(in srgb, var(--m-bg) 70%, transparent); font-weight:700 }
 .legend { display:flex; flex-wrap:wrap; gap:3px 12px; font-size:12px; color:var(--muted); margin-top:8px }
@@ -338,18 +340,32 @@ function syncGoal() { $('ga').value = goal[0].toFixed(1); $('gl').value = goal[1
 window.addEventListener('resize', draw);
 
 function goalChecks() {
+  // judged on what the lidar saw (the scan's cells), not on the twin's boxes: those are fitted conservatively
+  // (pieces merged to stay within 128 boxes cover extra floor), so they only warn
   const out = [], d = Math.hypot(goal[0], goal[1]);
-  if (d < 0.6) out.push(['bad', 'closer than 0.6 m']);
+  if (d < 0.6) out.push(['bad', 'closer than 0.6 m to the robot']);
   if (d > 4.0) out.push(['warn', d.toFixed(1) + ' m away: leg odometry under-counts 25-40 %, leave room']);
-  const F = frame(), wx = F.sx + F.c * goal[0] - F.s * goal[1], wy = F.sy + F.s * goal[0] + F.c * goal[1];
+  const F = frame(), g = scanSel && cache.grid[scanSel];
+  const world = (a, l) => [F.sx + F.c * a - F.s * l, F.sy + F.s * a + F.c * l];
+  if (g && g.rows) {
+    const cell = (a, l) => { const [wx, wy] = world(a, l), i = Math.floor((wx - g.x0) / g.res), j = Math.floor((wy - g.y0) / g.res);
+      return g.rows[i] && g.rows[i][j]; };
+    let at = false, nearest = null, unseen = cell(goal[0], goal[1]);
+    for (let da = -0.4; da <= 0.401; da += 0.1) for (let dl = -0.4; dl <= 0.401; dl += 0.1) {
+      const r = Math.hypot(da, dl); if (r > 0.4) continue;
+      const ch = cell(goal[0] + da, goal[1] + dl);
+      if (ch === '2' || ch === '3') { if (r <= 0.15) at = true; nearest = nearest === null ? r : Math.min(nearest, r); }
+    }
+    if (at) out.push(['bad', 'the lidar saw an obstacle at the goal: the robot cannot stand there']);
+    else if (nearest !== null) out.push(['warn', 'an obstacle ' + nearest.toFixed(1) + ' m from the goal (arrival counts within 0.4 m)']);
+    if (unseen === ' ' || unseen === undefined) out.push(['warn', 'on floor the lidar has not seen yet (the twin is empty there)']);
+  }
   const tw = scanSel && cache.twin[scanSel];
-  if (tw) for (const b of tw.boxes) { if (b.z_bottom >= 0.3) continue;
-    const c = Math.cos(b.yaw || 0), s = Math.sin(b.yaw || 0), dx = wx - b.center_xy[0], dy = wy - b.center_xy[1];
-    if (Math.abs(c * dx + s * dy) <= b.half_xy[0] + 0.3 && Math.abs(-s * dx + c * dy) <= b.half_xy[1] + 0.3) {
-      out.push(['bad', 'inside or within 0.3 m of an obstacle in the twin (' + f(b.z_top, 2) + ' m high)']); break; } }
-  const g = scanSel && cache.grid[scanSel];
-  if (g && g.rows) { const i = Math.floor((wx - g.x0) / g.res), j = Math.floor((wy - g.y0) / g.res), ch = g.rows[i] && g.rows[i][j];
-    if (ch === ' ' || ch === undefined) out.push(['warn', 'on floor the lidar has not seen (the twin is empty there)']); }
+  if (tw && !out.some(m => m[0] === 'bad')) { const [wx, wy] = world(goal[0], goal[1]);
+    for (const b of tw.boxes) { if (b.z_bottom >= 0.3) continue;
+      const c = Math.cos(b.yaw || 0), s = Math.sin(b.yaw || 0), dx = wx - b.center_xy[0], dy = wy - b.center_xy[1];
+      if (Math.abs(c * dx + s * dy) <= b.half_xy[0] && Math.abs(-s * dx + c * dy) <= b.half_xy[1]) {
+        out.push(['warn', 'inside a twin box: the rehearsal cannot reach it, though the lidar sees floor there']); break; } } }
   return out;
 }
 
@@ -413,8 +429,13 @@ function morePolicy() {
 }
 function renderScan(s, robotLive, walking, rehearsing) {
   const list = s.scans || [], j = s.scan_job;
-  if (list.length && (!scanSel || !list.some(x => x.name === scanSel) || (!userScan && scanSel !== list[0].name))) selectScan(list[0].name);
-  const x = scanOf(scanSel), stale = x ? (x.walked_since || []) : [];
+  // the current scene is the newest real scan; a session map (the twin of a finished session's own map) starts where
+  // that session started, so it is only ever picked by hand, never used to deploy
+  const real = list.filter(y => y.verdict !== 'SESSION');
+  const want = real.length ? real[0].name : null;
+  if (want && (!scanSel || !list.some(y => y.name === scanSel) || (!userScan && scanSel !== want))) selectScan(want);
+  const x = scanOf(scanSel), session = !!x && x.verdict === 'SESSION';
+  const stale = x ? (session ? [{session: x.name, walked_m: 0}] : (x.walked_since || [])) : [];
   $('t1').textContent = robotLive || stale.length ? 'Rescan from here' : 'Scan the scene';
   const scanBlock = j.running ? 'scanning…' : walking ? 'waits: the robot is walking' : rehearsing ? 'waits: a rehearsal is running' :
     !s.robot_link.carrier ? 'waits: the robot link is down' : '';
@@ -423,30 +444,43 @@ function renderScan(s, robotLive, walking, rehearsing) {
   $('scanning').hidden = !j.running; $('scanprog').hidden = !j.running;
   if (j.running) $('scanbar').style.width = Math.min(100, (Date.now() / 1000 - j.t) / 18 * 100) + '%';
   $('stale').hidden = !stale.length;
-  if (stale.length) $('stale').innerHTML = '<b>This scan is stale.</b> The robot walked ' + stale.reduce((a, b) => a + b.walked_m, 0).toFixed(1) +
-    ' m since it was taken, so the goal and the twin no longer start where the robot stands. Rescan from here.';
+  if (stale.length) $('stale').innerHTML = session
+    ? '<b>This is the map a finished session built</b>; it starts where that session started, not where the robot stands now. ' +
+      'Use it to look back or rehearse that area; to deploy, pick the current scan or rescan from here.'
+    : '<b>This scan is stale.</b> The robot walked ' + stale.reduce((a, b) => a + b.walked_m, 0).toFixed(1) +
+      ' m since it was taken, so the goal and the twin no longer start where the robot stands. Rescan from here.';
   if (!x) { $('scaninfo').innerHTML = '<span class="muted">Stand the robot where it will start, then scan.</span>'; setStep('st1', 'now'); return false; }
   setStep('st1', stale.length ? 'now' : 'done');
-  const v = {GO:'ok', CHECK:'warn', 'NO-GO':'bad'}[x.verdict] || 'na';
+  const blocked = (x.start_blocked || []).length, notes = x.notes || x.reasons || [];
   const others = list.filter(y => y.name !== x.name);
-  $('scaninfo').innerHTML = pill(x.verdict || '-', v) + ' ' + esc(x.name) + ' · ' + esc((x.time || '').slice(11, 16)) + ' · twin ' + x.twin_boxes + ' boxes · ' +
+  $('scaninfo').innerHTML = (x.verdict === 'SESSION' ? pill('session map', 'na') : blocked ? pill('start blocked', 'bad') : pill('start clear', 'ok')) + ' ' + esc(x.name) + ' · ' + esc((x.time || '').slice(11, 16)) + ' · twin ' + x.twin_boxes + ' boxes · ' +
     '<a href="/scan/' + encodeURIComponent(x.name) + '/site.png?t=' + T + '" target="_blank">site check</a>' +
     (x.studio_arena ? ' · <a href="' + host + ':' + s.studio.port + '/?workspace=arena" target="_blank" rel="noopener">in Studio</a>' : '') +
-    (x.reasons && x.reasons.length ? '<details style="margin-top:4px"><summary>' + x.reasons.length + ' notes</summary><ul class="msgs">' + x.reasons.map(r => '<li>' + esc(r) + '</li>').join('') + '</ul></details>' : '') +
-    (others.length ? '<div style="margin-top:4px"><select onchange="selectScan(this.value, true)"><option value="">earlier scans…</option>' +
-      others.map(y => '<option value="' + esc(y.name) + '">' + esc(y.name) + ' · ' + esc(y.verdict || '') + '</option>').join('') + '</select></div>' : '');
+    (blocked ? '<ul class="msgs"><li class="bad">' + esc(x.start_blocked[0]) + '</li></ul>' : '') +
+    (notes.length ? '<details style="margin-top:4px"><summary>' + notes.length + ' planner notes</summary><ul class="msgs">' + notes.map(r => '<li>' + esc(r) + '</li>').join('') + '</ul></details>' : '') +
+    (others.length ? '<div style="margin-top:4px"><select onchange="selectScan(this.value, true)"><option value="">other scans…</option>' +
+      others.filter(y => y.verdict !== 'SESSION').map(y => '<option value="' + esc(y.name) + '">' + esc(y.name) + ' · ' + esc((y.time || '').slice(11, 16)) + '</option>').join('') +
+      (others.some(y => y.verdict === 'SESSION') ? '<optgroup label="maps of finished sessions">' + others.filter(y => y.verdict === 'SESSION').map(y =>
+        '<option value="' + esc(y.name) + '">' + esc(y.name.replace('session-', '')) + '</option>').join('') + '</optgroup>' : '') + '</select></div>' : '');
   return !stale.length;
+}
+function besideWhy(s) {
+  // a rehearsal beside the live robot session: what stops it, and the way to rehearse now
+  const r = s.live.robot && s.live.robot.running ? s.live.robot : null;
+  if (!r) return '';
+  const why = [];
+  if (!(r.panel || {}).interlock) why.push('this robot session started before rehearsals could run beside it (it cannot hold GO meanwhile)');
+  if (s.gpu.free_mib != null && s.gpu.free_mib < s.gpu.rehearsal_mib)
+    why.push('the GPU has ' + (s.gpu.free_mib / 1024).toFixed(1) + ' GB free beside it; a rehearsal needs about ' + (s.gpu.rehearsal_mib / 1024).toFixed(1) + ' GB');
+  return why.length ? 'Not beside this robot session: ' + why.join('; and ') + '. To rehearse now: End session in the robot panel ' +
+    '(robot in the gantry), Rehearse, then Start robot session again.' : '';
 }
 function renderRehearse(s, ready, rehearsing, walking) {
   const p = prof(profile);
   const live = s.live && s.live.sim && s.live.sim.running ? s.live.sim : null;
   $('rehbtn').textContent = 'Rehearse ' + label(p) + ' to this goal (~1 min)';
   const block = rehearsing ? '' : !scanSel ? 'scan first' : !ready.goal ? 'fix the goal first' : walking ? 'waits: the robot is walking' :
-    s.scan_job.running ? 'waits: a scan is running' : (s.live.robot && s.live.robot.running && !(s.live.robot.panel || {}).interlock) ?
-    'waits: the live robot session predates rehearsals beside it; end it once, then this works' :
-    (s.live.robot && s.live.robot.running && s.gpu.free_mib != null && s.gpu.free_mib < s.gpu.rehearsal_mib) ?
-    'waits: the GPU has ' + (s.gpu.free_mib / 1024).toFixed(1) + ' GB free beside the live robot session; a rehearsal needs about ' +
-    (s.gpu.rehearsal_mib / 1024).toFixed(1) + ' GB. Rehearse before starting the robot session, or end it (robot in the gantry)' : '';
+    s.scan_job.running ? 'waits: a scan is running' : besideWhy(s);
   $('rehbtn').disabled = !!block || rehearsing; $('rehwhy').textContent = block;
   $('rehbtn').hidden = rehearsing;
   // progress of the running rehearsal
@@ -485,19 +519,22 @@ function renderDeploy(s, robotLive, walking, rehearsing, ready, rehearsed) {
   if (robotLive) {
     $('deploybtn').textContent = 'Send goal to robot: ' + goalText(goal);
     $('deploybtn').onclick = sendGoal;
-    block = walking ? 'waits: the robot is walking' : rehearsing ? 'waits: a rehearsal is running' : !ready.scan ? 'rescan from here first (step 1)' :
+    block = walking ? 'waits: the robot is walking' : rehearsing ? 'waits: a rehearsal is running' : !ready.scan ? 'pick the current scan, or rescan from here (step 1)' :
       !ready.goal ? 'fix the goal first' : '';
     $('deploynote').innerHTML = 'Then in the robot panel: <b>Clear the map</b>, then <b>GO</b>. ' + (rehearsed ? 'Rehearsed in the twin.' : '<span style="color:var(--warn)">Not rehearsed to this goal yet (step 3).</span>');
   } else {
     $('deploybtn').textContent = 'Start robot session (' + p + ')';
     $('deploybtn').onclick = deploy;
     const cl = Object.values(checklist()).every(Boolean);
-    block = !s.robot_link.carrier ? 'waits: the robot link is down' : rehearsing ? 'waits: a rehearsal is running' : s.scan_job.running ? 'waits: a scan is running' :
-      !ready.goal ? 'fix the goal first' : !cl ? 'tick the four checks' : '';
+    block = !s.robot_link.carrier ? 'waits: the robot link is down' : rehearsing ? 'waits: the rehearsal is running (about a minute)' :
+      scanSel && scanOf(scanSel) && scanOf(scanSel).verdict === 'SESSION' ? 'pick the current scan, or rescan from here (step 1)' :
+      s.scan_job.running ? 'waits: a scan is running' : !ready.goal ? 'fix the goal first' : !cl ? 'Tick the four safety checks above to enable it' : '';
+    $('checklist').classList.toggle('need', !cl && !rehearsing);
     $('deploynote').innerHTML = (rehearsed ? 'Rehearsed in the twin. ' : '<span style="color:var(--warn)">Not rehearsed to this goal yet (step 3).</span> ') +
       'The runner starts only when you press <b>Arm</b> in the robot panel.';
   }
   $('deploybtn').disabled = !!block; $('deploywhy').textContent = block;
+  $('deploywhy').className = 'why' + (block.startsWith('Tick') ? ' strong' : '');
   setStep('st4', block ? (robotLive ? '' : 'off') : 'now');
 }
 let frameFor = null;

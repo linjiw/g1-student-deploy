@@ -316,6 +316,11 @@ class Hub:
             except (OSError, ValueError):
                 continue
             x["walked_since"] = self.walked_since(d.stat().st_mtime)
+            # the site check judged the goal typed at scan time too; the page judges the goal picked now, so the scan
+            # itself is only about where the robot stands (and the planner's merged boxes, for the record)
+            reasons = x.get("reasons") or []
+            x["start_blocked"] = [r for r in reasons if r.startswith("start inside")]
+            x["notes"] = [r for r in reasons if not (r.startswith("start inside") or "goal" in r or "route" in r)]
             out.append(x)
         return out
 
