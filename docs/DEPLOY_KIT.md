@@ -88,6 +88,12 @@ The terminal console and its keys work as before; the panel and the keys drive t
 3. *Rehearse this goal in the twin*: `g1 sim --task TWIN --goal A L --script ...` (the ladder runs by itself, the panel
    shows it live); the planned and walked pelvis paths and contacts are drawn on the same map.
 4. *Start the robot session* with the same profile and goal, after the four-item checklist; the runner waits for Arm.
+Rehearsals run beside a live robot session: the hub starts every sim as `nice -n 10 g1 sim ... --port-base 5656`, an
+isolated chain (its own stream, runner debug, cloud, odometry and control ports; DDS on loopback while the robot's
+chain is on its own interface). While it runs, `runs/.rehearsal.lock` holds its pid and the robot console refuses GO
+(and the hub's panel proxy refuses `g`); it is not started while the robot walks, nor beside a robot console older
+than this interlock. Two sims never run together (both on loopback DDS). Within a live session the hub's *Send goal
+to the robot* sets the panel's goal (ahead / left of the robot now, as a scan taken where it stands).
 Every robot session that ends also gets a twin of its final node map (`scan_scene.py --from-session`). Do not move the
 robot between the scan and GO: the goal is relative to where it stood. Studio accepts loopback requests only, so its
 links open on the deploy PC itself.

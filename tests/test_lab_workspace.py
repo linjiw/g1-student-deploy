@@ -166,7 +166,8 @@ def test_hub_commands_and_refusals(tmp_path, monkeypatch):
     monkeypatch.setattr(hub, "STUDIO_DATA", tmp_path / "no-studio")
     h = _hub(tmp_path)
     cmd, out = h.command({"mode": "sim", "profile": "deploy", "course": "open-2m"})
-    assert cmd[1:4] == ["sim", "--profile", "deploy"] and "--arm" in cmd and cmd[cmd.index("--panel") + 1] == "8771"
+    assert cmd[:3] == ["nice", "-n", "10"] and cmd[4:7] == ["sim", "--profile", "deploy"] and "--arm" in cmd
+    assert cmd[cmd.index("--panel") + 1] == "8771" and cmd[cmd.index("--port-base") + 1] == str(hub.REHEARSAL_PORT_BASE)
     assert cmd[cmd.index("--layout") + 1] == "open-2m" and out.parent == h.day
     cmd, _ = h.command({"mode": "robot", "profile": "deploy", "goal": [2.0, 0.5], "note": "door 1"})
     assert cmd[cmd.index("--robot") + 1] == "lab-g1" and cmd[cmd.index("--goal") + 1:cmd.index("--goal") + 3] == ["2.0", "0.5"]
@@ -291,3 +292,82 @@ def test_robot_start_scans_first_unless_the_scan_is_fresh(tmp_path, monkeypatch)
     r = h.start({"mode": "robot", "profile": "deploy", "goal": [2.0, 0.0], "confirm": ok, "scene_scan": "scan-120000"})
     assert r["ok"] and len(calls) == 1 and launched and "--arm" in launched[0]
     assert (Path(r["dir"]) / "scene_scan.txt").read_text().strip() == "scan-120000"
+
+
+def test_hub_does_not_count_its_own_session_as_another_chain(tmp_path, monkeypatch):
+    monkeypatch.setattr(hub, "STUDIO_DATA", tmp_path / "no-studio")
+    h = _hub(tmp_path)
+    h.slots["robot"] = {"proc": SimpleNamespace(pid=500, poll=lambda: None), "info": {"pid": 500}}
+    snap = {"load": [1, 1, 1], "cpus": 28, "gpu": None, "heavy": [],
+            "chains": [{"pid": 500, "cmd": "console.py robot"}, {"pid": 501, "cmd": "node.py"}, {"pid": 900, "cmd": "node.py"}]}
+    monkeypatch.setattr(hub.machine, "snapshot", lambda own_pid=None: dict(snap, chains=list(snap["chains"])))
+    monkeypatch.setattr(hub.machine, "_ancestors", lambda pid: {pid, 500} if pid in (500, 501) else {pid})
+    pc = h.pc()
+    assert [c["pid"] for c in pc["chains"]] == [900] and pc["busy"] and "900" in pc["busy"][0]
+
+
+def test_a_walk_makes_older_scans_stale(tmp_path, monkeypatch):
+    import os
+    import time
+
+    monkeypatch.setattr(hub, "STUDIO_DATA", tmp_path / "no-studio")
+    h = _hub(tmp_path)
+    d = _scan(h, "scan-130000")
+    old = time.time() - 60
+    os.utime(d / "scan.json", (old, old))
+    s = h.day / "robot-130500-deploy"
+    s.mkdir()
+    (s / "session.json").write_text("{}")
+    assert h.walked_since(old) == []  # a session that did not walk leaves the scan valid
+    (s / "attempts.jsonl").write_text(json.dumps({"n": 1, "result": "arrived", "walked_m": 2.3}) + "\n")
+    assert h.walked_since(old)[0]["walked_m"] == 2.3
+    assert h.list_scans()[0]["walked_since"][0]["session"] == "robot-130500-deploy"
+
+
+def test_rehearsal_beside_a_live_robot_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(hub, "STUDIO_DATA", tmp_path / "no-studio")
+    h = _hub(tmp_path)
+    _scan(h, "scan-140000")
+    h.slots["robot"] = {"proc": SimpleNamespace(pid=700, poll=lambda: None),
+                        "info": {"pid": 700, "mode": "robot", "dir": str(h.day / "robot-x"), "panel_port": 8770}}
+    launched = []
+    monkeypatch.setattr(hub.subprocess, "Popen", lambda cmd, **kw: launched.append(cmd) or SimpleNamespace(pid=701, poll=lambda: None))
+    req = {"profile": "deploy", "scan": "scan-140000", "goal": [1.5, 0.0]}
+    monkeypatch.setattr(hub, "gpu_free_mib", lambda: 12000.0)
+    monkeypatch.setattr(h, "panel_state", lambda cur: {"phase": "ARRIVED"})  # an old console: no interlock
+    assert "before rehearsals could run beside it" in h.rehearse(req)["error"] and not launched
+    monkeypatch.setattr(h, "panel_state", lambda cur: {"phase": "RUN", "interlock": True})
+    assert "walking" in h.rehearse(req)["error"]
+    monkeypatch.setattr(h, "panel_state", lambda cur: {"phase": "ARRIVED", "interlock": True})
+    r = h.rehearse(req)
+    assert r["ok"] and launched and "--port-base" in launched[0] and h.live("sim")["pid"] == 701
+    assert "robot session is live" in h.start({"mode": "robot", "profile": "deploy"})["error"]
+    assert "rehearsal is running" in h.scan(goal=[1, 0])["error"]
+
+
+def test_console_ports_follow_the_base():
+    from g1deploy import console
+
+    assert console.chain_ports() == {"stream": 5556, "debug": 5557, "cloud": 5560, "odom": 5561, "control": 5562}
+    a = console.parse_args(["sim", "--layout", "open-2m", "--port-base", "5656"])
+    assert a.port_base == 5656 and console.chain_ports(a.port_base)["control"] == 5662
+    import re
+    from g1deploy.machine import ROBOT_CHAIN
+    assert re.search(ROBOT_CHAIN, "x/g1deploy/console.py robot --robot lab-g1")
+    assert re.search(ROBOT_CHAIN, "/x/g1_deploy_onnx_ref eno1 /m.onnx")
+    assert not re.search(ROBOT_CHAIN, "/x/g1_deploy_onnx_ref lo /m.onnx")
+    assert re.search(ROBOT_CHAIN, "python -u g1deploy/node.py --iface eno1 --cloud dds")
+    assert not re.search(ROBOT_CHAIN, "python -u g1deploy/node.py --iface lo --cloud dds")
+    assert not re.search(ROBOT_CHAIN, "x/g1deploy/console.py sim --layout open-2m")
+
+
+def test_rehearsal_beside_the_robot_waits_for_gpu_memory(tmp_path, monkeypatch):
+    monkeypatch.setattr(hub, "STUDIO_DATA", tmp_path / "no-studio")
+    h = _hub(tmp_path)
+    _scan(h, "scan-150000")
+    h.slots["robot"] = {"proc": SimpleNamespace(pid=700, poll=lambda: None),
+                        "info": {"pid": 700, "mode": "robot", "dir": str(h.day / "robot-x"), "panel_port": 8770}}
+    monkeypatch.setattr(h, "panel_state", lambda cur: {"phase": "ARRIVED", "interlock": True})
+    monkeypatch.setattr(hub, "gpu_free_mib", lambda: 5800.0)
+    r = h.rehearse({"profile": "deploy", "scan": "scan-150000", "goal": [1.5, 0.0]})
+    assert not r["ok"] and "GB free" in r["error"]

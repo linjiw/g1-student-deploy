@@ -90,6 +90,16 @@ pre { margin:0; white-space:pre-wrap; font:12px/1.45 ui-monospace,Menlo,monospac
 #conn { font-size:12px; color:var(--muted) }
 #conn.lost { color:var(--bad); font-weight:700 }
 a { color:var(--accent) }
+/* embed=1: inside the Lab hub's robot rail (the hub shows the one E-STOP bar of the page) */
+body.embed #estop, body.embed .top { display:none }
+body.embed main { padding:8px 10px 20px }
+body.embed .cols { grid-template-columns:minmax(0, 1fr) }
+body.embed #meters { display:grid; grid-template-columns:1fr 1fr; gap:0 14px }
+body.embed .meter { grid-template-columns:78px 1fr 54px; margin:4px 0 } body.embed .meter .lab { font-size:12px }
+body.embed #laddercard { display:none }
+body.embed .goalrow { margin-top:6px }
+#next .tags { margin-top:6px } #next .tags button { min-height:40px; padding:8px 13px }
+.okline { font-size:13px; color:var(--muted); cursor:pointer; padding:6px 0 0 }
 .muted { color:var(--muted) }
 </style></head><body>
 <button id="estop" onclick="send({act:'estop'})" aria-label="Emergency stop">E-STOP</button>
@@ -110,7 +120,7 @@ a { color:var(--accent) }
   <div><div class="k">student</div><div class="v" id="phase">-</div></div>
   <div><div class="k">remote</div><div class="v" id="remote">-</div></div>
   <div><div class="k">goal left</div><div class="v" id="goal">-</div></div>
-  <div><div class="k">plans · rule</div><div class="v" id="rule">-</div></div>
+  <div><div class="k">plans · rule</div><div class="v" id="rule" style="overflow-wrap:normal;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">-</div></div>
 </div></div>
 
 <div class="card" id="next">
@@ -148,8 +158,8 @@ a { color:var(--accent) }
 <div class="card"><h2>Attempts</h2><div id="attempts"><div class="muted">No attempt yet: every GO becomes one, closed on arrival, stop, E-STOP or takeover.</div></div></div>
 
 <div class="cols">
-  <div class="card"><h2>Ladder</h2><ol class="ladder" id="ladder"></ol></div>
-  <div class="card"><h2>All actions</h2><div class="grid4">
+  <div class="card" id="laddercard"><h2>Ladder</h2><ol class="ladder" id="ladder"></ol></div>
+  <div class="card" id="actionscard"><h2>All actions</h2><div class="grid4">
     <button class="act" id="b-arm" onclick="doAct('arm')">Arm<small>start the runner</small></button>
     <button class="act" onclick="doAct('s')">Start SONIC<small>s · stand on SONIC</small></button>
     <button class="act primary" id="b-go" onclick="doAct('g')">GO<small id="gohint">g · student walks</small></button>
@@ -165,6 +175,14 @@ a { color:var(--accent) }
 </main>
 <script>
 const T = "__TOKEN__", HUB_PORT = "__HUB_PORT__";
+const EMBED = new URLSearchParams(location.search).has('embed');
+if (EMBED) {
+  document.body.classList.add('embed');
+  const card = document.getElementById('actionscard'), det = document.createElement('details');
+  det.innerHTML = '<summary style="cursor:pointer;font-weight:600;color:var(--muted)">Manual controls and events</summary>';
+  while (card.firstChild) det.appendChild(card.firstChild);
+  card.appendChild(det);
+}
 const $ = id => document.getElementById(id);
 let S = null, M = null, pending = null, lastOk = 0;
 const CONFIRM = {
@@ -200,15 +218,25 @@ const NEXT_BTNS = {
   goal: [['focus-goal', 'Set a goal below', 'primary']],
   go: [['g', 'GO', 'primary'], ['c', 'Clear map first', '']],
   walk: [['h', 'Stand', ''], ['t', 'Takeover', '']],
-  tag: [['focus-tag', 'Tag it below', 'primary']],
+  tag: [],
   estop: [['quit', 'End session', 'primary']],
 };
+const TITLES = {systems:'Waiting for the robot systems', arm:'Arm the runner', init:'Stand ramp (about 25 s)', sonic:'Start SONIC (the robot stands)',
+  planner:'Planner warming up (about 25 s)', map:'Clear the map', goal:'Set a goal', go:'GO', walk:'Walking…', estop:'E-STOP active: end the session'};
 function renderNext(s) {
   const now = s.ladder.find(x => x.state === 'now');
+  const last = s.attempts.length ? s.attempts[s.attempts.length - 1] : null;
   $('next').className = 'card' + (now && now.key === 'estop' ? ' estop' : '');
-  $('nstep').textContent = now ? now.label : 'Ready';
-  $('ndetail').textContent = now ? now.detail : '';
+  $('nstep').textContent = !now ? 'Ready' : now.key === 'tag' ? 'Tag attempt #' + (last ? last.n : '') : (TITLES[now.key] || now.label);
+  const done = s.ladder.filter(x => x.state === 'done').length;
+  $('ndetail').textContent = now ? (now.key === 'tag' && last ? 'Attempt #' + last.n + ': ' + (last.result || '') + '. What happened?' : now.detail) +
+    (EMBED ? ' · step ' + Math.min(done + 1, s.ladder.length) + ' of ' + s.ladder.length : '') : '';
   const b = $('nbtns'); b.innerHTML = '';
+  if (now && now.key === 'tag' && last) {  // tag right here: no scrolling to the attempts card
+    const box = document.createElement('div'); box.className = 'tags';
+    box.innerHTML = s.tags.map(t => '<button onclick="tag(' + last.n + ',\'' + t + '\')">' + t + '</button>').join('');
+    b.appendChild(box); return;
+  }
   for (const [k, label, cls] of (now && NEXT_BTNS[now.key]) || []) {
     const e = document.createElement('button'); e.className = 'act ' + cls; e.textContent = label;
     if (k === 'g' && !goReady(s)) e.disabled = true;
@@ -243,9 +271,14 @@ function renderMeters(s) {
   $('meters').innerHTML = h;
 }
 const LV = {ok:'OK', warn:'CHECK', bad:'NO-GO', na:'n/a'};
+let showOk = false;
 function renderChecks(s) {
-  $('checks').innerHTML = s.checks.map(c => '<li><span>' + pill(LV[c.level], c.level) + '</span><div><div class="t">' +
-    esc(c.label) + '</div><div class="d">' + esc(c.detail) + '</div></div></li>').join('');
+  const item = c => '<li><span>' + pill(LV[c.level], c.level) + '</span><div><div class="t">' + esc(c.label) + '</div><div class="d">' + esc(c.detail) + '</div></div></li>';
+  const order = {bad:0, warn:1, ok:2, na:3}, list = s.checks.slice().sort((a, b) => order[a.level] - order[b.level]);
+  const shown = EMBED && !showOk ? list.filter(c => c.level === 'bad' || c.level === 'warn') : list;
+  const okN = list.filter(c => c.level === 'ok').length;
+  $('checks').innerHTML = shown.map(item).join('') + (EMBED ? '<li class="okline" onclick="showOk=!showOk; render(S)">' +
+    (showOk ? 'hide the OK checks' : okN + ' checks OK · show') + '</li>' : '');
 }
 function renderLadder(s) {
   $('ladder').innerHTML = s.ladder.map((x, i) => '<li class="' + x.state + '"><span class="dot">' +
@@ -385,7 +418,7 @@ async function mapTick() {
   drawMap();
 }
 window.addEventListener('resize', drawMap);
-if (HUB_PORT) { const h = $('hub'); h.href = location.protocol + '//' + location.hostname + ':' + HUB_PORT + '/?t=' + T; h.style.display = ''; }
+if (HUB_PORT && window.top === window.self) { const h = $('hub'); h.href = location.protocol + '//' + location.hostname + ':' + HUB_PORT + '/?t=' + T; h.style.display = ''; }
 setInterval(tick, 400); tick();
 setInterval(mapTick, 700); mapTick();
 </script></body></html>

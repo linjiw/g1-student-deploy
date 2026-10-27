@@ -110,15 +110,23 @@ def busy_reasons(snap, load_frac=LOAD_FRAC, gpu_util=GPU_UTIL):
     return out
 
 
-def check(policy="warn", wait_s=300.0, poll_s=10.0, log=print, own_pid=None):
+# a robot chain: on the robot's interface, not loopback. An isolated rehearsal (`g1 sim --port-base` other than the
+# default) shares no port and no DDS interface with it and may run beside it; two sims on loopback may not.
+ROBOT_CHAIN = r"console\.py robot\b|g1_deploy_onnx_ref (?!lo\b)|node\.py .*--iface (?!lo\b)"
+
+
+def check(policy="warn", wait_s=300.0, poll_s=10.0, log=print, own_pid=None, beside_robot=False):
     """Apply the `--busy` policy. Returns (snapshot, reasons, ok). warn: go on, reasons recorded; wait: re-check
     every poll_s until quiet or wait_s passes, then refuse; refuse: stop when busy; off: no check (ok, no snapshot).
-    Another chain running refuses under every policy but off."""
+    Another chain running refuses under every policy but off (`beside_robot`: a robot chain does not count)."""
     if policy == "off":
         return None, [], True
     t_end = time.monotonic() + wait_s
     while True:
         snap = snapshot(own_pid)
+        if beside_robot:
+            snap["beside"] = [c for c in snap["chains"] if re.search(ROBOT_CHAIN, c["cmd"])]
+            snap["chains"] = [c for c in snap["chains"] if not re.search(ROBOT_CHAIN, c["cmd"])]
         reasons = busy_reasons(snap)
         if not reasons:
             return snap, [], True

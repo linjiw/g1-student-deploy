@@ -8,6 +8,8 @@ random one printed at start). The hub never drives the robot itself. It starts t
 --profile P --arm --panel PORT`) as its own process group, so the console keeps running if the hub stops; on the
 robot the runner still waits for the panel's Arm, and every motion command stays on the panel (E-STOP, Start SONIC,
 GO). A robot session is ended from its panel; the hub stops a robot session only before Arm or after an E-STOP.
+The page embeds the running session's panel (served through the hub at /panel/, same origin, so its confirmations
+work) with its E-STOP bar: one page from the scan to GO. A restarted hub re-attaches to a session still running.
 
 Sessions land in the day directory, which is also linked into Deploy Studio's robot-sessions directory so its Replay
 lists each one (Studio rescans every 10 s).
@@ -31,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -44,6 +47,20 @@ from g1deploy import attempts as A, machine, profiles, workspace  # noqa: E402
 STUDIO_DATA = Path(os.environ.get("G1_STUDIO_DATA", Path.home() / "research-data/g1-deploy-studio"))
 STUDIO_PORT = int(os.environ.get("G1_STUDIO_PORT", "8790"))
 PANEL_PORTS = {"robot": 8770, "sim": 8771}
+REHEARSAL_PORT_BASE = 5656  # hub sims run isolated (g1 sim --port-base): they may run beside a live robot session
+# GPU memory a rehearsal chain needs beside a live robot session: its planner (a larger bundle grows to ~7-8 GB on
+# no-safe resampling, tools/replay_plans.py measurements) and a second SONIC runner (~1 GB)
+REHEARSAL_GPU_MIB = int(os.environ.get("G1_REHEARSAL_GPU_MIB", "8500"))
+
+
+def gpu_free_mib():
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=5)
+        used, total = (float(x) for x in r.stdout.strip().splitlines()[0].split(","))
+        return total - used
+    except Exception:
+        return None
 # the automatic rehearsal in a scanned twin: the robot-day ladder without a hand on it (the panel shows it live)
 REHEARSE_SCRIPT = "wait:init,key:s,wait:control,wait:ready,sleep:3,key:g,wait:arrived,sleep:3"
 SCAN_FRESH_S = 15 * 60  # a robot session reuses the scan its goal was picked on when it is younger than this
@@ -101,20 +118,86 @@ def session_summary(d: Path, day: Path):
             "rehearsal": json.loads((d / "rehearsal.json").read_text()) if (d / "rehearsal.json").exists() else None}
 
 
+class Adopted:
+    """A console the hub did not start in this run (it restarted while the session went on): poll() by pid."""
+
+    def __init__(self, pid):
+        self.pid, self.returncode = pid, None
+
+    def poll(self):
+        if self.returncode is None and not Path(f"/proc/{self.pid}").exists():
+            self.returncode = 0
+        return self.returncode
+
+
 class Hub:
     def __init__(self, args):
         self.args = args
         self.day = Path(args.day).resolve()
         self.day.mkdir(parents=True, exist_ok=True)
         self.token = os.environ.get("G1_PANEL_TOKEN") or secrets.token_urlsafe(9)
-        self.proc, self.current = None, None
+        # one robot session and one rehearsal at a time, side by side (the rehearsal on its own ports)
+        self.slots = {"robot": {"proc": None, "info": None}, "sim": {"proc": None, "info": None}}
         self.lock = threading.Lock()
         self.doctor = {"running": False, "output": None, "t": None}
         self.scan_job = {"running": False, "name": None, "error": None, "t": None, "then": None}
         self.scans_dir = self.day / "scans"
         self.twinned = set()  # robot sessions whose final map already has a twin
+        self.adopt()
         self._pc = (0.0, None)
         self.studio_link = self.link_studio()
+
+    def adopt(self):
+        """Re-attach to a console session of this day that is still running (the hub restarted under it)."""
+        for pid, cmd in machine._procs({os.getpid()}):
+            m = re.search(r"g1deploy/console\.py (sim|robot)\b.*--record (\S+)", cmd)
+            if not m or Path(m.group(2)).resolve().parent != self.day:
+                continue
+            port = re.search(r"--panel (\d+)", cmd)
+            prof = re.search(r"--profile (\S+)", cmd)
+            task = re.search(r"--task (\S+)", cmd)
+            d = Path(m.group(2)).resolve()
+            course = ("scan:" + Path(task.group(1)).parents[1].name) if task and "/scans/" in task.group(1) else None
+            self.slots[m.group(1)] = {"proc": Adopted(pid), "info": {
+                "pid": pid, "mode": m.group(1), "profile": prof.group(1) if prof else None, "dir": str(d), "cmd": cmd,
+                "started": d.stat().st_mtime, "panel_port": int(port.group(1)) if port else PANEL_PORTS[m.group(1)],
+                "course": course, "adopted": True}}
+            print(f"g1 lab: re-attached to the running {m.group(1)} session {d.name} (pid {pid})", flush=True)
+
+    def live(self, slot):
+        """The running session of a slot (robot | sim), or None."""
+        s = self.slots[slot]
+        return s["info"] if s["proc"] is not None and s["proc"].poll() is None else None
+
+    def walking(self):
+        """The live robot is walking (or about to): no rehearsal or scan beside it then."""
+        cur = self.live("robot")
+        ps = self.panel_state(cur) if cur else None
+        return bool(ps and ps.get("phase") in ("PRESCAN", "RUN"))
+
+    def panel_proxy(self, method, path, query="", body=None, slot="robot"):
+        """A running session's panel, through the hub (same origin as the page that embeds it): /panel/ is the robot
+        session's, /sim-panel/ the rehearsal's."""
+        cur = self.live(slot)
+        if cur is None:
+            return 404, b'{"error": "no session running"}', "application/json"
+        prefix = "/panel" if slot == "robot" else "/sim-panel"
+        if path == "/":  # this kit's current page (a console started earlier serves the page of its own start)
+            page = (Path(__file__).with_name("panel.html")).read_text()
+            page = page.replace("__TOKEN__", self.token).replace("__HUB_PORT__", "")
+            for p_ in ("/act?t=", "/state?t=", "/map?t="):  # its requests go back through the hub
+                page = page.replace(f"'{p_}", f"'{prefix}{p_}")
+            return 200, page.encode(), "text/html; charset=utf-8"
+        url = f"http://127.0.0.1:{cur['panel_port']}{path}?t={self.token}"
+        req = urllib.request.Request(url, data=body, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=3.0) as r:
+                data, ctype = r.read(), r.headers.get("Content-Type", "application/json")
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(), "application/json"
+        except Exception as exc:
+            return 502, json.dumps({"error": f"panel unreachable: {exc}"}).encode(), "application/json"
+        return 200, data, ctype
 
     # -- Studio ----------------------------------------------------------------------------------------
     def link_studio(self):
@@ -137,6 +220,9 @@ class Hub:
         t, snap = self._pc
         if time.monotonic() - t > 5.0 or snap is None:
             snap = machine.snapshot(os.getpid())
+            own = {i["pid"] for i in (self.live("robot"), self.live("sim")) if i}
+            if own:  # the hub's own sessions (their consoles and everything under them) are not "other" deploy chains
+                snap["chains"] = [c for c in snap["chains"] if not own & machine._ancestors(c["pid"])]
             snap["busy"] = machine.busy_reasons(snap)
             self._pc = (time.monotonic(), snap)
         return snap
@@ -151,23 +237,30 @@ class Hub:
         return {"iface": iface, "carrier": carrier, "livox_driver": livox, "robot": self.args.robot}
 
     def running(self):
-        with self.lock:
-            if self.proc is not None and self.proc.poll() is not None:
-                self.current["exit"] = self.proc.returncode
-                self.current["ended"] = time.time()
-                self.proc = None
-                if self.current["mode"] == "robot" and self.current["dir"] not in self.twinned:
-                    self.twinned.add(self.current["dir"])  # what the robot saw on its walks, as a twin too
-                    self.scan(source_session=self.current["dir"])
-            cur = dict(self.current) if self.current else None
-        if cur and self.proc is not None:
-            url = Path(cur["dir"]) / "panel_url.txt"
-            cur["panel_ready"] = url.exists()
-            cur["running"] = True
-            cur["panel"] = self.panel_state(cur)
-        elif cur:
-            cur["running"] = False
-        return cur
+        """Both slots: the session's info, running or the last one ended, with its panel's state."""
+        out = {}
+        for slot in ("robot", "sim"):
+            twin = None
+            with self.lock:
+                sl = self.slots[slot]
+                if sl["proc"] is not None and sl["proc"].poll() is not None:
+                    sl["info"].update(exit=sl["proc"].returncode, ended=time.time())
+                    sl["proc"] = None
+                    d = sl["info"]["dir"]
+                    if slot == "robot" and d not in self.twinned and (Path(d) / "node_memory.npz").exists():
+                        self.twinned.add(d)  # what the robot saw on its walks, as a twin too (no map before Arm)
+                        twin = d
+                info = dict(sl["info"]) if sl["info"] else None
+                live = sl["proc"] is not None
+            if twin:
+                self.scan(source_session=twin)
+            if info:
+                info["running"] = live
+                if live:
+                    info["panel_ready"] = (Path(info["dir"]) / "panel_url.txt").exists()
+                    info["panel"] = self.panel_state(info)
+            out[slot] = info
+        return out
 
     def panel_state(self, cur):
         try:
@@ -175,7 +268,9 @@ class Hub:
                 s = json.loads(r.read())
             now = next((x for x in s.get("ladder", []) if x["state"] == "now"), None)
             return {"runner": s.get("runner"), "phase": s.get("phase"), "next": now and now["label"],
-                    "attempts": len(s.get("attempts", []))}
+                    "attempts": len(s.get("attempts", [])), "interlock": "rehearsal_running" in s,
+                    "rehearsal_running": s.get("rehearsal_running"), "goal_rel": s.get("goal_rel"),
+                    "xy": (s.get("node") or {}).get("xy") or s.get("xy")}
         except Exception:
             return None
 
@@ -189,11 +284,21 @@ class Hub:
                     "chains": pc.get("chains"), "disk_free_gb": round(du.free / 1e9, 1)},
                 "robot_link": self.robot_link(), "profiles": list_profiles(), "courses": [c for c in REHEARSAL_COURSES
                                                                                          if (ROOT / "sim/courses" / c).is_dir()],
-                "current": self.running(), "sessions": [session_summary(d, self.day) for d in sessions[:40]],
+                "live": (live := self.running()), "current": self.current_view(live), "sessions": [session_summary(d, self.day) for d in sessions[:40]],
                 "studio": {"port": STUDIO_PORT, "linked": self.studio_link}, "doctor": self.doctor,
                 "panel_ports": PANEL_PORTS, "default_robot": self.args.robot, "plan": self.plan(),
                 "scans": self.list_scans(), "scan_job": dict(self.scan_job, then=bool(self.scan_job.get("then"))),
-                "default_profile": self.default_profile()}
+                "default_profile": self.default_profile(),
+                "gpu": {"free_mib": gpu_free_mib() if self.live("robot") else None, "rehearsal_mib": REHEARSAL_GPU_MIB}}
+
+    @staticmethod
+    def current_view(live):
+        """The page's main session: the live robot session, else the live rehearsal, else the last ended one."""
+        for slot in ("robot", "sim"):
+            if live.get(slot) and live[slot]["running"]:
+                return live[slot]
+        ended = [v for v in live.values() if v]
+        return max(ended, key=lambda v: v.get("ended") or 0) if ended else None
 
     def default_profile(self):
         """The profile the page selects first: private/lab_hub.json {"default_profile": NAME}, else `deploy`."""
@@ -207,9 +312,22 @@ class Hub:
         out = []
         for d in sorted(self.scans_dir.glob("*/scan.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:20]:
             try:
-                out.append(json.loads(d.read_text()))
+                x = json.loads(d.read_text())
             except (OSError, ValueError):
                 continue
+            x["walked_since"] = self.walked_since(d.stat().st_mtime)
+            out.append(x)
+        return out
+
+    def walked_since(self, t):
+        """Robot sessions started after time `t` whose robot walked: a scan from before them no longer starts where
+        the robot stands (goals are relative to the robot's pose at the session start)."""
+        out = []
+        for d in self.day.glob("robot-*"):
+            if (d / "session.json").exists() and (d / "session.json").stat().st_mtime > t:
+                walked = sum((a.get("walked_m") or 0.0) for a in A.load(d / "attempts.jsonl"))
+                if walked > 0.3:
+                    out.append({"session": d.name, "walked_m": round(walked, 2)})
         return out
 
     def scan(self, goal=None, seconds=8.0, then=None, source_session=None):
@@ -218,9 +336,10 @@ class Hub:
         if self.scan_job["running"]:
             return {"ok": False, "error": "a scan is running"}
         if source_session is None:
-            with self.lock:
-                if self.proc is not None and self.proc.poll() is None:
-                    return {"ok": False, "error": "a session is running: scan before or after it"}
+            if self.live("sim"):
+                return {"ok": False, "error": "a rehearsal is running: scan when it ends (about a minute)"}
+            if self.walking():
+                return {"ok": False, "error": "the robot is walking: scan when it stands"}
             if not self.robot_link()["carrier"]:
                 return {"ok": False, "error": f"no link on {self.args.iface}: robot off or cable out"}
         name = f"session-{Path(source_session).name}" if source_session else f"scan-{time.strftime('%H%M%S')}"
@@ -349,6 +468,8 @@ class Hub:
             cmd += ["--robot", req.get("robot") or self.args.robot]
             goal = req.get("goal") or [1.5, 0.0]
             cmd += ["--goal", *(str(float(v)) for v in goal)]
+        if mode == "sim":  # isolated ports, low priority: it may run beside a live robot session
+            cmd = ["nice", "-n", "10"] + cmd + ["--port-base", str(REHEARSAL_PORT_BASE)]
         if mode == "sim" and req.get("script"):
             cmd = [c for c in cmd if c != "--arm"] + ["--script", req["script"], "--step-timeout", "60"]
         if req.get("note"):
@@ -358,9 +479,26 @@ class Hub:
         return cmd, out
 
     def start(self, req):
-        with self.lock:
-            if self.proc is not None and self.proc.poll() is None:
-                return {"ok": False, "error": "a session is running: end it from its panel first"}
+        slot = req.get("mode")
+        if slot not in self.slots:
+            return {"ok": False, "error": "mode must be sim or robot"}
+        if self.live(slot):
+            return {"ok": False, "error": ("a robot session is live: end it from its panel first" if slot == "robot"
+                                           else "a rehearsal is running: wait for it (about a minute)")}
+        if slot == "sim" and self.live("robot"):
+            ps = self.panel_state(self.live("robot")) or {}
+            if not ps.get("interlock"):
+                return {"ok": False, "error": "the live robot session started before rehearsals could run beside it "
+                                              "(it cannot hold GO during one): end it, then rehearse, then start it again"}
+            if ps.get("phase") in ("PRESCAN", "RUN"):
+                return {"ok": False, "error": "the robot is walking: rehearse when it stands"}
+            free = gpu_free_mib()
+            if free is not None and free < REHEARSAL_GPU_MIB:
+                return {"ok": False, "error": f"the GPU has {free / 1024:.1f} GB free beside the live robot session; a "
+                                              f"rehearsal needs about {REHEARSAL_GPU_MIB / 1024:.1f} GB. Rehearse before "
+                                              "starting the robot session, or end it (robot in the gantry) to rehearse"}
+        if slot == "robot" and self.live("sim"):
+            return {"ok": False, "error": "a rehearsal is running: start the robot session when it ends (about a minute)"}
         if req.get("mode") == "robot":
             need = ("gantry", "estop", "remote", "clear")
             missing = [k for k in need if not (req.get("confirm") or {}).get(k)]
@@ -371,7 +509,8 @@ class Hub:
             fresh = None
             if req.get("scene_scan"):
                 f = self.scans_dir / str(req["scene_scan"]) / "scan.json"
-                if f.is_file() and time.time() - f.stat().st_mtime < SCAN_FRESH_S:
+                if (f.is_file() and time.time() - f.stat().st_mtime < SCAN_FRESH_S
+                        and not self.walked_since(f.stat().st_mtime)):  # the robot has not walked off since
                     fresh = req["scene_scan"]
             if fresh:
                 req = dict(req, scan=False)
@@ -391,14 +530,16 @@ class Hub:
         proc = subprocess.Popen(cmd, cwd=str(ROOT), env=env, stdin=subprocess.DEVNULL, stdout=log,
                                 stderr=subprocess.STDOUT, start_new_session=True)
         with self.lock:
-            self.proc = proc
-            self.current = {"pid": proc.pid, "mode": req["mode"], "profile": req["profile"], "dir": str(out),
-                            "cmd": " ".join(cmd), "started": time.time(), "panel_port": PANEL_PORTS[req["mode"]],
-                            "course": req.get("course")}
+            self.slots[slot] = {"proc": proc, "info": {
+                "pid": proc.pid, "mode": slot, "profile": req["profile"], "dir": str(out), "cmd": " ".join(cmd),
+                "started": time.time(), "panel_port": PANEL_PORTS[slot], "course": req.get("course"),
+                "rehearsal": bool(req.get("script"))}}
         return {"ok": True, "dir": str(out), "cmd": " ".join(cmd)}
 
-    def stop(self):
-        cur = self.running()
+    def stop(self, slot=None):
+        live = self.running()
+        slot = slot or ("robot" if live["robot"] and live["robot"]["running"] else "sim")
+        cur = live.get(slot)
         if not cur or not cur.get("running"):
             return {"ok": False, "error": "no session running"}
         if cur["mode"] == "robot":
@@ -411,6 +552,16 @@ class Hub:
         except ProcessLookupError:
             pass
         return {"ok": True}
+
+    def send_goal(self, goal):
+        """A new goal for the live robot session, relative to the robot now (the panel's Set goal)."""
+        if not self.live("robot"):
+            return {"ok": False, "error": "no robot session is live"}
+        if self.walking():
+            return {"ok": False, "error": "the robot is walking: send the goal when it stands"}
+        a, l = (float(v) for v in goal)
+        code, data, _ = self.panel_proxy("POST", "/act", body=json.dumps({"act": "goal", "ahead": a, "left": l}).encode())
+        return {"ok": code == 200, "error": None if code == 200 else data.decode()[:200]}
 
     def run_doctor(self):
         if self.doctor["running"]:
@@ -476,6 +627,12 @@ def serve(hub: Hub, port: int, host="127.0.0.1"):
                     self._send(200, json.dumps({"ok": True, "cmd": " ".join(cmd), "dir": str(out)}))
                 except Exception as exc:
                     self._send(200, json.dumps({"ok": False, "error": str(exc)}))
+            elif u.path in ("/panel", "/panel/", "/panel/state", "/panel/map"):
+                code, data, ctype = hub.panel_proxy("GET", u.path[len("/panel"):] or "/")
+                self._send(code, data, ctype)
+            elif u.path in ("/sim-panel", "/sim-panel/", "/sim-panel/state", "/sim-panel/map"):
+                code, data, ctype = hub.panel_proxy("GET", u.path[len("/sim-panel"):] or "/", slot="sim")
+                self._send(code, data, ctype)
             elif u.path == "/api/grid":
                 g = hub.scan_grid(q.get("s", [""])[0])
                 self._send(200 if g else 404, json.dumps(g or {}, default=float))
@@ -506,10 +663,23 @@ def serve(hub: Hub, port: int, host="127.0.0.1"):
                 self._send(400, '{"ok": false}')
                 return
             path = urlparse(self.path).path
+            if path in ("/panel/act", "/sim-panel/act"):  # E-STOP and the ladder's buttons, straight on to the panel
+                slot = "robot" if path == "/panel/act" else "sim"
+                if slot == "robot" and msg.get("act") == "g" and hub.live("sim"):
+                    self._send(409, '{"ok": false, "error": "a rehearsal is running: GO when it has ended"}')
+                    return
+                code, data, ctype = hub.panel_proxy("POST", "/act", body=json.dumps(msg).encode(), slot=slot)
+                self._send(code, data, ctype)
+                return
             if path == "/api/start":
                 out = hub.start(msg)
             elif path == "/api/stop":
-                out = hub.stop()
+                out = hub.stop(msg.get("slot"))
+            elif path == "/api/send_goal":
+                try:
+                    out = hub.send_goal(msg.get("goal") or [])
+                except (TypeError, ValueError):
+                    out = {"ok": False, "error": "goal must be two numbers"}
             elif path == "/api/doctor":
                 out = hub.run_doctor()
             elif path == "/api/rehearse":

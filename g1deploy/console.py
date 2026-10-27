@@ -61,6 +61,23 @@ OBS_CONFIG = LUCID / "config/observation_config_lucid_g1_1570.yaml"
 PANELS = Path(os.environ.get("G1_TASK_PANELS", "/home/linjiw/flow/artifacts/panels/test-v1"))
 COURSES = ROOT / "sim/courses"
 ROBOTS = ROOT / "robots"
+PORT_BASE = 5556  # the chain's local ports: stream +0, runner debug +1, cloud +4, LIO odometry +5, node control +6
+REHEARSAL_LOCK = ROOT / "runs/.rehearsal.lock"  # an isolated rehearsal is running (pid): the robot's GO waits for it
+
+
+def chain_ports(base=PORT_BASE):
+    return {"stream": base, "debug": base + 1, "cloud": base + 4, "odom": base + 5, "control": base + 6}
+
+
+def rehearsal_running():
+    """The pid of an isolated rehearsal running on this PC, or None (a stale lock is ignored)."""
+    try:
+        pid = int(REHEARSAL_LOCK.read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+    return pid if Path(f"/proc/{pid}").exists() else None
+
+
 GO_SETTLE_S = 2.0  # GO waits this long after SONIC takes control (sim: the virtual gantry lets go 1.5 s after Start)
 SESSIONS = Path(os.environ.get("G1_SESSIONS", ROOT / "runs/console"))
 # ROS 2 side of the lidar adapter (robots without Unitree's lidar service: livox_ros_driver2 on this PC)
@@ -217,6 +234,8 @@ class Session:
         self.inbox = queue.Queue()  # panel buttons and remote takeover -> the main loop (E-stop never waits here)
         self.remote = {"connected": False, "samples": 0, "last": None}
         self.panel_url = None
+        self.ports = chain_ports(getattr(args, "port_base", None) or PORT_BASE)
+        self.ctl = f"tcp://localhost:{self.ports['control']}"
         # the robot-day workspace (panel): attempts, motor temperatures, the node's map, the ladder's timestamps
         prof = getattr(args, "profile", None)
         self.attempts = Attempts(self.dir / "attempts.jsonl", prof["name"] if prof else None)
@@ -237,8 +256,12 @@ class Session:
         sim = a.mode == "sim"
         iface = "lo" if sim else a.iface
         if a.record_data:  # first, so it sees the runner's INIT ramp and the very first lowcmd
+            P = self.ports
+            moved = [] if P["stream"] == PORT_BASE else [  # an isolated rehearsal: the recorder follows its ports
+                "--zmq", f"pose=pose=tcp://127.0.0.1:{P['stream']}", "--zmq", f"debug=g1_debug=tcp://127.0.0.1:{P['debug']}",
+                "--zmq", f"odom=odom=tcp://127.0.0.1:{P['odom']}", "--status", f"tcp://127.0.0.1:{P['control']}"]
             self.procs["rec"] = Proc("rec", [py, "-u", "g1deploy/recorder.py", "--iface", iface, "--out",
-                                             str(self.dir / "rec")] + ([] if a.record_lidar else ["--no-lidar"]),
+                                             str(self.dir / "rec")] + ([] if a.record_lidar else ["--no-lidar"]) + moved,
                                      self.dir / "recorder.log", self.env)
             self.event("recorder: lowstate, lowcmd, lidar, streams, node status -> rec/")
         if sim:
@@ -251,7 +274,8 @@ class Session:
                                      self.dir / "sim.log", self.env)
             self.event("sim: MuJoCo G1 on DDS (lo), " + Path(self.task).parent.name)
             if a.odom == "lio":  # stands in for Point-LIO + adapters/ros2_lio_bridge.py: odom + registered cloud :5561
-                self.procs["lio"] = Proc("lio", [py, "-u", "tools/sim_lio_bridge.py", "--iface", "lo"]
+                self.procs["lio"] = Proc("lio", [py, "-u", "tools/sim_lio_bridge.py", "--iface", "lo",
+                                                 "--bind", f"tcp://*:{self.ports['odom']}"]
                                          + (["--noise", a.lio_noise] if a.lio_noise else []),
                                          self.dir / "lio.log", self.env)
                 self.event("sim: LIO stand-in on :5561 (odom + registered cloud)")
@@ -283,7 +307,9 @@ class Session:
             return
         runner_cmd = [str(RUNNER), iface, str(onnx), f"{motions}/", "--obs-config", str(OBS_CONFIG),
                       "--input-type", "gamepad_manager", "--planner-file", str(planner),
-                      "--zmq-host", "localhost", "--zmq-port", "5556", "--zmq-topic", "pose"]
+                      "--zmq-host", "localhost", "--zmq-port", str(self.ports["stream"]), "--zmq-topic", "pose"]
+        if self.ports["debug"] != PORT_BASE + 1:
+            runner_cmd += ["--zmq-out-port", str(self.ports["debug"])]
         if sim:
             runner_cmd.append("--disable-crc-check")  # the simulator computes no CRC; never on the robot
         if a.runner_csv:  # the runner's own per-tick CSVs (lucid run.sh records these on every hardware run)
@@ -297,7 +323,9 @@ class Session:
                     "--goal-frame", "start", "--goal", str(a.goal[0]), str(a.goal[1]),
                     "--log", str(self.dir / "node_plans.json"), "--dump-memory", str(self.dir / "node_memory.npz"),
                     # loopback only: everything that talks to the node runs on this PC; never the robot LAN or Wi-Fi
-                    "--stream-bind", "tcp://127.0.0.1:5556", "--control", "tcp://127.0.0.1:5562"]
+                    "--stream-bind", f"tcp://127.0.0.1:{self.ports['stream']}",
+                    "--control", f"tcp://127.0.0.1:{self.ports['control']}",
+                    "--odom-connect", f"tcp://localhost:{self.ports['odom']}"]
         if not sim:
             node_cmd += ["--odom", a.odom] + (["--mount-calib", a.mount_calib] if a.mount_calib else [])
         elif a.odom in ("leg", "lio"):
@@ -327,7 +355,7 @@ class Session:
         self.zmq = zmq
         self.req = zmq.Context.instance().socket(zmq.REQ)
         self.req.setsockopt(zmq.LINGER, 0)
-        self.req.connect("tcp://localhost:5562")
+        self.req.connect(self.ctl)
 
     def start_livox(self, iface):
         """Robots without Unitree's lidar service: livox_ros_driver2 on this PC (started here unless one already runs)
@@ -403,7 +431,7 @@ class Session:
                     self.req.close(0)
                     self.req = self.zmq.Context.instance().socket(self.zmq.REQ)
                     self.req.setsockopt(self.zmq.LINGER, 0)
-                    self.req.connect("tcp://localhost:5562")
+                    self.req.connect(self.ctl)
             except self.zmq.ZMQError:
                 pass
         self.attempts.update(time.monotonic() - self.t0, self.node_status, estop=self.runner_state["estop"])
@@ -430,7 +458,7 @@ class Session:
         try:
             s = self.zmq.Context.instance().socket(self.zmq.REQ)
             s.setsockopt(self.zmq.LINGER, 0)
-            s.connect("tcp://localhost:5562")
+            s.connect(self.ctl)
             s.send_string(json.dumps(msg))
             ok = s.poll(1000)
             if ok:
@@ -471,6 +499,10 @@ class Session:
                 # after CONTROL, the virtual gantry let go mid-step and the robot fell)
                 self.event(f"GO refused: SONIC is settling the stand ({settle:.1f} s left)")
                 return
+            if self.args.mode == "robot" and rehearsal_running():
+                # a rehearsal beside the live robot shares the GPU and CPU: the robot walks only when it has ended
+                self.event("GO refused: a rehearsal is running on this PC (about a minute); GO when it has ended")
+                return
             if st["iface"] != "ZMQ":
                 r.key("#")
                 time.sleep(0.2)
@@ -484,7 +516,8 @@ class Session:
                     py = str(ROOT / ".venv/bin/python")
                     self.procs["node"] = Proc("node", [py, "-u", "tools/stream_replay.py", self.args.replay,
                                                        "--slow", str(self.args.replay_slow),
-                                                       "--bind", "tcp://127.0.0.1:5556"], self.dir / "node.log",
+                                                       "--bind", f"tcp://127.0.0.1:{self.ports['stream']}"],
+                                              self.dir / "node.log",
                                               self.env)
                     self.event("operator: GO (stream on, recorded reference plays)")
                 return
@@ -569,6 +602,7 @@ class Session:
                 else "SIMULATION", "runner": runner, "driving": src, "phase": ns.get("phase"),
                 "goal_dist_m": ns.get("goal_dist_m"), "latency_s": ns.get("latency_s"),
                 "pelvis_z_m": ns.get("pelvis_z_m"), "tilt_rad": ns.get("tilt_rad"), "cloud_age_s": ns.get("cloud_age_s"),
+                "xy": ns.get("xy"),
                 "record": self.record_line().strip(), "events": [f"{t:6.1f}  {e}" for t, e in self.events[-12:]][::-1],
                 "dir": str(self.dir), "remote": dict(self.remote), "node_ready": self.node_ready(),
                 "procs": {k: p.alive() for k, p in self.procs.items()}, **self.workspace()}
@@ -600,7 +634,8 @@ class Session:
                           "task": Path(self.task).parent.name if getattr(self, "task", None) else None},
                 "node": {k: ns.get(k) for k in ("plans", "rule", "no_safe", "max_lag_s", "overruns", "tilt_estop",
                                                  "guards", "last_guard", "calm_hold", "stream_ahead", "standing")},
-                "tags": list(TAGS), "go_settle_left_s": round(self.go_settle_left(), 1)}
+                "tags": list(TAGS), "go_settle_left_s": round(self.go_settle_left(), 1),
+                "rehearsal_running": bool(self.args.mode == "robot" and rehearsal_running())}
 
     def node_map(self):
         """The node's map for the panel (StudentNode.map_snapshot), at most every 0.4 s whoever asks."""
@@ -613,7 +648,7 @@ class Session:
             try:
                 s = self.zmq.Context.instance().socket(self.zmq.REQ)
                 s.setsockopt(self.zmq.LINGER, 0)
-                s.connect("tcp://localhost:5562")
+                s.connect(self.ctl)
                 s.send_string(json.dumps({"cmd": "map"}))
                 m = json.loads(s.recv()) if s.poll(800) else {"ok": False, "error": "the node did not answer"}
                 s.close(0)
@@ -697,12 +732,17 @@ def run_console(args):
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))  # clean shutdown on TERM
     signal.signal(signal.SIGINT, signal.default_int_handler)  # background jobs inherit SIGINT ignored
     # a busy PC skews every real-time number (node lag, plan latency, falls): record it, and by policy stop
-    snap, busy, ok = machine.check(args.busy, args.busy_wait_s, log=lambda m: print(m, flush=True))
+    isolated = args.mode == "sim" and (getattr(args, "port_base", None) or PORT_BASE) != PORT_BASE
+    snap, busy, ok = machine.check(args.busy, args.busy_wait_s, log=lambda m: print(m, flush=True), beside_robot=isolated)
     args.machine = None if snap is None else dict(snap, busy=busy, policy=args.busy)
     if not ok:
         print(f"PC busy, not starting (--busy {args.busy}):\n  " + "\n  ".join(busy), file=sys.stderr)
         return 3
     sess = Session(args)
+    if isolated:  # the robot session beside it refuses GO while this runs
+        REHEARSAL_LOCK.write_text(f"{os.getpid()} {sess.dir}\n")
+        if snap and snap.get("beside"):
+            sess.event("rehearsal beside a live robot session: own ports " + str(sess.ports) + "; the robot's GO waits")
     for reason in busy:
         sess.event(f"PC BUSY at start ({reason}): real-time numbers of this session may be off")
     if args.profile:
@@ -824,6 +864,8 @@ def run_console(args):
         if interactive:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
         sess.shutdown()
+        if isolated and rehearsal_running() == os.getpid():
+            REHEARSAL_LOCK.unlink(missing_ok=True)
         summary = {"dir": str(sess.dir), "events": [f"{t:.1f} {e}" for t, e in sess.events], "status": sess.node_status}
         (sess.dir / "console_summary.json").write_text(json.dumps(summary, indent=1, default=float) + "\n")
         print(f"\nsession saved: {sess.dir}")
@@ -894,6 +936,10 @@ def parse_args(argv):
                             "wait up to --busy-wait-s, refuse, or skip the check. Another deploy chain running "
                             "always refuses (g1deploy/machine.py)")
         p.add_argument("--busy-wait-s", type=float, default=300.0)
+        p.add_argument("--port-base", type=int, default=None,
+                       help=f"the chain's local ports from this base (default {PORT_BASE}: stream, +1 runner debug, +4 "
+                            "cloud, +5 LIO odometry, +6 node control). A sim with another base is an isolated rehearsal "
+                            "that may run beside a robot session; that robot's GO waits until it ends")
         p.add_argument("--planner-impl", choices=("fused", "graph", "eager"), default=None,
                        help="planner implementation (fused = fast, same plans; eager = as evaluated)")
         p.add_argument("--planner-precision", choices=("fp32", "tf32", "bf16"), default=None,
