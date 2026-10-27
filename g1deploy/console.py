@@ -16,10 +16,11 @@ One screen shows the runner, node, robot and recording state; single keys drive 
     r  (sim) release the virtual gantry          q  quit          ?  help
 
 usage:
-  g1 sim   [--layout open-3m | --task task.json] [--goal AHEAD LEFT] [--mission "A,L;A,L"] [--odom dds|leg|lio]
-           [--script STEPS] [--record DIR] [--replay EPISODE]
-  g1 robot [--robot NAME] --iface eno1 --goal 3 0 [--odom leg|zmq] [--lidar dds|livox] [--mount-calib mount.json]
-           [--body dex3|rubber] [--replay EPISODE]
+  g1 sim   [--profile deploy] [--layout open-3m | --task task.json] [--goal AHEAD LEFT] [--mission "A,L;A,L"]
+           [--odom dds|leg|lio] [--script STEPS] [--record DIR] [--replay EPISODE] [--busy warn|wait|refuse|off]
+  g1 robot [--robot NAME] [--profile deploy] --iface eno1 --goal 3 0 [--odom leg|zmq] [--lidar dds|livox]
+           [--mount-calib mount.json] [--body dex3|rubber] [--replay EPISODE]
+  (--profile: profiles/README.md; the command line wins over the profile, the profile over the robot profile)
   g1 check|calibrate|bench|replay|rehearse|test|report|discover|remote|doctor|sessions|note|courses|lidar|lio ...
                                                          (wrappers around tools/, see docs/DEPLOY_KIT.md)
 
@@ -48,6 +49,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+from g1deploy import machine, profiles  # noqa: E402
 
 LUCID = Path(os.environ.get("LUCID_DEPLOY_ROOT", Path.home() / "lucid-sonic/lucid-g1-deploy"))
 RUNNER = LUCID / "runner/target/release/g1_deploy_onnx_ref"
@@ -116,6 +119,8 @@ def session_meta(args, iface):
                     "dirty": [l[2:].strip() for l in (_git("status", "--porcelain", "--untracked-files=no") or "").splitlines()]},
             "bundle": str(broot.resolve()),
             "deploy_rules": getattr(args, "rules", None) or os.environ.get("G1_DEPLOY_RULES"),
+            "profile": getattr(args, "profile", None), "deploy_identity": profiles.identity(args),
+            "machine": getattr(args, "machine", None),
             "bundle_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest() if manifest.exists() else None,
             "runner_commit": _git("rev-parse", "HEAD", cwd=LUCID), "runner": str(RUNNER)}
     mc = getattr(args, "mount_calib", None)
@@ -606,7 +611,19 @@ class Session:
 def run_console(args):
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))  # clean shutdown on TERM
     signal.signal(signal.SIGINT, signal.default_int_handler)  # background jobs inherit SIGINT ignored
+    # a busy PC skews every real-time number (node lag, plan latency, falls): record it, and by policy stop
+    snap, busy, ok = machine.check(args.busy, args.busy_wait_s, log=lambda m: print(m, flush=True))
+    args.machine = None if snap is None else dict(snap, busy=busy, policy=args.busy)
+    if not ok:
+        print(f"PC busy, not starting (--busy {args.busy}):\n  " + "\n  ".join(busy), file=sys.stderr)
+        return 3
     sess = Session(args)
+    for reason in busy:
+        sess.event(f"PC BUSY at start ({reason}): real-time numbers of this session may be off")
+    if args.profile:
+        p = args.profile
+        sess.event(f"profile {p['name']}" + (f" (command line overrides {', '.join(p['overridden'])})"
+                                              if p["overridden"] else ""))
     interactive = sys.stdin.isatty() and not args.script
     if args.mode == "robot":
         print("ROBOT MODE. The robot must hang in its gantry with the feet on the floor, the remote in hand,\n"
@@ -765,6 +782,12 @@ def main(argv=None):
                                cwd=str(ROOT))
     if argv and argv[0] == "test":
         return subprocess.call([str(ROOT / ".venv/bin/python"), "-m", "pytest", "-q", *argv[1:]], env=_env(), cwd=str(ROOT))
+    return run_console(parse_args(argv))
+
+
+def parse_args(argv):
+    """`g1 sim|robot` options, with the deploy profile, the robot profile and the defaults applied (in that order of
+    precedence after the command line)."""
     ap = argparse.ArgumentParser(prog="g1", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="mode", required=True)
     for mode in ("sim", "robot"):
@@ -774,9 +797,17 @@ def main(argv=None):
         p.add_argument("--goal-lookahead", type=float, default=None, help="1.0 = slower walking (G4: no cost)")
         p.add_argument("--candidates", type=int, default=None, help="planner K (default 16)")
         p.add_argument("--ode-steps", type=int, default=None, help="planner ODE steps (default 10)")
-        p.add_argument("--planner-impl", choices=("fused", "graph", "eager"), default="fused",
+        p.add_argument("--profile", default=None, help="deploy profile: a name under profiles/ (or private/profiles/) "
+                                                       "or a .json path; its options fill what the command line leaves "
+                                                       "unset (profiles/README.md)")
+        p.add_argument("--busy", choices=("warn", "wait", "refuse", "off"), default="warn",
+                       help="when the PC is busy (load, GPU, heavy jobs) before the run: warn and go on (default), "
+                            "wait up to --busy-wait-s, refuse, or skip the check. Another deploy chain running "
+                            "always refuses (g1deploy/machine.py)")
+        p.add_argument("--busy-wait-s", type=float, default=300.0)
+        p.add_argument("--planner-impl", choices=("fused", "graph", "eager"), default=None,
                        help="planner implementation (fused = fast, same plans; eager = as evaluated)")
-        p.add_argument("--planner-precision", choices=("fp32", "tf32", "bf16"), default="fp32",
+        p.add_argument("--planner-precision", choices=("fp32", "tf32", "bf16"), default=None,
                        help="denoiser precision (fast planner): fp32 = the evaluated arithmetic; tf32 / bf16 = tensor cores (docs/PLANNER_SPEED.md)")
         p.add_argument("--body", choices=("dex3", "rubber"), default=None, help="hands (self filter; default dex3)")
         p.add_argument("--script", default="")
@@ -800,9 +831,9 @@ def main(argv=None):
         p.add_argument("--panel", type=int, default=8770 if mode == "robot" else 0, metavar="PORT",
                        help="operator web panel on 127.0.0.1:PORT (E-STOP, start, GO, stand, takeover, goal; "
                             "robot default 8770, 0 = off): g1deploy/panel.py")
-        p.add_argument("--debug-plans", action="store_true", help="node writes every plan's exact inputs and result "
-                                                                   "to <session>/plans (tools/debug_plan.py)")
-        p.add_argument("--guards", choices=("off", "deploy", "walls"), default="off",
+        p.add_argument("--debug-plans", action="store_true", default=None,
+                       help="node writes every plan's exact inputs and result to <session>/plans (tools/debug_plan.py)")
+        p.add_argument("--guards", choices=("off", "deploy", "walls"), default=None,
                        help="deploy-side guards (docs/ROBUSTNESS.md): deploy = self mask, split guidance boxes, walk "
                             "envelope, calm fallback, anchor check; walls = deploy + low overheads as walls (H5-H6)")
         p.add_argument("--self-margin", type=float, default=None, help="self-filter margin override (m)")
@@ -834,8 +865,14 @@ def main(argv=None):
             p.add_argument("--mount-calib", default=None)
             p.add_argument("--no-runner-csv", dest="runner_csv", action="store_false", default=True)
     args = ap.parse_args(argv)
+    try:  # command line > deploy profile > robot profile > the console's defaults
+        args = profiles.apply(args, args.profile)
+    except profiles.ProfileError as e:
+        raise SystemExit(str(e))
     if args.mode == "robot":
         args = apply_robot_profile(args)
+    args = profiles.fill_defaults(args)
+    if args.mode == "robot":
         args.remote_start = False
         args.odom = args.odom or "leg"
         args.lidar = args.lidar or "dds"
@@ -858,7 +895,7 @@ def main(argv=None):
                 raise SystemExit("--mission builds the script itself; give one or the other")
             args.script = mission_script(args.mission)
     args.body = args.body or "dex3"
-    return run_console(args)
+    return args
 
 
 if __name__ == "__main__":

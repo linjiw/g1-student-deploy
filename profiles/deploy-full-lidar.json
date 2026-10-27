@@ -1,0 +1,11 @@
+{
+ "name": "deploy-full-lidar",
+ "description": "As deploy, with the whole lidar fused (no rear blind): the comparison arm of DEPLOY_KIT.md section 11",
+ "bundle": "bundle",
+ "rules": null,
+ "guards": "deploy",
+ "goal_lookahead": 1.0,
+ "rear_blind_deg": 0,
+ "rear_blind_range_m": null,
+ "debug_plans": true
+}

@@ -1,0 +1,11 @@
+{
+ "name": "deploy",
+ "description": "The robot's current setup: the deployed bundle, deploy guards, slow walking (lookahead 1.0 m), near-rear lidar blind (rear 180 deg, closer than 1 m: rope and spotter), every plan dumped for replay",
+ "bundle": "bundle",
+ "rules": null,
+ "guards": "deploy",
+ "goal_lookahead": 1.0,
+ "rear_blind_deg": 180,
+ "rear_blind_range_m": 1.0,
+ "debug_plans": true
+}

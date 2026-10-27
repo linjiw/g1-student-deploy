@@ -133,6 +133,23 @@ the node, the console's `g`, and a check that the robot arrived where Studio sen
 `--odom leg` rehearses first-day odometry, `--odom lio [--lio-noise JSON]` the LIO path. `jobs/g5.sh` and
 `tools/eval_panel.py` (RUNBOOK.md) are the scored panels; they need the dev box's Isaac panels.
 
+**Deploy profiles.** `--profile NAME` (`profiles/<name>.json`, or `private/profiles/` for bundles kept outside this
+repository, or a path) sets the student bundle, rules plugin, guards, lookahead, lidar blind and planner options in
+one go: `./g1 sim --profile deploy --layout lab-door-aligned`, `./g1 robot --robot lab-g1 --profile deploy ...`. The
+command line wins over the profile and the profile over the robot profile. `deploy` is the robot's current setup
+(deploy guards, lookahead 1.0, near-rear blind, plan dumps); `deploy-full-lidar` is the same without the blind. Every
+`session.json` records the profile and a deploy identity (one hash over the effective settings, the bundle MANIFEST
+and the rules file), and the report prints both (`profiles/README.md`).
+
+**A quiet PC.** Real-time numbers depend on the PC being otherwise idle: replays run beside a batch on 2026-10-26
+doubled the node's loop lag and caused an E-stop 2.9 s into a walk (§11). Before every session the console takes a
+snapshot of the load, the GPU, other deploy chains and heavy kit jobs (`g1deploy/machine.py`) and stores it in
+`session.json` ("machine"). `--busy warn` (default) goes on and logs it, `wait` waits up to `--busy-wait-s` for the
+PC to settle, `refuse` stops, `off` skips the check; another deploy chain already running is refused unless `off`.
+The report flags a session as timing-suspect when the PC was busy at its start or the node's loop lag passed
+0.35 s (clean runs ~0.2 s): rerun it before trusting its latency, contact or fall numbers. For batches use
+`--busy wait`; add your own heavy jobs with `G1_HEAVY_JOBS=regex,regex`.
+
 ## 6. Lidar on G1s without Unitree's lidar service
 
 Some firmware has no `lidar_driver` service (lab-g1: `robot_state` lists 20 services, none for the lidar), so nothing

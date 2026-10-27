@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from g1deploy import contract as C  # noqa: E402
+from g1deploy.machine import LAG_SUSPECT_S  # noqa: E402
 from g1deploy.recording import open_session  # noqa: E402
 
 LATENCY_GATE_S = 0.32
@@ -251,6 +252,9 @@ def build(d: Path):
            "meta": {k: session.get(k) for k in ("robot", "operator", "note", "git", "bundle_manifest_sha256",
                                                 "runner_commit", "mount_calib", "argv", "host", "started")
                     if k in session},
+           "profile": (session.get("profile") or {}).get("name"),
+           "deploy_identity": (session.get("deploy_identity") or {}).get("short"),
+           "machine_busy": (session.get("machine") or {}).get("busy") or [],
            "console_events": summary.get("events", []), "final_status": summary.get("status", {})}
     rep["node"] = node_section(d, t0)
     rep["runner"] = runner_section(d)
@@ -262,6 +266,8 @@ def build(d: Path):
     rep["runner_csv"] = sorted(p.name for p in (d / "runner_csv").rglob("*.csv"))[:40] if (d / "runner_csv").is_dir() else None
     rep["files"] = {p.name: p.stat().st_size for p in sorted(d.iterdir()) if p.is_file()}
     rep["size_mb"] = round(sum(p.stat().st_size for p in d.rglob("*") if p.is_file()) / 1e6, 1)
+    lag = rep["node"].get("max_lag_s")
+    rep["timing_suspect"] = bool(rep["machine_busy"]) or (lag is not None and lag > LAG_SUSPECT_S)
     rep["flags"] = flags(rep)
     return rep
 
@@ -289,6 +295,12 @@ def flags(rep):
         out.append(f"planner p95 {n['plan_latency_s']['p95']} s is within 20 % of the {LATENCY_GATE_S} s gate")
     if n["latency_gate"] == "FAIL":
         out.append(f"planner p95 {n['plan_latency_s']['p95']} s > {LATENCY_GATE_S} s gate")
+    lag = n.get("max_lag_s")
+    if lag is not None and lag > LAG_SUSPECT_S:
+        out.append(f"node loop lag up to {lag} s (> {LAG_SUSPECT_S} s): timing is suspect, was the PC busy? Rerun "
+                   "before trusting latency, contact or fall results")
+    if rep.get("machine_busy"):
+        out.append("PC was busy when the session started: " + "; ".join(rep["machine_busy"]))
     if n["events"].get("plan_dropped"):
         out.append(f"{n['events']['plan_dropped']} plans dropped (sanity/stale)")
     if n["events"].get("stand_deferred"):
@@ -317,6 +329,8 @@ def flags(rep):
 def markdown(rep):
     L = [f"# Session report: {Path(rep['session']).name}", "",
          f"- mode **{rep['mode']}**, task `{rep['task']}`, launch goal {rep['launch_goal']}, size {rep['size_mb']} MB"]
+    if rep.get("profile") or rep.get("deploy_identity"):
+        L.append(f"- profile **{rep.get('profile') or '(none)'}**, deploy identity `{rep.get('deploy_identity')}`")
     for k, v in rep["meta"].items():
         L.append(f"- {k}: `{v}`")
     L += ["", "## Look at first", ""] + ([f"- {f}" for f in rep["flags"]] or ["- nothing flagged"])
