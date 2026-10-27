@@ -163,7 +163,17 @@ def summarize(out, hist):
            "guide_boxes": g.get("guide_boxes"), "ms": g.get("ms")}
     if q is not None:
         q = np.asarray(q)
-        row.update(min_pelvis_z=round(float(q[:, 2].min()), 3),
+        tilt = np.arccos(np.clip(1 - 2 * (q[:, 4] ** 2 + q[:, 5] ** 2), -1, 1))  # pelvis z vs world z (wxyz quat)
+        w, x, y, z = q[:, 3], q[:, 4], q[:, 5], q[:, 6]
+        yaw = np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+        h0 = np.asarray(hist[-1], float)
+        y0 = np.arctan2(2 * (h0[3] * h0[6] + h0[4] * h0[5]), 1 - 2 * (h0[5] ** 2 + h0[6] ** 2))
+        fwd = (q[-1, :2] - h0[:2]) @ np.array([np.cos(y0), np.sin(y0)])  # net travel along the starting heading
+        v = np.diff(q[:, :2], axis=0) / DT
+        v_fwd = v[:, 0] * np.cos(yaw[:-1]) + v[:, 1] * np.sin(yaw[:-1])  # pelvis velocity along its own heading
+        row.update(min_pelvis_z=round(float(q[:, 2].min()), 3), max_tilt=round(float(tilt.max()), 3),
+                   backward_m=round(float(max(0.0, -fwd)), 3),
+                   max_backward_speed=round(float(max(0.0, -v_fwd.min())), 3),
                    advance_m=round(float(np.linalg.norm(q[-1, :2] - np.asarray(hist[-1][:2]))), 3),
                    end_xy=np.round(q[-1, :2], 3).tolist(), chosen_clearance_m=out.get("chosen_clearance_m"))
     if out.get("rules_info") is not None:  # what a deploy rules plugin reports about this plan

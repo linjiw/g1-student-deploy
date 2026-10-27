@@ -311,6 +311,34 @@ runs to call, so validate on the robot with the 2 m open walk before any door. O
 `--rear-blind-deg 180 --rear-blind-range-m 1.0` (robot profile keys `rear_blind_deg`, `rear_blind_range_m`).
 **Default for lab-g1 since 2026-10-25** (`robots/lab-g1.json`); `--rear-blind-deg 0` turns it off for a session.
 
+**Rear-blind study, kcsc (2026-10-26).** Real-time sim, deploy guards, lookahead 1.0, the three settings interleaved:
+10 scenes x 3 runs, plus 6 more runs of the door twin (3 goals) and the authored beam door, 162 runs (deploy PC
+`runs/rear-blind/`, Deploy Studio sessions `rb-*`). The robot-day sessions were re-planned offline with each setting
+(`tools/replay_plans.py`):
+
+| | full lidar | near rear < 1 m blind | rear 180° blind |
+|---|---|---|---|
+| lab walks (3 goals) + slalom, 12 runs | 12/12 arrived | 12/12 | 12/12 |
+| rope behind, beam door + rope, 6 runs | 1/6 arrived | 6/6, no contact | 6/6, 2 contacts |
+| door twin + beam door, 36 runs | 28 arrived, 5 tilt E-stops | 26, 9 | 29, 5 |
+| robot day door 1 / door 2, safe re-plans | 0/52, 1/22 | 52/52, 14/22 | 52/52, 14/22 |
+| robot day walks 1 / 2, safe re-plans | 23/23, 13/13 | 23/23, 13/13 | 23/23, 13/13 |
+
+- 5 vs 9 E-stops is within chance (Fisher p = 0.37). Paired check: 1,036 recorded door/beam states, each re-planned
+  with the memory rebuilt from the same lidar under each setting (same planner seed), give the same plans. Near
+  minus full planned pelvis tilt is -0.002 rad (95 % CI -0.006 to +0.002); plans backing up 33.8 % vs 33.9 %. The
+  blind does not change what kcsc plans. Its door falls are its own: ducking under the overhead with the envelope
+  waived, or backing away fast.
+- The inverted MID-360 never sees the floor within about 1 m of the robot, with or without the blind, so the near-rear
+  blind removes only tall returns there (rope, spotter, shelf). Returns farther than 1 m behind stay mapped.
+- The rear 180° blind at all ranges deletes real obstacles behind the robot (the gantry frame at door 1, shelving
+  beside a lab turn) and gains nothing over the near-rear blind. Keep the near-rear setting.
+- kcsc backs up in about a third of its door plans, most of them faster than 1 m/s, into a zone it cannot see with
+  the blind: the spotter stands to the side and at least 1 m back.
+- `tools/replay_plans.py` rows now also report `max_tilt`, `backward_m` and `max_backward_speed` of the chosen plan.
+- Real-time sim runs are sensitive to other load on the PC: 17 runs that overlapped replays (node lag up to 0.7 s
+  against about 0.2 s) were discarded and run again. Run replays and renders after a batch, not during it.
+
 ## 12. Other bundles, deploy rules plugins, offline replays (2026-10-26)
 
 **Another bundle.** `./g1 sim|robot --bundle DIR` runs the node on that bundle (`G1_STUDENT_BUNDLE`; SONIC files must
