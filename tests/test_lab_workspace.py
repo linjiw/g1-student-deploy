@@ -6,6 +6,7 @@ import math
 import threading
 import urllib.error
 import urllib.request
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -221,3 +222,72 @@ def test_panel_serves_state_map_and_tags():
             urllib.request.urlopen(bad)
     finally:
         server.shutdown()
+
+
+# ----------------------------------------------------------------------------------------------- scans and rehearsals
+def test_code_grid_matches_the_node_map_codes():
+    n, res = 241, 0.05
+    lo = np.array([-6.0, -6.0])
+    sup, ceil = np.full((n, n), np.nan), np.full((n, n), np.nan)
+    sup[100:140, 100:140] = 0.0
+    sup[int((1.0 + 6) / res), int(6 / res)] = 1.2
+    g = W.code_grid(sup, ceil, lo, res, [0.0, 0.0], 2.0, 0.1)
+    assert len(g["rows"]) == 40 and g["res"] == pytest.approx(0.1)
+    i, j = int((1.0 - g["x0"]) / g["res"]), int((0.0 - g["y0"]) / g["res"])
+    assert g["rows"][i][j] == "3" and g["rows"][20][20] == "."
+
+
+def _scan(h, name, start=(0.5, -0.2), yaw=0.3):
+    d = h.scans_dir / name
+    (d / "course").mkdir(parents=True)
+    n, res = 241, 0.05
+    sup = np.full((n, n), np.nan)
+    sup[110:130, 110:130] = 0.0
+    np.savez_compressed(d / "memory.npz", support=sup, ceiling=np.full((n, n), np.nan), lo=np.array([-6.0, -6.0]),
+                        res=res, start_xy=np.array(start), start_yaw=yaw)
+    (d / "course" / "task.json").write_text("{}")
+    (d / "scan.json").write_text(json.dumps({"name": name, "verdict": "GO", "course": str(d / "course/task.json")}))
+    return d
+
+
+def test_hub_scan_grid_rehearsal_command_and_trajectory(tmp_path, monkeypatch):
+    monkeypatch.setattr(hub, "STUDIO_DATA", tmp_path / "no-studio")
+    h = _hub(tmp_path)
+    _scan(h, "scan-100000")
+    g = h.scan_grid("scan-100000")
+    assert g["start"] == pytest.approx([0.5, -0.2, 0.3]) and len(g["rows"]) == 100
+    assert h.scan_grid("../x") is None and h.scan_file("scan-100000", "../../etc/passwd") is None
+    cmd, out = h.command({"mode": "sim", "profile": "deploy", "course": "scan:scan-100000", "goal": [1.5, 0.2],
+                          "script": hub.REHEARSE_SCRIPT, "label": "rehearse"})
+    assert cmd[cmd.index("--task") + 1].endswith("scan-100000/course/task.json") and "--layout" not in cmd
+    assert "--arm" not in cmd and cmd[cmd.index("--script") + 1] == hub.REHEARSE_SCRIPT
+    assert cmd[cmd.index("--goal") + 1:cmd.index("--goal") + 3] == ["1.5", "0.2"] and out.name.startswith("rehearse-")
+    with pytest.raises(ValueError):
+        h.command({"mode": "sim", "profile": "deploy", "course": "scan:nope"})
+    assert h.rehearse({"profile": "deploy", "scan": None, "goal": None})["ok"] is False
+    s = h.day / "rehearse-100500-deploy-twin-scan-100000"
+    (s / "plans").mkdir(parents=True)
+    t = np.linspace(0, 1, 50)
+    np.savez_compressed(s / "sim.npz", root_pos=np.column_stack([2 * t, 0 * t, 0.75 + 0 * t]), contact_n=np.zeros(50))
+    np.savez_compressed(s / "plans" / "plan_0000_out.npz", qpos=np.zeros((50, 36)))
+    (s / "attempts.jsonl").write_text(json.dumps({"n": 1, "result": "arrived"}) + "\n")
+    tr = h.trajectory(s.name)
+    assert tr["walked"][-1][0] == pytest.approx(2.0) and len(tr["plans"]) == 1 and tr["attempts"][0]["result"] == "arrived"
+    assert tr["contact_max_n"] == 0.0 and tr["running"] is True and h.trajectory("../x") is None
+
+
+def test_robot_start_scans_first_unless_the_scan_is_fresh(tmp_path, monkeypatch):
+    monkeypatch.setattr(hub, "STUDIO_DATA", tmp_path / "no-studio")
+    h = _hub(tmp_path)
+    monkeypatch.setattr(h, "robot_link", lambda: {"carrier": True})
+    calls = []
+    monkeypatch.setattr(h, "scan", lambda **kw: calls.append(kw) or {"ok": True, "name": "scan-x"})
+    launched = []
+    monkeypatch.setattr(hub.subprocess, "Popen", lambda cmd, **kw: launched.append(cmd) or SimpleNamespace(pid=1, poll=lambda: None))
+    ok = {k: True for k in ("gantry", "estop", "remote", "clear")}
+    r = h.start({"mode": "robot", "profile": "deploy", "goal": [2.0, 0.0], "confirm": ok})
+    assert r["scanning"] and calls[0]["then"]["goal"] == [2.0, 0.0] and not launched
+    _scan(h, "scan-120000")
+    r = h.start({"mode": "robot", "profile": "deploy", "goal": [2.0, 0.0], "confirm": ok, "scene_scan": "scan-120000"})
+    assert r["ok"] and len(calls) == 1 and launched and "--arm" in launched[0]
+    assert (Path(r["dir"]) / "scene_scan.txt").read_text().strip() == "scan-120000"

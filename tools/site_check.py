@@ -71,6 +71,8 @@ def main(argv=None):
     ap.add_argument("--body", default=None)
     ap.add_argument("--png", default=None)
     ap.add_argument("--json", default=None)
+    ap.add_argument("--dump-memory", default=None, help="also write the lidar memory in node dump format (npz: support, "
+                                                        "ceiling, lo, res, boxes): Deploy Studio's twin input")
     ap.add_argument("--rear-blind-range-m", type=float, default=None)
     ap.add_argument("--rear-blind-deg", type=float, default=None,
                     help="ignore this rear lidar sector, as the node does (robot profile key rear_blind_deg)")
@@ -170,6 +172,10 @@ def main(argv=None):
                          for k, v in b.items()} for b in boxes],
               "mount": mount_path or "nominal", "odom": odom}
     print(json.dumps(report, indent=1))
+    if args.dump_memory:  # the node's --dump-memory format (g1deploy/node.py), plus where the robot stood
+        np.savez_compressed(args.dump_memory, support=memory.support, ceiling=memory.ceiling, lo=memory.lo,
+                            res=memory.res, boxes=json.dumps(boxes), stats=json.dumps(memory.stats),
+                            start_xy=start, start_yaw=yaw, goal_xy=goal)
     if args.json:
         Path(args.json).write_text(json.dumps(report, indent=1) + "\n")
     if args.png:

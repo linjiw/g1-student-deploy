@@ -3,61 +3,78 @@
 <title>G1 Lab Hub</title>
 <style>
 :root { --bg:#f4f5f7; --fg:#15181d; --muted:#5d6572; --card:#fff; --line:#d8dce2; --btn:#e9ecf1;
-  --ok:#1b7a40; --warn:#9a5d00; --bad:#c0262d; --accent:#1f5fbf; --accent-fg:#fff; --sel:#eef3fc; }
+  --ok:#1b7a40; --warn:#9a5d00; --bad:#c0262d; --accent:#1f5fbf; --accent-fg:#fff; --sel:#eef3fc;
+  --m-bg:#fbfbfc; --m-ground:#e3e7ec; --m-low:#e7b53c; --m-obst:#de7a35; --m-tall:#b8392a; --m-over:#3f7fdc; --m-self:#a9a1c9;
+  --m-twin:#6b4fd8; --m-plan:rgba(14,147,132,.35); --m-walk:#0e9384; --m-goal:#1b7a40; --m-ring:rgba(80,88,100,.35); --m-robot:#15181d; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#101215; --fg:#e7e9ed; --muted:#9aa2ae;
   --card:#191c21; --line:#2b3038; --btn:#242830; --ok:#46b46f; --warn:#e0a23c; --bad:#ff5d62; --accent:#6aa0ff;
-  --accent-fg:#0b1220; --sel:#1c2533; } }
+  --accent-fg:#0b1220; --sel:#1c2533; --m-bg:#14171b; --m-ground:#262b33; --m-low:#d6a83a; --m-obst:#d9783a; --m-tall:#e0574a;
+  --m-over:#5b97ef; --m-self:#7d74a8; --m-twin:#a993ff; --m-plan:rgba(44,194,174,.35); --m-walk:#2cc2ae; --m-goal:#46b46f;
+  --m-ring:rgba(170,178,190,.30); --m-robot:#e7e9ed; } }
 * { box-sizing:border-box }
 body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }
-main { max-width:1100px; margin:0 auto; padding:14px 16px 48px; }
+main { max-width:1240px; margin:0 auto; padding:14px 16px 48px; }
 header { display:flex; flex-wrap:wrap; gap:6px 12px; align-items:baseline; margin-bottom:12px }
 header h1 { font-size:22px; margin:0 8px 0 0 }
 .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin:0 0 12px; }
 h2 { font-size:13px; margin:0 0 10px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; font-weight:700 }
+h3 { font-size:15px; margin:0 0 6px; display:flex; align-items:center; gap:8px }
+h3 .num { width:24px; height:24px; border-radius:50%; display:inline-grid; place-items:center; font-size:12.5px; font-weight:800;
+  border:2px solid var(--line); color:var(--muted); flex:none }
+.step.done h3 .num { background:var(--ok); border-color:var(--ok); color:#fff }
+.step.now h3 .num { border-color:var(--accent); color:var(--accent) }
+.step { border-top:1px solid var(--line); padding:12px 0 }
+.step:first-child { border-top:0; padding-top:0 }
 .chip { display:inline-block; padding:2px 10px; border-radius:99px; border:1px solid var(--line); font-size:13px; color:var(--muted) }
 .pill { display:inline-block; padding:1px 9px; border-radius:99px; font-weight:700; font-size:13px }
 .ok { background:color-mix(in srgb, var(--ok) 16%, transparent); color:var(--ok) }
 .warn { background:color-mix(in srgb, var(--warn) 18%, transparent); color:var(--warn) }
 .bad { background:color-mix(in srgb, var(--bad) 16%, transparent); color:var(--bad) }
 .na { background:color-mix(in srgb, var(--muted) 14%, transparent); color:var(--muted) }
-.muted { color:var(--muted) } a { color:var(--accent) }
-.cols { display:grid; grid-template-columns:minmax(0, 1.25fr) minmax(0, 1fr); gap:12px; align-items:start }
-@media (max-width: 860px) { .cols { grid-template-columns:minmax(0, 1fr) } }
-.profiles { display:grid; gap:8px }
-.prof { display:block; border:1.5px solid var(--line); border-radius:10px; padding:10px 12px; cursor:pointer }
-.prof input { margin-right:8px }
-.prof.sel { border-color:var(--accent); background:var(--sel) }
-.prof .nm { font-weight:800 } .prof .ds { font-size:13px; color:var(--muted); margin-top:2px }
-.prof .tg { font-size:12.5px; margin-top:5px; display:flex; flex-wrap:wrap; gap:4px }
-.tabs { display:flex; gap:6px; margin:12px 0 10px }
-.tabs button { flex:1; padding:11px; border-radius:10px; border:1.5px solid var(--line); background:var(--btn); color:var(--fg);
-  font-weight:700; font-size:15px; cursor:pointer }
-.tabs button.on { border-color:var(--accent); background:var(--sel) }
-label.f { display:block; font-size:12.5px; color:var(--muted); margin:8px 0 3px }
-select, input[type=number], input[type=text] { padding:10px; font-size:16px; border-radius:8px; border:1px solid var(--line);
-  background:var(--bg); color:var(--fg); max-width:100% }
+.muted { color:var(--muted) } a { color:var(--accent) } .small { font-size:13px }
+.flow { display:grid; grid-template-columns:minmax(0, 1.2fr) minmax(0, 1fr); gap:16px; align-items:start }
+@media (max-width: 900px) { .flow { grid-template-columns:minmax(0, 1fr) } }
+#mapwrap { position:relative; width:100%; aspect-ratio:1 / 1; background:var(--m-bg); border-radius:10px; overflow:hidden; border:1px solid var(--line) }
+#map { width:100%; height:100%; display:block; cursor:crosshair; touch-action:manipulation }
+#mapmsg { position:absolute; left:8px; right:8px; bottom:6px; font-size:12.5px; color:var(--muted); text-align:right; pointer-events:none }
+.layers { display:flex; flex-wrap:wrap; gap:4px 14px; font-size:13px; margin:8px 0 2px }
+.layers label { display:flex; gap:5px; align-items:center; cursor:pointer }
+.legend { display:flex; flex-wrap:wrap; gap:3px 12px; font-size:12px; color:var(--muted); margin:4px 0 }
+.legend i { display:inline-block; width:11px; height:11px; border-radius:3px; margin-right:4px; vertical-align:-1px }
 .row { display:flex; gap:10px; flex-wrap:wrap; align-items:end }
-.check { display:flex; gap:10px; align-items:flex-start; padding:7px 0; border-top:1px solid var(--line) }
-.check:first-child { border-top:0 } .check input { width:22px; height:22px; margin-top:1px; flex:none }
-button.act { padding:13px 18px; border-radius:11px; border:1px solid var(--line); background:var(--btn); color:var(--fg);
-  font-size:16px; font-weight:700; cursor:pointer; min-height:48px }
+label.f { display:block; font-size:12.5px; color:var(--muted); margin:6px 0 3px }
+select, input[type=number], input[type=text] { padding:9px; font-size:16px; border-radius:8px; border:1px solid var(--line);
+  background:var(--bg); color:var(--fg); max-width:100% }
+button.act { padding:11px 16px; border-radius:11px; border:1px solid var(--line); background:var(--btn); color:var(--fg);
+  font-size:15.5px; font-weight:700; cursor:pointer; min-height:46px }
 button.primary, a.primary { background:var(--accent); color:var(--accent-fg); border-color:transparent }
-a.btn { display:inline-block; text-decoration:none; padding:13px 18px; border-radius:11px; font-weight:700; font-size:16px }
+a.btn { display:inline-block; text-decoration:none; padding:12px 18px; border-radius:11px; font-weight:700; font-size:16px }
 button:disabled { opacity:.45; cursor:not-allowed }
-pre { margin:0; white-space:pre-wrap; font:12px/1.45 ui-monospace,Menlo,monospace; color:var(--muted); max-height:340px; overflow:auto }
+.profs { display:grid; gap:6px; margin:4px 0 8px }
+.prof { display:flex; gap:8px; align-items:flex-start; border:1.5px solid var(--line); border-radius:10px; padding:7px 10px; cursor:pointer }
+.prof.sel { border-color:var(--accent); background:var(--sel) }
+.prof .nm { font-weight:800 } .prof .ds { font-size:12.5px; color:var(--muted) }
+.reh { display:flex; flex-wrap:wrap; gap:4px 10px; align-items:center; padding:6px 0; border-top:1px dashed var(--line); font-size:13.5px }
+.reh:first-child { border-top:0 }
+.check { display:flex; gap:10px; align-items:flex-start; padding:6px 0; border-top:1px solid var(--line); font-size:14px }
+.check:first-child { border-top:0 } .check input { width:22px; height:22px; margin-top:1px; flex:none }
+.msgs { font-size:13px; margin:6px 0 0; padding-left:18px } .msgs li { margin:2px 0 }
+.msgs li.warn { background:none; color:var(--warn) } .msgs li.bad { background:none; color:var(--bad) }
+pre { margin:0; white-space:pre-wrap; font:12px/1.45 ui-monospace,Menlo,monospace; color:var(--muted); max-height:320px; overflow:auto }
 code.cmd { display:block; margin-top:8px; padding:8px 10px; border-radius:8px; background:var(--bg); border:1px solid var(--line);
   font:12px/1.4 ui-monospace,Menlo,monospace; color:var(--muted); word-break:break-all }
-.sess { border-top:1px solid var(--line); padding:10px 0 }
-.sess:first-child { border-top:0 }
-.sess .hd { display:flex; flex-wrap:wrap; gap:4px 10px; align-items:baseline }
-.sess .nm { font-weight:750 }
+.cols { display:grid; grid-template-columns:minmax(0, 1fr) minmax(0, 1fr); gap:12px; align-items:start }
+@media (max-width: 860px) { .cols { grid-template-columns:minmax(0, 1fr) } }
+.sess { border-top:1px solid var(--line); padding:10px 0 } .sess:first-child { border-top:0 }
+.sess .hd { display:flex; flex-wrap:wrap; gap:4px 10px; align-items:baseline } .sess .nm { font-weight:750 }
 .sess .att { font-size:13px; margin-top:4px; display:flex; flex-wrap:wrap; gap:4px 8px }
 .sess .links { font-size:13.5px; margin-top:5px; display:flex; gap:14px; flex-wrap:wrap }
 .flags { font-size:12.5px; color:var(--warn); margin-top:4px }
 #cur.live { border:2px solid var(--accent) }
 .big { font-size:18px; font-weight:800 }
 ol.plan { margin:0; padding-left:20px } ol.plan li { margin:5px 0 }
-.err { color:var(--bad); font-weight:650; margin-top:8px }
+.err { color:var(--bad); font-weight:650; margin-top:6px; font-size:14px }
+details summary { cursor:pointer; font-weight:700; color:var(--muted) }
 </style></head><body>
 <main>
 <header>
@@ -68,157 +85,345 @@ ol.plan { margin:0; padding-left:20px } ol.plan li { margin:5px 0 }
 
 <div class="card" id="cur" style="display:none"></div>
 
-<div class="cols">
-  <div>
-    <div class="card">
-      <h2>Start a session</h2>
-      <div class="profiles" id="profiles"></div>
-      <div class="tabs"><button id="t-sim" onclick="setMode('sim')">Rehearse in sim</button>
-        <button id="t-robot" onclick="setMode('robot')">Robot session</button></div>
-      <div id="simform">
-        <label class="f" for="course">Course (sim/courses)</label>
-        <select id="course"></select>
-        <div class="muted" style="font-size:13px; margin-top:6px">lab-door-real: the scanned lab door. rp-door-rope / rp-rope-behind: the rope behind the robot.
-          Same chain as the robot: MuJoCo, the SONIC runner, the node, a simulated MID-360. The panel opens on port 8771.</div>
+<div class="card">
+  <h2>Scan · goal · rehearse · deploy</h2>
+  <div class="flow">
+    <div>
+      <div id="mapwrap"><canvas id="map"></canvas><div id="mapmsg">no scan yet: step 1</div></div>
+      <div class="layers">
+        <label><input type="checkbox" id="L-scan" checked onchange="draw()">lidar scan</label>
+        <label><input type="checkbox" id="L-twin" checked onchange="draw()">twin (Studio)</label>
+        <label><input type="checkbox" id="L-plans" checked onchange="draw()">planned paths</label>
+        <label><input type="checkbox" id="L-walk" checked onchange="draw()">walked path</label>
       </div>
-      <div id="robotform" style="display:none">
+      <div class="legend">
+        <span><i style="background:var(--m-ground)"></i>floor seen</span><span><i style="background:var(--m-low)"></i>low</span>
+        <span><i style="background:var(--m-obst)"></i>obstacle</span><span><i style="background:var(--m-tall)"></i>tall</span>
+        <span><i style="background:var(--m-over)"></i>overhead</span><span><i style="border:2px solid var(--m-twin)"></i>twin box</span>
+        <span><i style="background:var(--m-plan)"></i>plans</span><span><i style="background:var(--m-walk)"></i>walked</span>
+        <span><i style="background:var(--m-goal)"></i>goal</span>
+      </div>
+      <div class="muted small">The robot where it stood for the scan, facing up; rings every metre. Tap the map to place the goal.</div>
+    </div>
+    <div>
+      <div class="step" id="st1"><h3><span class="num">1</span>Scene</h3>
         <div class="row">
-          <div><label class="f" for="ga">first goal ahead (m)</label><input id="ga" type="number" step="0.1" value="1.5" style="width:110px"></div>
-          <div><label class="f" for="gl">left (m)</label><input id="gl" type="number" step="0.1" value="0.0" style="width:110px"></div>
+          <div><label class="f" for="scansel">scan</label><select id="scansel" onchange="selectScan(this.value)"><option value="">no scan yet</option></select></div>
+          <button class="act" id="scanbtn" onclick="scanNow()">Scan now</button>
         </div>
-        <div class="muted" style="font-size:13px; margin:6px 0 8px">The goal can change on the panel before every GO. The runner waits for the panel's Arm.</div>
-        <div id="checklist">
-          <label class="check"><input type="checkbox" id="c-gantry"><span><b>Gantry</b>: the robot hangs in the gantry with the feet on the floor; the gantry takes the weight when the runner starts</span></label>
-          <label class="check"><input type="checkbox" id="c-estop"><span><b>E-stops</b>: physical E-stop within reach; remote on and in hand (Select = E-STOP)</span></label>
-          <label class="check"><input type="checkbox" id="c-remote"><span><b>Rope and spotter</b>: rope held high (above ~1.6 m); spotter to the side and at least 1 m back (the student can back up)</span></label>
-          <label class="check"><input type="checkbox" id="c-clear"><span><b>Clear</b>: nobody within the robot's reach; walking area clear for the goal plus ~0.5 m</span></label>
-        </div>
+        <div id="scaninfo" class="small" style="margin-top:6px"></div>
+        <div id="scanstate" class="small"></div>
       </div>
-      <label class="f" for="note">Note for this session (optional)</label>
-      <input id="note" type="text" placeholder="e.g. door attempt 1, rope held by Sam" style="width:100%">
-      <code class="cmd" id="cmd">-</code>
-      <div style="margin-top:10px"><button class="act primary" id="startbtn" onclick="start()">Start</button></div>
-      <div class="err" id="err"></div>
-    </div>
-  </div>
-  <div>
-    <div class="card">
-      <h2>Today's plan</h2>
-      <ol class="plan" id="plan">
-        <li><b>Rehearse</b> each profile in sim on <i>lab-door-real</i> or <i>rp-door-rope</i> (one walk each): the PC, bundles and panel, end to end.</li>
-        <li><b>Preflight</b>: robot on, in the gantry, mode <i>ai</i>; link up; run doctor; remote on.</li>
-        <li><b>Warm-up</b> with the baseline profile, 1.5 m ahead in the open: SONIC, the rope with the near-rear blind, the map, the temperatures.</li>
-        <li><b>Same walk</b> with the candidate profile, then 2.0 m. Watch plan latency and turns.</li>
-        <li><b>Door</b>: goal 0.5 m past the door line; rope high, spotter to the side and at least 1 m back; Clear map before each GO.</li>
-        <li><b>Stop rules</b>: any E-STOP ends the session (check the robot); ankles at 60 °C rest the robot; two caught falls stop that profile for the day.</li>
-        <li>Tag every attempt on the panel before ending the session.</li>
-      </ol>
-    </div>
-    <div class="card">
-      <h2>Preflight</h2>
-      <div id="pre"></div>
-      <div style="margin-top:10px"><button class="act" id="docbtn" onclick="doctor()">Run doctor (read-only)</button></div>
-      <pre id="docout" style="margin-top:10px"></pre>
+      <div class="step" id="st2"><h3><span class="num">2</span>Goal</h3>
+        <div class="row">
+          <div><label class="f" for="ga">ahead (m)</label><input id="ga" type="number" step="0.1" value="2.0" style="width:96px"></div>
+          <div><label class="f" for="gl">left (m)</label><input id="gl" type="number" step="0.1" value="0.0" style="width:96px"></div>
+          <span class="muted small" id="gdist"></span>
+        </div>
+        <ul class="msgs" id="goalmsgs"></ul>
+      </div>
+      <div class="step" id="st3"><h3><span class="num">3</span>Rehearse in the twin</h3>
+        <div class="profs" id="profiles"></div>
+        <button class="act primary" id="rehbtn" onclick="rehearse()">Rehearse this goal in the twin</button>
+        <div class="muted small" style="margin-top:4px">Real-time sim in Studio's twin of the scan: the robot-day ladder runs by itself (about 1 min); the panel shows it live.</div>
+        <div id="rehlist" style="margin-top:8px"></div>
+      </div>
+      <div class="step" id="st4"><h3><span class="num">4</span>Deploy on the robot</h3>
+        <div id="checklist">
+          <label class="check"><input type="checkbox" id="c-gantry" onchange="render(S)"><span><b>Gantry</b>: robot hangs in the gantry, feet on the floor</span></label>
+          <label class="check"><input type="checkbox" id="c-estop" onchange="render(S)"><span><b>E-stops</b>: physical E-stop in reach; remote on, in hand (Select = E-STOP)</span></label>
+          <label class="check"><input type="checkbox" id="c-remote" onchange="render(S)"><span><b>Rope and spotter</b>: rope above ~1.6 m; spotter to the side, at least 1 m back</span></label>
+          <label class="check"><input type="checkbox" id="c-clear" onchange="render(S)"><span><b>Clear</b>: nobody within reach; the goal plus ~0.5 m free</span></label>
+        </div>
+        <input id="note" type="text" placeholder="note (optional): e.g. door attempt 1, rope held by Sam" style="width:100%; margin:6px 0">
+        <button class="act primary" id="deploybtn" onclick="deploy()">Start the robot session</button>
+        <div class="muted small" style="margin-top:4px" id="deployhint"></div>
+        <div class="err" id="err"></div>
+      </div>
     </div>
   </div>
 </div>
+
+<div class="cols">
+  <div class="card">
+    <h2>Preflight</h2>
+    <div id="pre"></div>
+    <div style="margin-top:10px"><button class="act" id="docbtn" onclick="doctor()">Run doctor (read-only)</button></div>
+    <pre id="docout" style="margin-top:10px"></pre>
+  </div>
+  <div class="card">
+    <h2>Today's plan</h2>
+    <ol class="plan" id="plan">
+      <li><b>Scan</b> with the robot standing where it will start.</li>
+      <li><b>Goal</b>: tap it on the map; keep it on seen floor, clear of the twin's boxes.</li>
+      <li><b>Rehearse</b> each profile in the twin; compare the planned and walked paths.</li>
+      <li><b>Deploy</b> the best one with the same goal; Clear map, then GO on the panel.</li>
+      <li>Tag every attempt on the panel before ending the session.</li>
+    </ol>
+  </div>
+</div>
+
+<div class="card"><details><summary>Rehearse on a built-in course (manual ladder)</summary>
+  <div class="row" style="margin-top:10px">
+    <div><label class="f" for="course">course</label><select id="course"></select></div>
+    <button class="act" onclick="startSim()">Start sim on this course</button>
+  </div>
+  <div class="muted small" style="margin-top:4px">Uses the policy picked in step 3; the panel (port 8771) drives the ladder by hand.</div>
+</details></div>
 
 <div class="card"><h2>Today's sessions</h2><div id="sessions"><div class="muted">None yet.</div></div></div>
 </main>
 <script>
 const T = "__TOKEN__";
 const $ = id => document.getElementById(id);
-let S = null, mode = 'sim', profile = null, course = null, planSet = false;
-function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+const host = location.protocol + '//' + location.hostname;
+let S = null, profile = null, scanSel = null, goal = [2.0, 0.0], goalTouched = false;
+const cache = {grid:{}, twin:{}, traj:{}}, shown = new Set();
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function pill(t, c) { return '<span class="pill ' + c + '">' + esc(t) + '</span>'; }
 function f(v, d) { return v === null || v === undefined ? '-' : (+v).toFixed(d); }
-const host = location.protocol + '//' + location.hostname;
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 async function api(path, body) {
   const r = await fetch(path + (path.includes('?') ? '&' : '?') + 't=' + T, body ? {method:'POST', body:JSON.stringify(body)} : {cache:'no-store'});
   return r.json();
 }
-function req() {
-  const r = {mode, profile, note: $('note').value || undefined};
-  if (mode === 'sim') r.course = $('course').value;
-  else { r.goal = [+$('ga').value, +$('gl').value]; r.confirm = {gantry:$('c-gantry').checked, estop:$('c-estop').checked,
-         remote:$('c-remote').checked, clear:$('c-clear').checked}; }
-  return r;
+const scanOf = n => (S && S.scans || []).find(x => x.name === n);
+
+// ---- data ---------------------------------------------------------------------------------------------------
+async function loadScan(name) {
+  if (!name) return;
+  if (!cache.grid[name]) cache.grid[name] = await api('/api/grid?s=' + encodeURIComponent(name)).catch(() => null);
+  if (cache.twin[name] === undefined)
+    cache.twin[name] = await fetch('/scan/' + encodeURIComponent(name) + '/twin.json?t=' + T).then(r => r.ok ? r.json() : null).catch(() => null);
+  draw(); if (S) render(S);
 }
-function setMode(m) {
-  mode = m; $('t-sim').className = m === 'sim' ? 'on' : ''; $('t-robot').className = m === 'robot' ? 'on' : '';
-  $('simform').style.display = m === 'sim' ? '' : 'none'; $('robotform').style.display = m === 'robot' ? '' : 'none';
-  $('startbtn').textContent = m === 'sim' ? 'Start sim rehearsal' : 'Start robot session (runner waits for Arm)';
-  showCmd();
+async function loadTraj(name, force) {
+  if (cache.traj[name] && !force) return;
+  cache.traj[name] = await api('/api/trajectory?s=' + encodeURIComponent(name)).catch(() => null);
+  draw();
 }
-async function showCmd() {
-  if (!profile) return;
-  const r = await api('/api/command?req=' + encodeURIComponent(JSON.stringify(req())));
-  $('cmd').textContent = r.ok ? r.cmd : r.error;
+function selectScan(name) {
+  scanSel = name || null; goalTouched = false; shown.clear();
+  const x = scanOf(name); if (x && x.goal_ahead_left) { goal = [...x.goal_ahead_left]; syncGoal(); }
+  loadScan(scanSel); if (S) render(S);
 }
-async function start() {
+
+// ---- map ----------------------------------------------------------------------------------------------------
+const cv = $('map'), ctx = cv.getContext('2d');
+let view = null;
+function frame() {
+  const g = scanSel && cache.grid[scanSel];
+  const st = g && g.start ? g.start : [0, 0, 0];
+  return {sx: st[0], sy: st[1], yaw: st[2], c: Math.cos(st[2]), s: Math.sin(st[2])};
+}
+function draw() {
+  const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  if (!r.width) return;
+  cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+  const W = cv.width, half = 5.0, k = W / (2 * half), cx = W / 2, cy = W / 2;
+  view = {k, cx, cy, dpr};
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, W, W);
+  const F = frame(), g = scanSel && cache.grid[scanSel], tw = scanSel && cache.twin[scanSel];
+  const world = () => { ctx.setTransform(F.s * k, -F.c * k, -F.c * k, -F.s * k, cx, cy); ctx.translate(-F.sx, -F.sy); };
+  const startFrame = () => ctx.setTransform(0, -k, -k, 0, cx, cy);  // (ahead, left) -> screen, up = ahead
+  if (g && g.rows && $('L-scan').checked) {
+    world();
+    const col = {'.':css('--m-ground'), '1':css('--m-low'), '2':css('--m-obst'), '3':css('--m-tall'), '^':css('--m-over'), 's':css('--m-self')};
+    for (let i = 0; i < g.rows.length; i++) { const row = g.rows[i], x = g.x0 + i * g.res;
+      for (let j = 0; j < row.length; j++) { const ch = row[j]; if (ch === ' ') continue;
+        ctx.fillStyle = col[ch]; ctx.fillRect(x, g.y0 + j * g.res, g.res * 1.03, g.res * 1.03); } }
+  }
+  if (tw && tw.boxes && $('L-twin').checked) {
+    world();
+    ctx.strokeStyle = css('--m-twin'); ctx.lineWidth = 1.6 * dpr / k;
+    for (const b of tw.boxes) {
+      ctx.save(); ctx.translate(b.center_xy[0], b.center_xy[1]); ctx.rotate(b.yaw || 0);
+      ctx.globalAlpha = b.z_bottom >= 0.8 ? 0.6 : 1; ctx.strokeRect(-b.half_xy[0], -b.half_xy[1], 2 * b.half_xy[0], 2 * b.half_xy[1]);
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+  for (const name of shown) {
+    const t = cache.traj[name]; if (!t) continue;
+    startFrame(); ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    if ($('L-plans').checked) { ctx.strokeStyle = css('--m-plan'); ctx.lineWidth = 2 * dpr / k;
+      for (const p of t.plans) { if (p.length < 2) continue; ctx.beginPath(); p.forEach((q, i) => i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])); ctx.stroke(); } }
+    if ($('L-walk').checked && t.walked && t.walked.length > 1) { ctx.strokeStyle = css('--m-walk'); ctx.lineWidth = 4 * dpr / k;
+      ctx.beginPath(); t.walked.forEach((q, i) => i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])); ctx.stroke();
+      const e = t.walked[t.walked.length - 1]; ctx.fillStyle = css('--m-walk'); ctx.beginPath(); ctx.arc(e[0], e[1], 0.07, 0, 2 * Math.PI); ctx.fill(); }
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.strokeStyle = css('--m-ring'); ctx.lineWidth = dpr; ctx.setLineDash([4 * dpr, 4 * dpr]); ctx.font = (11 * dpr) + 'px system-ui'; ctx.fillStyle = css('--m-ring');
+  for (let m = 1; m <= half; m++) { ctx.beginPath(); ctx.arc(cx, cy, m * k, 0, 2 * Math.PI); ctx.stroke(); ctx.fillText(m + ' m', cx + 3 * dpr, cy - m * k - 3 * dpr); }
+  ctx.setLineDash([]);
+  const gx = cx - goal[1] * k, gy = cy - goal[0] * k;
+  ctx.strokeStyle = css('--m-goal'); ctx.lineWidth = 2 * dpr; ctx.setLineDash([6 * dpr, 5 * dpr]);
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(gx, gy); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle = css('--m-goal'); ctx.beginPath(); ctx.arc(gx, gy, 8 * dpr, 0, 2 * Math.PI); ctx.fill();
+  ctx.strokeStyle = css('--m-bg'); ctx.lineWidth = 2 * dpr; ctx.stroke();
+  ctx.fillStyle = css('--m-robot'); ctx.beginPath(); ctx.ellipse(cx, cy, 0.22 * k, 0.13 * k, 0, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx, cy - 0.38 * k); ctx.lineTo(cx - 0.09 * k, cy - 0.16 * k); ctx.lineTo(cx + 0.09 * k, cy - 0.16 * k); ctx.closePath(); ctx.fill();
+  $('mapmsg').textContent = !scanSel ? 'no scan yet: step 1' : !g ? 'loading the scan...' :
+    (tw ? tw.boxes.length + ' twin boxes' : 'no twin') + (shown.size ? ' · ' + shown.size + ' rehearsal(s) shown' : '');
+}
+cv.addEventListener('click', ev => {
+  if (!view) return;
+  const r = cv.getBoundingClientRect(), x = (ev.clientX - r.left) * view.dpr, y = (ev.clientY - r.top) * view.dpr;
+  goal = [Math.round((view.cy - y) / view.k * 10) / 10, Math.round((view.cx - x) / view.k * 10) / 10];
+  goalTouched = true; syncGoal(); if (S) render(S);
+});
+function syncGoal() { $('ga').value = goal[0].toFixed(1); $('gl').value = goal[1].toFixed(1); draw(); }
+['ga', 'gl'].forEach(id => $(id).addEventListener('change', () => { goal = [+$('ga').value, +$('gl').value]; goalTouched = true; draw(); if (S) render(S); }));
+window.addEventListener('resize', draw);
+
+// ---- goal checks (on the twin and the scan) --------------------------------------------------------------------
+function goalChecks() {
+  const out = [], d = Math.hypot(goal[0], goal[1]);
+  if (d < 0.6) out.push(['bad', 'goal closer than 0.6 m']);
+  if (d > 4.0) out.push(['warn', 'goal ' + d.toFixed(1) + ' m away: leg odometry under-counts 25-40 %, leave room']);
+  const F = frame(), wx = F.sx + F.c * goal[0] - F.s * goal[1], wy = F.sy + F.s * goal[0] + F.c * goal[1];
+  const tw = scanSel && cache.twin[scanSel];
+  if (tw) for (const b of tw.boxes) {
+    if (b.z_bottom >= 0.3) continue;
+    const c = Math.cos(b.yaw || 0), s = Math.sin(b.yaw || 0), dx = wx - b.center_xy[0], dy = wy - b.center_xy[1];
+    if (Math.abs(c * dx + s * dy) <= b.half_xy[0] + 0.3 && Math.abs(-s * dx + c * dy) <= b.half_xy[1] + 0.3) {
+      out.push(['bad', 'goal inside (or within 0.3 m of) a twin obstacle ' + f(b.z_top, 2) + ' m high']); break; }
+  }
+  const g = scanSel && cache.grid[scanSel];
+  if (g && g.rows) { const i = Math.floor((wx - g.x0) / g.res), j = Math.floor((wy - g.y0) / g.res);
+    const ch = g.rows[i] && g.rows[i][j];
+    if (ch === ' ' || ch === undefined) out.push(['warn', 'the lidar has not seen the floor at the goal (the twin is empty there)']); }
+  return out;
+}
+
+// ---- actions -----------------------------------------------------------------------------------------------
+async function scanNow() {
+  const r = await api('/api/scan', {goal, seconds:8}); if (!r.ok) { alert(r.error); return; }
+  refresh();
+}
+async function rehearse() {
   $('err').textContent = '';
-  if (mode === 'robot' && !confirm('Start the robot session with ' + profile + '? Recorder, lidar and the panel come up; the runner starts only on the panel\'s Arm.')) return;
-  const r = await api('/api/start', req());
+  const r = await api('/api/rehearse', {profile, scan:scanSel, goal});
+  if (!r.ok) { alert(r.error); return; }
+  const name = r.dir.split('/').pop(); shown.clear(); shown.add(name); refresh();
+}
+function checklist() { return {gantry:$('c-gantry').checked, estop:$('c-estop').checked, remote:$('c-remote').checked, clear:$('c-clear').checked}; }
+async function deploy() {
+  $('err').textContent = '';
+  const x = scanOf(scanSel), fresh = x && (Date.now() - Date.parse(x.time)) < 15 * 60 * 1000;
+  if (!confirm('Start the robot session: ' + profile + ', goal ' + goal[0].toFixed(1) + ' m ahead, ' + goal[1].toFixed(1) + ' m left?\n' +
+      (fresh ? 'It uses the scan ' + scanSel + '.' : 'A fresh read-only scan runs first (about 15 s).') +
+      '\nRecorder, lidar and the panel come up; the runner starts only on the panel\'s Arm.')) return;
+  const r = await api('/api/start', {mode:'robot', profile, goal, confirm:checklist(), scene_scan:scanSel, note:$('note').value || undefined});
   if (!r.ok) { $('err').textContent = r.error; return; }
   refresh();
+}
+async function startSim() {
+  const r = await api('/api/start', {mode:'sim', profile, course:$('course').value}); if (!r.ok) alert(r.error); refresh();
 }
 async function stop() {
   if (!confirm('Stop this session? (sim, or a robot session before Arm / after E-STOP)')) return;
   const r = await api('/api/stop', {}); if (!r.ok) alert(r.error); refresh();
 }
 async function doctor() { const r = await api('/api/doctor', {}); if (!r.ok) alert(r.error); refresh(); }
+function toggleTraj(name) { if (shown.has(name)) shown.delete(name); else { shown.add(name); loadTraj(name); } draw(); if (S) render(S); }
 
+// ---- render ------------------------------------------------------------------------------------------------
+function setStep(id, state) { $(id).className = 'step ' + state; }
 function renderProfiles(list) {
-  if (!profile) { const d = list.find(p => p.name === 'deploy') || list[0]; profile = d && d.name; }
-  $('profiles').innerHTML = list.map(p => '<label class="prof' + (p.name === profile ? ' sel' : '') + '"><input type="radio" name="prof" value="' +
-    esc(p.name) + '"' + (p.name === profile ? ' checked' : '') + ' onchange="profile=this.value; render(S); showCmd()"><span class="nm">' +
-    (p.student ? esc(p.student) + ' · ' : '') + esc(p.name) + '</span>' + (p.private ? ' ' + pill('private', 'na') : '') + (p.error ? ' ' + pill('invalid', 'bad') : !p.bundle_ok ? ' ' + pill('bundle missing', 'bad') : '') +
-    '<div class="ds">' + esc(p.description || p.error || '') + '</div>' + (p.error ? '' : '<div class="tg">' +
-    [p.bundle, p.rules, 'guards ' + p.guards, p.lookahead ? 'lookahead ' + p.lookahead + ' m' : null,
-     p.blind && p.blind[0] ? 'blind ' + p.blind[0] + '° < ' + p.blind[1] + ' m' : 'full lidar'].filter(Boolean).map(t => '<span class="chip">' + esc(t) + '</span>').join('') + '</div>') +
-    '</label>').join('');
+  if (!profile) { const d = list.find(p => p.name === S.default_profile) || list.find(p => p.name === 'deploy') || list[0]; profile = d && d.name; }
+  const html = list.filter(p => !p.error).map(p => '<label class="prof' + (p.name === profile ? ' sel' : '') + '"><input type="radio" name="prof" value="' + esc(p.name) + '"' +
+    (p.name === profile ? ' checked' : '') + ' onchange="profile=this.value; render(S)"><span><span class="nm">' + (p.student ? esc(p.student) + ' · ' : '') + esc(p.name) + '</span>' +
+    (!p.bundle_ok ? ' ' + pill('bundle missing', 'bad') : '') + '<div class="ds">' + esc([p.bundle, p.rules, 'guards ' + p.guards,
+    p.blind && p.blind[0] ? 'blind ' + p.blind[0] + '° < ' + p.blind[1] + ' m' : 'full lidar'].filter(Boolean).join(' · ')) + '</div></span></label>').join('');
+  if ($('profiles').dataset.html !== html) { $('profiles').innerHTML = html; $('profiles').dataset.html = html; }
 }
-function renderCur(c) {
+function renderScene(s) {
+  const list = s.scans || [], j = s.scan_job;
+  const sel = $('scansel'), sig = list.map(x => x.name).join('|');
+  if (sel.dataset.sig !== sig) {
+    const newest = list.length && sel.dataset.sig !== undefined && !sel.dataset.sig.split('|').includes(list[0].name);
+    sel.innerHTML = list.length ? list.map(x => '<option value="' + esc(x.name) + '">' + esc(x.name) + ' · ' + esc(x.verdict || '') + ' · ' + esc((x.time || '').slice(11, 16)) + '</option>').join('')
+                                : '<option value="">no scan yet</option>';
+    sel.dataset.sig = sig;
+    if (list.length && (newest || !scanSel || !list.some(x => x.name === scanSel))) { scanSel = list[0].name; selectScan(scanSel); }
+  }
+  if (scanSel) sel.value = scanSel;
+  $('scanbtn').disabled = j.running || !!(s.current && s.current.running);
+  $('scanstate').innerHTML = j.running ? pill('scanning ' + j.name + (j.then ? ': the robot session starts after it' : '') + '...', 'warn')
+    : j.error ? '<div class="err">' + esc(j.error) + '</div>' : '';
+  const x = scanOf(scanSel);
+  if (!x) { $('scaninfo').innerHTML = '<span class="muted">Stand the robot where it will start, then Scan now (read-only lidar, about 15 s).</span>'; setStep('st1', 'now'); return false; }
+  setStep('st1', 'done');
+  const vcls = {GO:'ok', CHECK:'warn', 'NO-GO':'bad'}[x.verdict] || 'na';
+  $('scaninfo').innerHTML = pill(x.verdict || '-', vcls) + ' ' + (x.frames ? x.frames + ' lidar frames · ' : '') + 'twin ' + x.twin_boxes + ' boxes' +
+    (x.studio_arena ? ' · in Studio as <a href="' + host + ':' + s.studio.port + '/?workspace=arena" target="_blank" rel="noopener">' + esc(x.studio_arena.label) + '</a>' : '') +
+    ' · <a href="/scan/' + encodeURIComponent(x.name) + '/site.png?t=' + T + '" target="_blank">site check picture</a>' +
+    (x.reasons && x.reasons.length ? '<ul class="msgs">' + x.reasons.map(r => '<li>' + esc(r) + '</li>').join('') + '</ul>' : '');
+  return true;
+}
+function rehearsalsFor(s) { return (s.sessions || []).filter(x => x.rehearsal && x.rehearsal.scan === scanSel); }
+function renderRehearsals(s) {
+  const rs = rehearsalsFor(s);
+  const live = s.current && s.current.running && s.current.mode === 'sim';
+  $('rehbtn').disabled = !scanSel || !profile || !!(s.current && s.current.running) || s.scan_job.running;
+  $('rehlist').innerHTML = rs.map(x => {
+    const a = x.attempts[x.attempts.length - 1], g = x.rehearsal.goal;
+    const running = !x.ended;
+    const res = running ? pill('rehearsing...', 'warn') : a ? pill(a.result || 'walking', a.result === 'arrived' ? 'ok' : a.result === 'E-STOP' ? 'bad' : 'na') : pill('no walk', 'bad');
+    const t = cache.traj[x.name], contact = t && t.contact_max_n;
+    const facts = a ? [a.duration_s != null ? f(a.duration_s, 1) + ' s' : null, a.max_tilt != null ? 'tilt ≤ ' + f(a.max_tilt, 2) : null,
+      contact != null ? (contact > 5 ? pill('contact ' + f(contact, 0) + ' N', 'bad') : 'no contact') : null].filter(Boolean).join(' · ') : '';
+    return '<div class="reh"><label><input type="checkbox" ' + (shown.has(x.name) ? 'checked' : '') + ' onchange="toggleTraj(\'' + esc(x.name) + '\')"> show</label>' +
+      '<b>' + esc(x.rehearsal.profile || x.profile) + '</b>' + res + '<span class="muted">goal ' + f(g[0], 1) + ', ' + f(g[1], 1) + '</span><span>' + facts + '</span>' +
+      (running && live ? '<a href="' + host + ':' + s.panel_ports.sim + '/?t=' + T + '" target="_blank" rel="noopener">watch live</a>' : '') +
+      (!running ? '<a href="' + host + ':' + s.studio.port + '/?session=' + encodeURIComponent(x.studio) + '" target="_blank" rel="noopener">3D replay</a>' : '') + '</div>';
+  }).join('') || '<div class="muted small">No rehearsal of this scan yet.</div>';
+  for (const x of rs) {  // keep the shown paths fresh while a rehearsal runs
+    if (shown.has(x.name) && (!cache.traj[x.name] || cache.traj[x.name].running)) loadTraj(x.name, true);
+  }
+  if (!shown.size && rs.length) { shown.add(rs[0].name); loadTraj(rs[0].name); }
+  const ok = rs.some(x => x.ended && x.attempts.some(a => a.result === 'arrived'));
+  return {any: rs.length > 0, ok};
+}
+function renderCur(c, s) {
   const box = $('cur');
   if (!c) { box.style.display = 'none'; return; }
   box.style.display = ''; box.className = 'card' + (c.running ? ' live' : '');
   const port = c.panel_port, url = host + ':' + port + '/?t=' + T, p = c.panel || {};
   const since = Math.round((Date.now() / 1000 - c.started) / 60);
   box.innerHTML = '<h2>' + (c.running ? 'Session running' : 'Last session ended') + '</h2>' +
-    '<div class="big">' + esc(c.mode === 'robot' ? 'ROBOT' : 'SIM') + ' · ' + esc(c.profile) + (c.course ? ' · ' + esc(c.course) : '') + '</div>' +
+    '<div class="big">' + esc(c.mode === 'robot' ? 'ROBOT' : 'SIM') + ' · ' + esc(c.profile) + (c.course ? ' · ' + esc(String(c.course).replace('scan:', 'twin of ')) : '') + '</div>' +
     '<div class="muted" style="margin:4px 0 10px">' + (c.running ? 'started ' + since + ' min ago' + (p.runner ? ' · runner ' + esc(p.runner) + ' · student ' + esc(p.phase || '-') +
       ' · next: <b>' + esc(p.next || '-') + '</b> · ' + p.attempts + ' attempts' : ' · panel starting...') : 'exit ' + esc(c.exit)) + '</div>' +
     (c.running ? '<a class="btn primary" href="' + url + '" target="_blank" rel="noopener">Open the panel</a> ' +
       (c.mode === 'sim' || ['not started', 'E-STOP'].includes(p.runner) ? '<button class="act" onclick="stop()">Stop session</button>' : '<span class="muted">End it from the panel.</span>') : '') +
     '<code class="cmd">' + esc(c.cmd) + '</code>';
-  $('startbtn').disabled = !!c.running;
 }
 function renderPre(s) {
   const pc = s.pc, rl = s.robot_link, busy = pc.busy || [];
-  const gpu = pc.gpu ? 'GPU ' + f(pc.gpu.util_pct, 0) + ' %' : 'GPU -';
   const rows = [
-    [busy.length ? 'warn' : 'ok', 'Deploy PC', busy.length ? busy.join('; ') : 'quiet · load ' + f(pc.load && pc.load[0], 1) + ' on ' + pc.cpus + ' cores · ' + gpu + ' · ' + pc.disk_free_gb + ' GB free'],
+    [busy.length ? 'warn' : 'ok', 'Deploy PC', busy.length ? busy.join('; ') : 'quiet · load ' + f(pc.load && pc.load[0], 1) + ' on ' + pc.cpus + ' cores · GPU ' + f(pc.gpu && pc.gpu.util_pct, 0) + ' % · ' + pc.disk_free_gb + ' GB free'],
     [rl.carrier ? 'ok' : 'bad', 'Robot link ' + rl.iface, rl.carrier ? 'cable up (robot ' + esc(rl.robot) + ')' : 'no carrier: robot off or cable out'],
-    [rl.livox_driver ? 'ok' : 'warn', 'MID-360 driver', rl.livox_driver ? 'livox_ros_driver2 running (reused)' : 'not running: the robot session starts it'],
-    [s.studio.linked ? 'ok' : 'na', 'Deploy Studio', s.studio.linked ? 'sessions appear in Replay (link ' + esc(s.studio.linked.split('/').slice(-2).join('/')) + ')' : 'no Studio data directory'],
+    [rl.livox_driver ? 'ok' : 'warn', 'MID-360 driver', rl.livox_driver ? 'livox_ros_driver2 running' : 'not running: `g1 lidar start --robot lab-g1`'],
+    [s.studio.linked ? 'ok' : 'na', 'Deploy Studio', s.studio.linked ? 'sessions in Replay, scans in Arena (open Studio on this PC)' : 'no Studio data directory'],
   ];
   $('pre').innerHTML = rows.map(r => '<div class="check"><span>' + pill({ok:'OK', warn:'CHECK', bad:'NO-GO', na:'n/a'}[r[0]], r[0]) +
-    '</span><span><b>' + esc(r[1]) + '</b><br><span class="muted" style="font-size:13px">' + r[2] + '</span></span></div>').join('');
-  const d = s.doctor; $('docbtn').disabled = d.running;
-  $('docout').textContent = d.running ? 'doctor running...' : (d.output || '');
+    '</span><span><b>' + esc(r[1]) + '</b><br><span class="muted small">' + r[2] + '</span></span></div>').join('');
+  const d = s.doctor; $('docbtn').disabled = d.running; $('docout').textContent = d.running ? 'doctor running...' : (d.output || '');
 }
-function renderSessions(list) {
+function renderSessions(list, s) {
   if (!list.length) return;
   $('sessions').innerHTML = list.map(x => {
     const att = x.attempts.map(a => pill('#' + a.n + ' ' + (a.result || 'walking') + (a.tag ? ' · ' + a.tag : ''),
       a.result === 'arrived' ? 'ok' : a.result === 'E-STOP' ? 'bad' : a.result ? 'na' : 'warn') + (a.note ? ' <span class="muted">' + esc(a.note) + '</span>' : '')).join(' ');
     return '<div class="sess"><div class="hd"><span class="nm">' + esc(x.name) + '</span>' + pill(x.mode || '-', x.mode === 'robot' ? 'warn' : 'na') +
-      '<span class="muted">' + esc(x.profile || '') + (x.identity ? ' · ' + esc(x.identity) : '') + (x.task ? ' · ' + esc(x.task) : '') + '</span></div>' +
-      (x.note ? '<div class="muted" style="font-size:13px">' + esc(x.note) + '</div>' : '') +
+      '<span class="muted">' + esc(x.profile || '') + (x.identity ? ' · ' + esc(x.identity) : '') + (x.rehearsal ? ' · twin of ' + esc(x.rehearsal.scan) : x.task ? ' · ' + esc(x.task) : '') + '</span></div>' +
+      (x.scene_scan ? '<div class="muted small">scene scan: ' + esc(x.scene_scan) + '</div>' : '') + (x.note ? '<div class="muted small">' + esc(x.note) + '</div>' : '') +
       '<div class="att">' + (att || '<span class="muted">no attempts</span>') + '</div>' +
       (x.flags.length ? '<div class="flags">' + x.flags.slice(0, 4).map(esc).join('<br>') + '</div>' : '') +
       '<div class="links">' + (x.report ? '<a href="/report?s=' + encodeURIComponent(x.name) + '&t=' + T + '" target="_blank">Report</a>' : '<span class="muted">' + (x.ended ? 'no report' : 'running') + '</span>') +
-      '<a href="' + host + ':' + S.studio.port + '/?session=' + encodeURIComponent(x.studio) + '" target="_blank" rel="noopener">Replay in Studio</a></div></div>';
+      '<a href="' + host + ':' + s.studio.port + '/?session=' + encodeURIComponent(x.studio) + '" target="_blank" rel="noopener">Replay in Studio</a></div></div>';
   }).join('');
 }
 function render(s) {
@@ -227,13 +432,28 @@ function render(s) {
   const busy = (s.pc.busy || []).length;
   $('pcchip').innerHTML = pill(busy ? 'PC busy' : 'PC quiet', busy ? 'warn' : 'ok');
   $('linkchip').innerHTML = pill(s.robot_link.carrier ? 'robot link up' : 'robot link down', s.robot_link.carrier ? 'ok' : 'bad');
-  $('studiochip').innerHTML = s.studio.linked ? '<a class="chip" href="' + host + ':' + s.studio.port + '/" target="_blank" rel="noopener">Deploy Studio</a>' : '';
+  $('studiochip').innerHTML = '<a class="chip" href="' + host + ':' + s.studio.port + '/" target="_blank" rel="noopener">Deploy Studio</a>';
   renderProfiles(s.profiles);
-  const sel = $('course'); if (!sel.options.length) { sel.innerHTML = s.courses.map(c => '<option>' + esc(c) + '</option>').join(''); sel.onchange = showCmd; }
-  renderCur(s.current); renderPre(s); renderSessions(s.sessions);
-  if (s.plan && s.plan.length && !planSet) { $('plan').innerHTML = s.plan.map(x => '<li><b>' + esc(x[0]) + '</b>' + (x[1] ? ': ' + esc(x[1]) : '') + '</li>').join(''); planSet = true; }
+  const scanned = renderScene(s);
+  const gm = goalChecks();
+  $('gdist').textContent = Math.hypot(goal[0], goal[1]).toFixed(1) + ' m from the start';
+  $('goalmsgs').innerHTML = gm.map(m => '<li class="' + m[0] + '">' + esc(m[1]) + '</li>').join('') || (scanned ? '<li class="muted">on seen floor, clear of the twin\'s boxes</li>' : '');
+  const goalBad = gm.some(m => m[0] === 'bad');
+  setStep('st2', !scanned ? '' : goalBad ? 'now' : 'done');
+  const reh = renderRehearsals(s);
+  setStep('st3', !scanned || goalBad ? '' : reh.ok ? 'done' : 'now');
+  const cl = Object.values(checklist()).every(Boolean), running = !!(s.current && s.current.running);
+  $('deploybtn').disabled = !cl || running || !s.robot_link.carrier || s.scan_job.running || goalBad;
+  $('deploybtn').textContent = 'Start the robot session: ' + (profile || '-') + ', goal ' + goal[0].toFixed(1) + ' / ' + goal[1].toFixed(1) + ' m';
+  $('deployhint').textContent = !s.robot_link.carrier ? 'The robot link is down.' : running ? 'A session is running: end it first.' : !cl ? 'Tick the four checks first.' :
+    reh.ok ? 'Rehearsed in the twin. The runner starts only on the panel\'s Arm.' : 'Not rehearsed in the twin yet (step 3). The runner starts only on the panel\'s Arm.';
+  setStep('st4', reh.ok && !goalBad ? 'now' : '');
+  renderCur(s.current, s); renderPre(s); renderSessions(s.sessions, s);
+  const csel = $('course'); const sig = s.courses.join('|');
+  if (csel.dataset.sig !== sig) { csel.innerHTML = s.courses.map(c => '<option>' + esc(c) + '</option>').join(''); csel.dataset.sig = sig; }
+  if (s.plan && s.plan.length && !$('plan').dataset.set) { $('plan').innerHTML = s.plan.map(x => '<li><b>' + esc(x[0]) + '</b>' + (x[1] ? ': ' + esc(x[1]) : '') + '</li>').join(''); $('plan').dataset.set = 1; }
+  draw();
 }
 async function refresh() { try { render(await api('/api/state')); } catch (e) { $('daychip').textContent = 'hub unreachable'; } }
-['ga', 'gl', 'note'].forEach(id => $(id).addEventListener('change', showCmd));
-setMode('sim'); refresh().then(showCmd); setInterval(refresh, 2000);
+refresh(); setInterval(refresh, 2000);
 </script></body></html>

@@ -11,6 +11,11 @@ GO). A robot session is ended from its panel; the hub stops a robot session only
 
 Sessions land in the day directory, which is also linked into Deploy Studio's robot-sessions directory so its Replay
 lists each one (Studio rescans every 10 s).
+
+The real scene: `Scan now`, and every robot session start, runs tools/scan_scene.py first (a read-only lidar scan of the
+standing robot's surroundings, Deploy Studio's twin of it saved as a Studio arena, and a sim course of that twin), and
+every robot session that ends gets a twin of its final map too. The page shows the latest scan and its twin, and the
+sim rehearsal offers the scanned twins first, so rehearsals run in the scene the robot is actually in.
 """
 
 from __future__ import annotations
@@ -34,11 +39,14 @@ from urllib.parse import parse_qs, urlparse
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from g1deploy import attempts as A, machine, profiles  # noqa: E402
+from g1deploy import attempts as A, machine, profiles, workspace  # noqa: E402
 
 STUDIO_DATA = Path(os.environ.get("G1_STUDIO_DATA", Path.home() / "research-data/g1-deploy-studio"))
 STUDIO_PORT = int(os.environ.get("G1_STUDIO_PORT", "8790"))
 PANEL_PORTS = {"robot": 8770, "sim": 8771}
+# the automatic rehearsal in a scanned twin: the robot-day ladder without a hand on it (the panel shows it live)
+REHEARSE_SCRIPT = "wait:init,key:s,wait:control,wait:ready,sleep:3,key:g,wait:arrived,sleep:3"
+SCAN_FRESH_S = 15 * 60  # a robot session reuses the scan its goal was picked on when it is younger than this
 REHEARSAL_COURSES = ("lab-door-real", "rp-door-rope", "rp-rope-behind", "lab-site-2m", "open-2m", "open-3m", "slalom",
                      "pillar", "box-low")
 
@@ -88,7 +96,9 @@ def session_summary(d: Path, day: Path):
             "attempts": [{k: r.get(k) for k in ("n", "result", "tag", "note", "duration_s", "walked_m", "max_tilt",
                                                 "goal_rel", "profile")} for r in rows],
             "report": (d / "report.md").exists(), "flags": rep.get("flags") or [],
-            "studio": studio_id(day, d), "ended": (d / "console_summary.json").exists()}
+            "studio": studio_id(day, d), "ended": (d / "console_summary.json").exists(),
+            "scene_scan": (d / "scene_scan.txt").read_text().strip() if (d / "scene_scan.txt").exists() else None,
+            "rehearsal": json.loads((d / "rehearsal.json").read_text()) if (d / "rehearsal.json").exists() else None}
 
 
 class Hub:
@@ -100,6 +110,9 @@ class Hub:
         self.proc, self.current = None, None
         self.lock = threading.Lock()
         self.doctor = {"running": False, "output": None, "t": None}
+        self.scan_job = {"running": False, "name": None, "error": None, "t": None, "then": None}
+        self.scans_dir = self.day / "scans"
+        self.twinned = set()  # robot sessions whose final map already has a twin
         self._pc = (0.0, None)
         self.studio_link = self.link_studio()
 
@@ -143,6 +156,9 @@ class Hub:
                 self.current["exit"] = self.proc.returncode
                 self.current["ended"] = time.time()
                 self.proc = None
+                if self.current["mode"] == "robot" and self.current["dir"] not in self.twinned:
+                    self.twinned.add(self.current["dir"])  # what the robot saw on its walks, as a twin too
+                    self.scan(source_session=self.current["dir"])
             cur = dict(self.current) if self.current else None
         if cur and self.proc is not None:
             url = Path(cur["dir"]) / "panel_url.txt"
@@ -175,7 +191,124 @@ class Hub:
                                                                                          if (ROOT / "sim/courses" / c).is_dir()],
                 "current": self.running(), "sessions": [session_summary(d, self.day) for d in sessions[:40]],
                 "studio": {"port": STUDIO_PORT, "linked": self.studio_link}, "doctor": self.doctor,
-                "panel_ports": PANEL_PORTS, "default_robot": self.args.robot, "plan": self.plan()}
+                "panel_ports": PANEL_PORTS, "default_robot": self.args.robot, "plan": self.plan(),
+                "scans": self.list_scans(), "scan_job": dict(self.scan_job, then=bool(self.scan_job.get("then"))),
+                "default_profile": self.default_profile()}
+
+    def default_profile(self):
+        """The profile the page selects first: private/lab_hub.json {"default_profile": NAME}, else `deploy`."""
+        try:
+            return str(json.loads((ROOT / "private/lab_hub.json").read_text())["default_profile"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return "deploy"
+
+    # -- the real scene ----------------------------------------------------------------------------------
+    def list_scans(self):
+        out = []
+        for d in sorted(self.scans_dir.glob("*/scan.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:20]:
+            try:
+                out.append(json.loads(d.read_text()))
+            except (OSError, ValueError):
+                continue
+        return out
+
+    def scan(self, goal=None, seconds=8.0, then=None, source_session=None):
+        """tools/scan_scene.py in the background; `then`: a robot start request to launch when the scan is done
+        (whatever the scan found: the panel's own checks still gate GO)."""
+        if self.scan_job["running"]:
+            return {"ok": False, "error": "a scan is running"}
+        if source_session is None:
+            with self.lock:
+                if self.proc is not None and self.proc.poll() is None:
+                    return {"ok": False, "error": "a session is running: scan before or after it"}
+            if not self.robot_link()["carrier"]:
+                return {"ok": False, "error": f"no link on {self.args.iface}: robot off or cable out"}
+        name = f"session-{Path(source_session).name}" if source_session else f"scan-{time.strftime('%H%M%S')}"
+        cmd = [str(ROOT / ".venv/bin/python"), str(ROOT / "tools/scan_scene.py"), "--out", str(self.scans_dir / name)]
+        if source_session:
+            cmd += ["--from-session", str(source_session)]
+        else:
+            cmd += ["--robot", self.args.robot, "--goal", *(str(float(v)) for v in (goal or [2.0, 0.0])),
+                    "--seconds", str(float(seconds))]
+        self.scan_job = {"running": True, "name": name, "error": None, "t": time.time(), "then": then}
+
+        def go():
+            (self.scans_dir / name).mkdir(parents=True, exist_ok=True)
+            try:
+                r = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=240,
+                                   stdin=subprocess.DEVNULL, env=dict(os.environ, PYTHONPATH=str(ROOT)))
+                err = None if r.returncode == 0 else (r.stderr or r.stdout)[-500:]
+            except Exception as exc:
+                err = f"scan failed: {exc}"
+            then_req = self.scan_job.get("then")
+            self.scan_job = {"running": False, "name": name, "error": err, "t": time.time(), "then": None}
+            if then_req is not None:
+                then_req["scan"] = False
+                then_req["scene_scan"] = name
+                res = self.start(then_req)
+                if not res.get("ok"):
+                    self.scan_job["error"] = "scan done, session not started: " + res.get("error", "")
+        threading.Thread(target=go, daemon=True).start()
+        return {"ok": True, "name": name}
+
+    def scan_grid(self, name):
+        """The scan's lidar memory around where the robot stood (workspace.code_grid, 10 cm cells, 5 m each way)."""
+        f = self.scan_file(name, "memory.npz")
+        if f is None:
+            return None
+        import numpy as np
+
+        with np.load(f, allow_pickle=False) as z:
+            start = [float(v) for v in z["start_xy"]] if "start_xy" in z.files else [0.0, 0.0]
+            yaw = float(z["start_yaw"]) if "start_yaw" in z.files else 0.0
+            g = workspace.code_grid(z["support"], z["ceiling"], z["lo"], float(z["res"]), start, 5.0, 0.1)
+        return dict(g, start=[start[0], start[1], yaw])
+
+    def trajectory(self, name):
+        """A sim session in a twin, in the start frame (ahead = x, left = y): the walked pelvis path, every plan's
+        pelvis path, contacts and the attempt result."""
+        d = (self.day / name).resolve()
+        if d.parent != self.day:
+            return None
+        import numpy as np
+
+        out = {"name": name, "walked": None, "plans": [], "contact_max_n": None,
+               "attempts": A.load(d / "attempts.jsonl"), "running": not (d / "console_summary.json").exists()}
+        try:
+            with np.load(d / "sim.npz", allow_pickle=False) as z:
+                rp = z["root_pos"]
+                step = max(1, len(rp) // 400)
+                out["walked"] = np.round(rp[::step, :2], 3).tolist()
+                out["contact_max_n"] = round(float(np.max(z["contact_n"])), 1) if len(z["contact_n"]) else 0.0
+        except (OSError, KeyError, ValueError):
+            pass
+        for f in sorted((d / "plans").glob("plan_*_out.npz"))[:200]:
+            try:
+                with np.load(f, allow_pickle=False) as z:
+                    out["plans"].append(np.round(z["qpos"][::4, :2], 3).tolist())
+            except (OSError, KeyError, ValueError):
+                continue
+        return out
+
+    def rehearse(self, req):
+        """The automatic rehearsal of a goal in a scanned twin: `g1 sim --task TWIN --goal A L --script ...`."""
+        scan, goal = req.get("scan"), req.get("goal")
+        if not scan or not goal:
+            return {"ok": False, "error": "pick a scan and a goal first"}
+        r = dict(req, mode="sim", course="scan:" + scan, script=REHEARSE_SCRIPT, label="rehearse")
+        res = self.start(r)
+        if res.get("ok"):
+            (Path(res["dir"]) / "rehearsal.json").write_text(json.dumps(
+                {"scan": scan, "goal": [float(goal[0]), float(goal[1])], "profile": req.get("profile")}) + "\n")
+        return res
+
+    def scan_file(self, name, rel):
+        if rel not in ("site.png", "twin.json", "scan.json", "site.json", "course/task.json", "memory.npz"):
+            return None
+        p = (self.scans_dir / name / rel).resolve()
+        if self.scans_dir.resolve() not in p.parents or not p.is_file():
+            return None
+        return p
 
     def plan(self):
         """The day's plan from the private overlay (private/lab_plan.json: [[step, detail], ...]), else the page's own."""
@@ -193,23 +326,31 @@ class Hub:
         prof = req.get("profile")
         profiles.find(prof)  # raises ProfileError
         stamp = time.strftime("%H%M%S")
-        name = f"{mode}-{stamp}-{re.sub(r'[^a-zA-Z0-9_-]', '-', prof)}"
+        name = f"{req.get('label') or mode}-{stamp}-{re.sub(r'[^a-zA-Z0-9_-]', '-', prof)}"
         if mode == "sim":
-            name += "-" + re.sub(r"[^a-zA-Z0-9_-]", "-", req.get("course") or "lab-door-real")
+            name += "-" + re.sub(r"[^a-zA-Z0-9_-]", "-", (req.get("course") or "lab-door-real").replace("scan:", "twin-"))
         out = self.day / name
         cmd = [str(ROOT / "g1"), mode, "--profile", prof, "--arm", "--panel", str(PANEL_PORTS[mode]),
                "--record", str(out), "--busy", "warn"]
         if mode == "sim":
             course = req.get("course") or "lab-door-real"
-            if not (ROOT / "sim/courses" / course).is_dir():
+            if course.startswith("scan:"):  # a twin of a scan of today's real scene (tools/scan_scene.py)
+                task = (self.scans_dir / course[5:] / "course" / "task.json").resolve()
+                if self.scans_dir.resolve() not in task.parents or not task.is_file():
+                    raise ValueError(f"no scanned twin {course[5:]}")
+                cmd += ["--task", str(task)]
+            elif not (ROOT / "sim/courses" / course).is_dir():
                 raise ValueError(f"no course {course}")
-            cmd += ["--layout", course]
+            else:
+                cmd += ["--layout", course]
             if req.get("goal"):
                 cmd += ["--goal", *(str(float(v)) for v in req["goal"])]
         else:
             cmd += ["--robot", req.get("robot") or self.args.robot]
             goal = req.get("goal") or [1.5, 0.0]
             cmd += ["--goal", *(str(float(v)) for v in goal)]
+        if mode == "sim" and req.get("script"):
+            cmd = [c for c in cmd if c != "--arm"] + ["--script", req["script"], "--step-timeout", "60"]
         if req.get("note"):
             cmd += ["--note", str(req["note"])[:300]]
         if req.get("operator"):
@@ -227,11 +368,23 @@ class Hub:
                 return {"ok": False, "error": "confirm the robot checklist first: " + ", ".join(missing)}
             if not self.robot_link()["carrier"]:
                 return {"ok": False, "error": f"no link on {self.args.iface}: robot off or cable out"}
+            fresh = None
+            if req.get("scene_scan"):
+                f = self.scans_dir / str(req["scene_scan"]) / "scan.json"
+                if f.is_file() and time.time() - f.stat().st_mtime < SCAN_FRESH_S:
+                    fresh = req["scene_scan"]
+            if fresh:
+                req = dict(req, scan=False)
+            if req.get("scan", True):  # the scene first: a scan and its twin, then the session
+                r = self.scan(goal=req.get("goal"), seconds=8.0, then=dict(req))
+                return dict(r, scanning=True) if r.get("ok") else r
         try:
             cmd, out = self.command(req)
         except (ValueError, profiles.ProfileError) as exc:
             return {"ok": False, "error": str(exc)}
         out.mkdir(parents=True, exist_ok=True)
+        if req.get("scene_scan"):
+            (out / "scene_scan.txt").write_text(req["scene_scan"] + "\n")
         env = dict(os.environ, G1_PANEL_TOKEN=self.token, G1_HUB_PORT=str(self.args.port))
         log = open(out / "console.out", "w")
         # its own process group and session: the console (and the runner it owns) outlive the hub
@@ -323,6 +476,20 @@ def serve(hub: Hub, port: int, host="127.0.0.1"):
                     self._send(200, json.dumps({"ok": True, "cmd": " ".join(cmd), "dir": str(out)}))
                 except Exception as exc:
                     self._send(200, json.dumps({"ok": False, "error": str(exc)}))
+            elif u.path == "/api/grid":
+                g = hub.scan_grid(q.get("s", [""])[0])
+                self._send(200 if g else 404, json.dumps(g or {}, default=float))
+            elif u.path == "/api/trajectory":
+                tr = hub.trajectory(q.get("s", [""])[0])
+                self._send(200 if tr else 404, json.dumps(tr or {}, default=float))
+            elif u.path.startswith("/scan/"):
+                parts = u.path.split("/", 3)
+                f = hub.scan_file(parts[2], parts[3]) if len(parts) == 4 else None
+                if f is None:
+                    self._send(404, "{}")
+                else:
+                    ctype = "image/png" if f.suffix == ".png" else "application/json"
+                    self._send(200, f.read_bytes(), ctype)
             elif u.path == "/report":
                 text = hub.report(q.get("s", [""])[0])
                 self._send(200 if text else 404, text or "no report (yet)", "text/plain; charset=utf-8")
@@ -345,6 +512,14 @@ def serve(hub: Hub, port: int, host="127.0.0.1"):
                 out = hub.stop()
             elif path == "/api/doctor":
                 out = hub.run_doctor()
+            elif path == "/api/rehearse":
+                out = hub.rehearse(msg)
+            elif path == "/api/scan":
+                try:
+                    goal = [float(v) for v in msg.get("goal") or [2.0, 0.0]]
+                    out = hub.scan(goal=goal, seconds=min(30.0, max(3.0, float(msg.get("seconds") or 8.0))))
+                except (TypeError, ValueError):
+                    out = {"ok": False, "error": "goal must be two numbers"}
             else:
                 out = {"ok": False, "error": "unknown action"}
             self._send(200, json.dumps(out, default=str))

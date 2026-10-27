@@ -78,6 +78,20 @@ keeps the sticky E-STOP and adds the robot day around it:
   stumble, caught, aborted, setup issue) and adds a note.
 The terminal console and its keys work as before; the panel and the keys drive the same actions.
 
+**Scan, goal, rehearse, deploy (the hub's main card).** One map, robot-centred at its start pose and facing up:
+1. *Scan now* (and every robot session start, unless the scan its goal was picked on is under 15 min old) runs
+   `tools/scan_scene.py`: `g1 site` (read-only, 8 s of the node's own lidar memory with the robot profile's mount and
+   rear blind; `--dump-memory`), Deploy Studio's scan-to-twin fit of that memory (`studio.twin`, run with Studio's
+   Python) saved as a Studio arena over Studio's local API, and a course of the twin in the start frame
+   (`site_to_course.py --out`). The map shows the scan's heights and the twin's boxes.
+2. *Goal*: tap the map (ahead / left of the start pose); the page flags a goal inside a twin box or on unseen floor.
+3. *Rehearse this goal in the twin*: `g1 sim --task TWIN --goal A L --script ...` (the ladder runs by itself, the panel
+   shows it live); the planned and walked pelvis paths and contacts are drawn on the same map.
+4. *Start the robot session* with the same profile and goal, after the four-item checklist; the runner waits for Arm.
+Every robot session that ends also gets a twin of its final node map (`scan_scene.py --from-session`). Do not move the
+robot between the scan and GO: the goal is relative to where it stood. Studio accepts loopback requests only, so its
+links open on the deploy PC itself.
+
 **H0 desk (the day before or that morning).** `./g1 doctor` all ✓; `./g1 test`; one `./g1 sim --layout open-3m`
 and one `./g1 sim --layout nav-room --mission course` (also builds the TensorRT engines and planner kernels).
 

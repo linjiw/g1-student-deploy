@@ -28,6 +28,7 @@ def main(argv=None):
     ap.add_argument("--name", required=True)
     ap.add_argument("--deadline", type=float, default=25.0)
     ap.add_argument("--keep-attached", action="store_true", help="also keep boxes that intersect the robot at the start")
+    ap.add_argument("--out", default=None, help="task.json to write (default sim/courses/<name>/task.json)")
     args = ap.parse_args(argv)
     site = json.loads(Path(args.site_json).read_text())
     sx, sy = site["start_xy"]
@@ -60,7 +61,7 @@ def main(argv=None):
             "initial_root_xy": [0.0, 0.0], "goal_world_xy": [a, l], "deadline_s": args.deadline,
             "goal_radius_m": 0.4, "goal_speed_m_s": 2.0, "goal_hold_s": 0.1, "fall_height_m": 0.38, "fall_tilt_rad": 0.8,
             "obstacle_contact_threshold_n": 5.0, "source_site": site}
-    out = ROOT / "sim/courses" / args.name / "task.json"
+    out = Path(args.out) if args.out else ROOT / "sim/courses" / args.name / "task.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(task, indent=1) + "\n")
     print(f"{out}: {len(boxes)} boxes, {len(attached)} attached to the robot left out, goal {[a, l]}")

@@ -21,6 +21,52 @@ BEHIND_M = (1.0, 1.6)  # tall returns here behind: the spotter or rope just outs
 CLEAR_MAP_SCAN_S = 10.0  # node.CLEAR_MAP_SCAN_S: a walk waits for this much fresh scan after Clear map
 
 
+MAP_CODES = {" ": "unknown", ".": "ground", "1": "low < 0.3 m", "2": "obstacle < 1.0 m", "3": "tall >= 1.0 m",
+             "^": "overhead over free floor", "s": "obstacle seen only from up close (self-return signature)"}
+
+
+def code_grid(support, ceiling, lo, res, center_xy, half_m=4.0, res_m=0.1, near=None, lock=None):
+    """A memory's support / ceiling layers around `center_xy` as one character per `res_m` cell (MAP_CODES; the
+    highest support and the lowest ceiling of the memory cells inside), world axes: rows[i][j] is the cell at
+    x0 + (i + 0.5) res, y0 + (j + 0.5) res. `near`: the memory's near-only mask (cells seen only from up close).
+    `lock` is held while the window is copied (the node's perception thread writes the layers)."""
+    import contextlib
+
+    import numpy as np
+
+    n = support.shape[0]
+    k = max(1, int(round(res_m / res)))
+    rr = k * res
+    w = int(math.ceil(2 * half_m / rr)) * k  # memory cells per side, a multiple of k
+    i0 = int(math.floor((center_xy[0] - half_m - lo[0]) / res))
+    j0 = int(math.floor((center_xy[1] - half_m - lo[1]) / res))
+    sup, ceil = np.full((w, w), np.nan), np.full((w, w), np.nan)
+    nr = np.zeros((w, w), dtype=bool)
+    a0, a1, b0, b1 = max(i0, 0), min(i0 + w, n), max(j0, 0), min(j0 + w, n)
+    if a1 > a0 and b1 > b0:
+        with lock if lock is not None else contextlib.nullcontext():
+            sup[a0 - i0:a1 - i0, b0 - j0:b1 - j0] = support[a0:a1, b0:b1]
+            ceil[a0 - i0:a1 - i0, b0 - j0:b1 - j0] = ceiling[a0:a1, b0:b1]
+            if near is not None:
+                nr[a0 - i0:a1 - i0, b0 - j0:b1 - j0] = (near() if callable(near) else near)[a0:a1, b0:b1]
+    m = w // k
+    with np.errstate(invalid="ignore"):
+        obs = sup > 0.05
+    n_obs = obs.reshape(m, k, m, k).sum(axis=(1, 3))
+    n_near = (obs & nr).reshape(m, k, m, k).sum(axis=(1, 3))
+    hi = np.where(np.isnan(sup), -np.inf, sup).reshape(m, k, m, k).max(axis=(1, 3))
+    lo_c = np.where(np.isnan(ceil), np.inf, ceil).reshape(m, k, m, k).min(axis=(1, 3))
+    code = np.full((m, m), " ")
+    code[hi > -np.inf] = "."
+    code[(hi > 0.05) & (hi < 0.3)] = "1"
+    code[(hi >= 0.3) & (hi < 1.0)] = "2"
+    code[hi >= 1.0] = "3"
+    code[np.isfinite(lo_c) & (hi <= 0.05)] = "^"
+    code[(n_obs > 0) & (n_near == n_obs)] = "s"  # every obstacle return of the cell came from closer than near_m
+    return {"rows": ["".join(r) for r in code], "res": rr, "half": m * rr / 2, "x0": float(lo[0] + i0 * res),
+            "y0": float(lo[1] + j0 * res), "codes": MAP_CODES}
+
+
 def near_body(m, near_m=NEAR_BODY_M, behind=BEHIND_M):
     """Obstacle cells of a node map (StudentNode.map_snapshot) near the robot, in the robot's frame (ahead, left)."""
     if not m or not m.get("ok"):

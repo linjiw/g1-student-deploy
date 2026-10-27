@@ -49,7 +49,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from g1deploy import bundle, contract as C, guards as G  # noqa: E402
+from g1deploy import bundle, contract as C, guards as G, workspace as W  # noqa: E402
 from g1deploy.latency import predicted_history  # noqa: E402
 from g1deploy.zmq_stream import LOOKAHEAD_FRAMES, PoseStreamer, unpack  # noqa: E402
 
@@ -495,60 +495,25 @@ class StudentNode:
                                                 rear_blind_deg=self.args.rear_blind_deg,
                                                 rear_blind_range_m=self.args.rear_blind_range_m)
 
-    MAP_CODES = {" ": "unknown", ".": "ground", "1": "low < 0.3 m", "2": "obstacle < 1.0 m", "3": "tall >= 1.0 m",
-                 "^": "overhead over free floor", "s": "obstacle seen only from up close (self-return signature)"}
+    MAP_CODES = W.MAP_CODES
 
     def map_snapshot(self, half_m=4.0, res_m=0.1):
-        """The memory around the robot for the operator panel: a robot-centred square of `half_m`, one character per
-        `res_m` cell (MAP_CODES; the highest support and the lowest ceiling of the memory cells inside), world axes:
-        rows[i][j] is the cell at x0 + (i + 0.5) res, y0 + (j + 0.5) res. Also the robot pose, the goal, the active
-        plan's pelvis path and the rear blind, so the panel can draw what the planner works with."""
+        """The memory around the robot for the operator panel (workspace.code_grid: one character per `res_m` cell,
+        robot-centred, world axes), with the robot pose, the goal, the active plan's pelvis path and the rear blind,
+        so the panel can draw what the planner works with."""
         mem = getattr(self, "memory", None)
         st = dict(self.status)
         if mem is None or "xy" not in st:
             return {"ok": False, "error": "no memory yet"}
-        k = max(1, int(round(res_m / mem.res)))
-        res = k * mem.res
-        w = int(math.ceil(2 * half_m / res)) * k  # memory cells per side, a multiple of k
-        cx, cy = st["xy"]
-        i0 = int(math.floor((cx - half_m - mem.lo[0]) / mem.res))
-        j0 = int(math.floor((cy - half_m - mem.lo[1]) / mem.res))
-        sup, ceil = np.full((w, w), np.nan), np.full((w, w), np.nan)
-        near = np.zeros((w, w), dtype=bool)
-        a0, a1 = max(i0, 0), min(i0 + w, mem.n)
-        b0, b1 = max(j0, 0), min(j0 + w, mem.n)
-        if a1 > a0 and b1 > b0:
-            with self.mem_lock:
-                sup[a0 - i0:a1 - i0, b0 - j0:b1 - j0] = mem.support[a0:a1, b0:b1]
-                ceil[a0 - i0:a1 - i0, b0 - j0:b1 - j0] = mem.ceiling[a0:a1, b0:b1]
-                if hasattr(mem, "near_only"):
-                    near[a0 - i0:a1 - i0, b0 - j0:b1 - j0] = mem.near_only()[a0:a1, b0:b1]
-        m = w // k
-        with np.errstate(invalid="ignore"):
-            obs = sup > 0.05
-        n_obs = obs.reshape(m, k, m, k).sum(axis=(1, 3))
-        n_near = (obs & near).reshape(m, k, m, k).sum(axis=(1, 3))
-        sup, ceil = sup.reshape(m, k, m, k), ceil.reshape(m, k, m, k)
-        with np.errstate(invalid="ignore"):
-            hi = np.where(np.isnan(sup), -np.inf, sup).max(axis=(1, 3))
-            lo_c = np.where(np.isnan(ceil), np.inf, ceil).min(axis=(1, 3))
-        code = np.full((m, m), " ")
-        code[hi > -np.inf] = "."
-        code[(hi > 0.05) & (hi < 0.3)] = "1"
-        code[(hi >= 0.3) & (hi < 1.0)] = "2"
-        code[hi >= 1.0] = "3"
-        code[np.isfinite(lo_c) & (hi <= 0.05)] = "^"
-        code[(n_obs > 0) & (n_near == n_obs)] = "s"  # every obstacle return of the cell came from closer than near_m
+        out = W.code_grid(mem.support, mem.ceiling, mem.lo, mem.res, st["xy"], half_m, res_m,
+                          near=getattr(mem, "near_only", None), lock=self.mem_lock)
         act = self.active
         path = None
         if act is not None and isinstance(act[0], dict) and "qpos" in act[0]:
             path = np.round(np.asarray(act[0]["qpos"])[::5, :2], 3).tolist()
-        return {"ok": True, "res": res, "half": m * res / 2, "x0": mem.lo[0] + i0 * mem.res,
-                "y0": mem.lo[1] + j0 * mem.res, "rows": ["".join(r) for r in code], "codes": self.MAP_CODES,
-                "robot": [cx, cy, st.get("yaw_rad", 0.0)], "goal": st.get("goal"), "path": path,
-                "phase": st.get("phase"), "rear_blind_deg": float(self.args.rear_blind_deg or 0.0),
-                "rear_blind_range_m": float(self.args.rear_blind_range_m or 0.0),
-                "stats": dict(getattr(mem, "stats", {}))}
+        return dict(out, ok=True, robot=[st["xy"][0], st["xy"][1], st.get("yaw_rad", 0.0)], goal=st.get("goal"),
+                    path=path, phase=st.get("phase"), rear_blind_deg=float(self.args.rear_blind_deg or 0.0),
+                    rear_blind_range_m=float(self.args.rear_blind_range_m or 0.0), stats=dict(getattr(mem, "stats", {})))
 
     def perception_loop(self, cloud, state, t0, stop):
         """Clouds -> memory, and the route refresh (A* on the memory grid, up to ~0.2 s) - both off the 50 Hz loop."""
