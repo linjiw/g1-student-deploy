@@ -411,19 +411,26 @@ function lastResult(name) {
   const a = rs.length && rs[0].attempts[rs[0].attempts.length - 1];
   return !rs.length ? 'not rehearsed here' : !a ? 'no walk' : (a.result || '-') + (a.duration_s != null ? ' ' + f(a.duration_s, 1) + ' s' : '');
 }
+function overridesText(p) {
+  // what a profile changes, in words: the private picker notes (lab_hub.json "notes"); the keys are the plugin's own
+  const note = ((S && S.picker) || {}).notes || {};
+  return note[p.name] || (p.rules_overrides ? 'tuned rules' : '');
+}
 function renderPolicies(s) {
-  const list = s.profiles.filter(p => !p.error);
+  const list = s.profiles.filter(p => !p.error), pk = s.picker || {featured: [], labels: {}};
   if (!profile) { const d = list.find(p => p.name === s.default_profile) || list.find(p => p.name === 'deploy') || list[0]; profile = d && d.name; }
-  const main = list.filter(p => p.name === 'deploy' || p.name === s.default_profile), more = list.filter(p => !main.includes(p));
-  const role = p => p.name === 'deploy' ? 'baseline' : p.name === s.default_profile ? 'candidate' : '';
-  let html = main.map(p => '<button class="' + (p.name === profile ? 'on' : '') + '" onclick="profile=\'' + esc(p.name) + '\'; render(S)"><b>' +
-    esc(label(p)) + (role(p) ? ' (' + role(p) + ')' : '') + '</b><span>' + esc(lastResult(p.name)) + '</span></button>').join('');
+  const featured = pk.featured.length ? pk.featured : ['deploy', s.default_profile];
+  const main = featured.map(n => list.find(p => p.name === n)).filter(Boolean), more = list.filter(p => !main.includes(p));
+  const name = p => pk.labels[p.name] || (label(p) + (p.name === 'deploy' ? ' (baseline)' : p.name === s.default_profile ? ' (candidate)' : ''));
+  let html = main.map(p => '<button class="' + (p.name === profile ? 'on' : '') + '" title="' + esc(p.description || '') + '" onclick="profile=\'' + esc(p.name) +
+    '\'; render(S)"><b>' + esc(name(p)) + '</b><span>' + esc([overridesText(p) || (p.rules_overrides ? '' : 'as deployed'), lastResult(p.name)].filter(Boolean).join(' · ')) + '</span></button>').join('');
   if (more.length) html += '<button class="' + (more.some(p => p.name === profile) ? 'on' : '') + '" onclick="morePolicy()"><b>' +
     (more.some(p => p.name === profile) ? esc(profile) : 'More…') + '</b><span>' + more.map(p => p.name).join(', ') + '</span></button>';
   if ($('policies').dataset.h !== html) { $('policies').innerHTML = html; $('policies').dataset.h = html; }
 }
 function morePolicy() {
-  const more = S.profiles.filter(p => !p.error && p.name !== 'deploy' && p.name !== S.default_profile);
+  const pk = S.picker || {featured: []}, featured = pk.featured.length ? pk.featured : ['deploy', S.default_profile];
+  const more = S.profiles.filter(p => !p.error && !featured.includes(p.name));
   const pick = prompt('Policy profile: ' + more.map(p => p.name + ' (' + label(p) + ', ' + (p.blind && p.blind[0] ? 'near-rear blind' : 'full lidar') + ')').join('; '), more[0] && more[0].name);
   if (pick && more.some(p => p.name === pick)) { profile = pick; render(S); }
 }
@@ -478,7 +485,8 @@ function besideWhy(s) {
 function renderRehearse(s, ready, rehearsing, walking) {
   const p = prof(profile);
   const live = s.live && s.live.sim && s.live.sim.running ? s.live.sim : null;
-  $('rehbtn').textContent = 'Rehearse ' + label(p) + ' to this goal (~1 min)';
+  const pk = s.picker || {labels: {}};
+  $('rehbtn').textContent = 'Rehearse ' + (p && pk.labels[p.name] || label(p)) + ' to this goal (~1 min)';
   const block = rehearsing ? '' : !scanSel ? 'scan first' : !ready.goal ? 'fix the goal first' : walking ? 'waits: the robot is walking' :
     s.scan_job.running ? 'waits: a scan is running' : besideWhy(s);
   $('rehbtn').disabled = !!block || rehearsing; $('rehwhy').textContent = block;
@@ -523,7 +531,7 @@ function renderDeploy(s, robotLive, walking, rehearsing, ready, rehearsed) {
       !ready.goal ? 'fix the goal first' : '';
     $('deploynote').innerHTML = 'Then in the robot panel: <b>Clear the map</b>, then <b>GO</b>. ' + (rehearsed ? 'Rehearsed in the twin.' : '<span style="color:var(--warn)">Not rehearsed to this goal yet (step 3).</span>');
   } else {
-    $('deploybtn').textContent = 'Start robot session (' + p + ')';
+    $('deploybtn').textContent = 'Start robot session (' + (((s.picker || {}).labels || {})[profile] || p) + ')';
     $('deploybtn').onclick = deploy;
     const cl = Object.values(checklist()).every(Boolean);
     block = !s.robot_link.carrier ? 'waits: the robot link is down' : rehearsing ? 'waits: the rehearsal is running (about a minute)' :

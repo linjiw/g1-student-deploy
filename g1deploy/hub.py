@@ -85,7 +85,7 @@ def list_profiles():
             raw = json.loads(path.read_text())  # name / description / student are informational (profiles.INFO)
             out.append({"name": raw.get("name") or p.stem, "file": str(path.relative_to(ROOT)),
                         "private": "private" in path.parts, "description": raw.get("description", ""),
-                        "student": raw.get("student"),
+                        "student": raw.get("student"), "rules_overrides": raw.get("rules_overrides"),
                         "bundle": Path(prof["bundle"]).name if prof.get("bundle") else "bundle",
                         "rules": Path(prof["rules"]).name if prof.get("rules") else None,
                         "guards": prof.get("guards"), "lookahead": prof.get("goal_lookahead"),
@@ -288,7 +288,7 @@ class Hub:
                 "studio": {"port": STUDIO_PORT, "linked": self.studio_link}, "doctor": self.doctor,
                 "panel_ports": PANEL_PORTS, "default_robot": self.args.robot, "plan": self.plan(),
                 "scans": self.list_scans(), "scan_job": dict(self.scan_job, then=bool(self.scan_job.get("then"))),
-                "default_profile": self.default_profile(),
+                "default_profile": self.default_profile(), "picker": self.picker(),
                 "gpu": {"free_mib": gpu_free_mib() if self.live("robot") else None, "rehearsal_mib": REHEARSAL_GPU_MIB}}
 
     @staticmethod
@@ -299,6 +299,16 @@ class Hub:
                 return live[slot]
         ended = [v for v in live.values() if v]
         return max(ended, key=lambda v: v.get("ended") or 0) if ended else None
+
+    def picker(self):
+        """The policy picker's first-class profiles, their display names and what each changes: private/lab_hub.json
+        {"featured": [names], "labels": {name: text}, "notes": {name: text}}, else the baseline and the default."""
+        try:
+            cfg = json.loads((ROOT / "private/lab_hub.json").read_text())
+            return {"featured": [str(n) for n in cfg.get("featured") or []], "labels": dict(cfg.get("labels") or {}),
+                    "notes": dict(cfg.get("notes") or {})}
+        except (OSError, ValueError, TypeError):
+            return {"featured": [], "labels": {}, "notes": {}}
 
     def default_profile(self):
         """The profile the page selects first: private/lab_hub.json {"default_profile": NAME}, else `deploy`."""

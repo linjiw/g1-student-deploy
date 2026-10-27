@@ -193,6 +193,7 @@ def main(argv=None):
     ap.add_argument("--rear-blind-range-m", type=float, default=0.0)
     ap.add_argument("--body", default="dex3")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--paths", action="store_true", help="also keep each row's route and planned pelvis path (xy)")
     args = ap.parse_args(argv)
     os.environ.setdefault("G1_BODY_MODEL", args.body)
     import torch
@@ -252,6 +253,11 @@ def main(argv=None):
                "rebuild": rebuild_check(memory, z) if not (args.rear_blind_deg or args.rear_blind_range_m) else None,
                "route_found": bool(getattr(route, "found", False)), "latency_s": round(lat, 3),
                **summarize(out, hist)}
+        if args.paths:
+            rp = np.asarray(getattr(route, "path", None) if getattr(route, "path", None) is not None else np.zeros((0, 2)))
+            row["route_path"] = np.round(rp, 3).tolist()
+            if out.get("qpos") is not None:
+                row["plan_xy"] = np.round(np.asarray(out["qpos"])[::3, :2], 3).tolist()
         lv = live.get(int(z["tick"]))
         if lv is not None:
             row["live"] = {"rule": lv.get("rule"), "no_safe": lv.get("no_safe"), "guard": lv.get("guard"),

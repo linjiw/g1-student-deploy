@@ -33,6 +33,9 @@ KEYS = {
     "candidates": (int, None),
     "ode_steps": (int, None),
     "self_margin": (float, None),
+    # settings for the bundle's deploy rules plugin (G1_RULES_OVERRIDES, JSON), e.g. its route's keep-out; the plugin
+    # decides which keys it honours and refuses the rest
+    "rules_overrides": (dict, None),
 }
 DEFAULTS = {"guards": "off", "planner_impl": "fused", "planner_precision": "fp32", "debug_plans": False}
 INFO = ("name", "description", "student")  # informational: not settings, not in the identity
@@ -122,6 +125,8 @@ def identity(args) -> dict:
     bundle = Path(getattr(args, "bundle", None) or ROOT / "bundle").resolve()
     rules = getattr(args, "rules", None)
     settings = {k: getattr(args, k, None) for k in sorted(KEYS) if k not in ("bundle", "rules", "debug_plans")}
+    if settings.get("rules_overrides") is None:  # absent: the identities of runs without overrides stay as they were
+        settings.pop("rules_overrides", None)
     if not settings.get("rear_blind_deg"):  # a blind of 0 deg is no blind, whatever its range
         settings["rear_blind_deg"], settings["rear_blind_range_m"] = 0.0, None
     parts = {"settings": settings, "bundle_manifest_sha256": _file_sha(bundle / "MANIFEST.json"),

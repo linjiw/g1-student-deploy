@@ -220,6 +220,8 @@ class Session:
             self.env["G1_STUDENT_BUNDLE"] = str(Path(args.bundle).resolve())
         if getattr(args, "rules", None):  # its deploy rules plugin (bundle.load_rules)
             self.env["G1_DEPLOY_RULES"] = str(Path(args.rules).resolve())
+        if getattr(args, "rules_overrides", None):  # the plugin's own settings (profiles.KEYS rules_overrides)
+            self.env["G1_RULES_OVERRIDES"] = json.dumps(args.rules_overrides, sort_keys=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         label = f"-{args.robot}" if getattr(args, "robot", None) else ""
         self.dir = Path(args.record) if args.record else SESSIONS / f"{args.mode}-{stamp}{label}"
@@ -292,6 +294,7 @@ class Session:
         meta.update(mode=a.mode, task=getattr(self, "task", None), goal=list(a.goal), t0=self.t0,
                     replay=a.replay, odom=a.odom, lidar=None if sim else a.lidar, body=a.body, guards=a.guards,
                     goal_lookahead=a.goal_lookahead, rear_blind_deg=a.rear_blind_deg,
+                    rules_overrides=getattr(a, "rules_overrides", None),
                     rear_blind_range_m=a.rear_blind_range_m)
         (self.dir / "session.json").write_text(json.dumps(meta, indent=1) + "\n")
         self.launch = (iface, onnx, motions, planner, py, sim)
@@ -936,6 +939,9 @@ def parse_args(argv):
                             "wait up to --busy-wait-s, refuse, or skip the check. Another deploy chain running "
                             "always refuses (g1deploy/machine.py)")
         p.add_argument("--busy-wait-s", type=float, default=300.0)
+        p.add_argument("--rules-overrides", type=json.loads, default=None, metavar="JSON",
+                       help="settings for the bundle's deploy rules plugin, as JSON (e.g. '{\"route\": {...}}') "
+                            "(the plugin decides what it honours; recorded in the session and its identity)")
         p.add_argument("--port-base", type=int, default=None,
                        help=f"the chain's local ports from this base (default {PORT_BASE}: stream, +1 runner debug, +4 "
                             "cloud, +5 LIO odometry, +6 node control). A sim with another base is an isolated rehearsal "

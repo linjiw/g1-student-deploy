@@ -5,8 +5,11 @@
               mount calibration and rear blind, for --seconds; its verdict, the planner's boxes and route, a PNG and
               the memory in node dump format (memory.npz). --from-scan DIR reuses a scan; --from-session DIR uses a
               finished console session's final memory (node_memory.npz: what the robot saw during its walks).
-  2. twin     Deploy Studio's own scan-to-twin fit (studio.twin.twin_from_grid, cell-exact rectangles, run with
-              Studio's Python from G1_STUDIO_ROOT): twin.json in the memory's world frame.
+  2. twin     Deploy Studio's scan-to-twin rectangles (studio.twin, run with Studio's Python from G1_STUDIO_ROOT), twice:
+              its arena (studio_twin.json, at most 128 boxes, small pieces merged into neighbours: narrows gaps) for Studio,
+              and the rehearsal twin (twin.json): the same cell-exact rectangles within COURSE_RADIUS_M of the start,
+              uncapped and unmerged, each face pulled back by the memory's 3.5 cm face push. On 2026-10-27 the arena
+              narrowed a 0.69 m gap between two towers to 0.32 m; the rehearsal twin kept it at 0.65 m.
   3. course   the twin in the start frame as a deploy-kit course (course/task.json, tools/site_to_course.py: boxes
               that touch the standing robot - harness, rope, gantry hook - are left out), for `g1 sim --task`.
   4. Studio   the twin saved as a Studio arena over Studio's local API (http://127.0.0.1:8790), so Arena, Navigate and
@@ -36,15 +39,26 @@ ROOT = Path(__file__).resolve().parents[1]
 STUDIO_ROOT = Path(os.environ.get("G1_STUDIO_ROOT", Path.home() / "code/g1-deploy-studio"))
 STUDIO_URL = os.environ.get("G1_STUDIO_URL", "http://127.0.0.1:8790")
 
+COURSE_RADIUS_M = 4.5  # the rehearsal twin keeps the scene this far around the start (the sim cost grows with boxes)
+FACE_PUSH_M = 0.035  # CloudMemory pushes each return this far past the surface; the simulated lidar pushes again
+
 TWIN_SCRIPT = r"""
 import json, sys
 import numpy as np
 from studio import goal_check, twin
-mem, sx, sy, syaw, gx, gy, label = sys.argv[1], *map(float, sys.argv[2:7]), sys.argv[7]
+mem, sx, sy, syaw, gx, gy, label, radius = sys.argv[1], *map(float, sys.argv[2:7]), sys.argv[7], float(sys.argv[8])
 grid = goal_check.load_grid(mem, basis='deploy-kit lidar scan (node memory)')
 goal = None if np.isnan(gx) else [gx, gy]
 arena = twin.twin_from_grid(grid, start_xy=[sx, sy], start_yaw_rad=syaw, goal_xy=goal, label=label, min_area_m2=0.04)
-print(json.dumps(arena, default=float))
+# the rehearsal twin: cell-exact rectangles near the start, no 128-box cap, no merging, no folding of thin fringes
+lo, res, n = np.asarray(grid['lo']), grid['res'], grid['n']
+ii, jj = np.mgrid[0:n, 0:n]
+far = np.hypot(lo[0] + (ii + .5) * res - sx, lo[1] + (jj + .5) * res - sy) > radius
+near = dict(grid, support=np.where(far, np.nan, grid['support']), ceiling=np.where(far, np.nan, grid['ceiling']))
+warn = []
+fine = twin._fit_rectangles(near, threshold=0.05, height_tol_m=0.05, tall_m=0.8, min_area_m2=0.01, thickness=0.1,
+                            start=[sx, sy], clear_start_m=0.4, warnings=warn)
+print(json.dumps({"arena": arena, "fine": fine, "fine_warnings": warn}, default=float))
 """
 
 
@@ -76,11 +90,15 @@ def studio_twin(mem: Path, site: dict, label: str):
         return None, f"no Deploy Studio at {STUDIO_ROOT}"
     (sx, sy), syaw = site["start_xy"], site["start_yaw"]
     gx, gy = site.get("goal_xy") or [math.nan, math.nan]
-    r = subprocess.run([str(py), "-c", TWIN_SCRIPT, str(mem), str(sx), str(sy), str(syaw), str(gx), str(gy), label],
-                       cwd=str(STUDIO_ROOT), capture_output=True, text=True, timeout=120)
+    r = subprocess.run([str(py), "-c", TWIN_SCRIPT, str(mem), str(sx), str(sy), str(syaw), str(gx), str(gy), label,
+                        str(COURSE_RADIUS_M)], cwd=str(STUDIO_ROOT), capture_output=True, text=True, timeout=300)
     if r.returncode:
         return None, "Studio twin failed: " + (r.stderr or r.stdout)[-400:]
-    return json.loads(r.stdout), None
+    out = json.loads(r.stdout)
+    arena = out["arena"]
+    # the rehearsal twin: faces pulled back by the face push (never thinner than 4 cm)
+    arena["rehearsal_boxes"] = [dict(b, half_xy=[round(max(0.02, h - FACE_PUSH_M), 3) for h in b["half_xy"]]) for b in out["fine"]]
+    return arena, None
 
 
 def studio_save(arena: dict, description: str):
@@ -131,9 +149,11 @@ def main(argv=None):
         summary["warnings"].append(err + "; the course uses the planner's merged boxes")
         twin_boxes = site.get("boxes") or []
     else:
-        twin_boxes = arena["boxes"]
+        twin_boxes = arena.pop("rehearsal_boxes")
         summary["warnings"] += arena.get("warnings") or []
-        (out / "twin.json").write_text(json.dumps(arena, indent=1, default=float) + "\n")
+        (out / "studio_twin.json").write_text(json.dumps(arena, indent=1, default=float) + "\n")
+        (out / "twin.json").write_text(json.dumps(dict(arena, boxes=twin_boxes, label=arena.get("label", "") + " (rehearsal twin)"),
+                                                  indent=1, default=float) + "\n")
     summary["twin_boxes"] = len(twin_boxes)
     (out / "site_twin.json").write_text(json.dumps(dict(site, boxes=twin_boxes), indent=1, default=float) + "\n")
     sys.path.insert(0, str(ROOT / "tools"))
