@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Wireless-remote watcher for the console: the remote's E-stop and takeover in every runner input mode.
 
-The runner's interface manager evaluates only the ACTIVE input interface. While the student streams (ZMQ active) the
-gamepad's Select (stop) and D-up are never read, so the remote alone cannot stop the robot mid-walk. This process
-reads the same wireless_remote bytes from rt/lowstate (subscribe only, it sends nothing to the robot) and prints one
-JSON line per button press; the console turns Select into the runner's global `o` stop (damping, any interface) and
-D-up into a takeover.
+The runner's interface manager evaluates only the ACTIVE input interface, so while the student streams (ZMQ active)
+the gamepad's Select (stop) is never read and the remote alone cannot stop the robot mid-walk. (The SONIC runner's
+GamepadManager does read the D-pad in every mode: each press leaves the stream for a motion set, D-left = boxing.)
+This process reads the same wireless_remote bytes from rt/lowstate (subscribe only, it sends nothing to the robot) and
+prints one JSON line per button press; the console turns Select into the runner's global `o` stop (damping, any
+interface), D-up into a takeover, and logs every other press (console.on_remote).
 
   {"remote": "press", "button": "Select", "t": ...}     on every press edge (any button)
   {"remote": "status", "connected": true, "samples": N, "temps": {...}, "t": ...}

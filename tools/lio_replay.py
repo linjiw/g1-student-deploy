@@ -14,7 +14,11 @@ FAST-LIO on a private DDS domain on loopback, so nothing from a replay reaches t
 --loops N plays the recording N times back to back, stamps shifted by its span plus one frame: a robot that stood
 still stays still, so a short recording gives a longer stationary test (each seam is a one-frame gap).
 
-usage: lio_replay.py SESSION [--loops 6] [--rate 1.0] --out report.json
+--window T0 T1 plays only the frames the recorder received between those times (its monotonic clock, the clock of
+node.log's events) and the lidar IMU around them: a walk out of a long session (score it with the poses, not the
+standing-still verdict).
+
+usage: lio_replay.py SESSION [--loops 6] [--rate 1.0] [--window T0 T1] --out report.json
        lio_replay.py --probe-only --seconds 30 --out report.json
 """
 
@@ -43,13 +47,16 @@ def _chunks(rec, name):
     return sorted(p for p in (rec / name).glob("[0-9]*.npz") if ".tmp" not in p.name)
 
 
-def load_frames(rec):
-    """[(stamp_ns, serialized CustomMsg)] from the recorded rt/utlidar frames (header.stamp = frame start)."""
+def load_frames(rec, window=None):
+    """[(stamp_ns, serialized CustomMsg)] from the recorded rt/utlidar frames (header.stamp = frame start); `window`:
+    only frames the recorder received within (t0, t1) of its clock."""
     out = []
     for path in _chunks(rec, "lidar"):
         with np.load(path) as z:
             off = z["data_off"]
             for j in range(len(z["t"])):
+                if window is not None and not window[0] <= float(z["t"][j]) <= window[1]:
+                    continue
                 if int(z["point_step"][j]) != POINT_DT.itemsize:
                     raise ValueError(f"{path.name}: point_step {int(z['point_step'][j])}, expected the adapter's 22")
                 frame = np.frombuffer(z["data"][off[j]:off[j + 1]].tobytes(), POINT_DT)
@@ -124,6 +131,8 @@ def main(argv=None):
     ap.add_argument("--out", required=True, help="report JSON (poses go next to it as .npz)")
     ap.add_argument("--loops", type=int, default=6)
     ap.add_argument("--rate", type=float, default=1.0, help="playback speed (1 = recorded time)")
+    ap.add_argument("--window", type=float, nargs=2, default=None, metavar=("T0", "T1"),
+                    help="only frames received in this span of the recorder's clock (node.log event times)")
     ap.add_argument("--probe-only", action="store_true", help="no replay: score live /Odometry for --seconds")
     ap.add_argument("--seconds", type=float, default=30.0)
     ap.add_argument("--lidar-topic", default="/livox/lidar_10hz")
@@ -160,7 +169,11 @@ def main(argv=None):
             raise SystemExit("give a SESSION (or --probe-only)")
         rec = Path(args.session)
         rec = rec / "rec" if (rec / "rec").is_dir() else rec
-        frames, (imu_t, gyr, acc) = load_frames(rec), load_imu(rec)
+        frames, (imu_t, gyr, acc) = load_frames(rec, args.window), load_imu(rec)
+        if args.window is not None and frames:  # the lidar IMU around the chosen frames (lidar clock)
+            keep = (imu_t >= frames[0][0] - 500_000_000) & (imu_t <= frames[-1][0] + 500_000_000)
+            imu_t, gyr, acc = imu_t[keep], gyr[keep], acc[keep]
+            report["window"] = list(args.window)
         if not frames or not len(imu_t):
             raise SystemExit(f"{rec}: needs recorded lidar and lidar_imu streams (lidar {len(frames)}, imu {len(imu_t)})")
         t_first = min(frames[0][0], int(imu_t[0]))

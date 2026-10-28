@@ -7,7 +7,9 @@ for first hardware runs and the fallback when LIO diverges. Per sample:
   3. pelvis = stance anchor - foot offset; on a stance switch the new foot is anchored where it is now;
   4. the floor is z = 0 under the stance sole, which also fixes the pelvis height the planner encodes.
 Yaw comes from the IMU (it drifts on the robot; `yaw_drift_rad_s` simulates that here). Slip, double
-support and uneven floors are not modelled; measured accuracy is in docs/RUNBOOK.md.
+support and uneven floors are not modelled; measured accuracy is in docs/RUNBOOK.md. Contact threshold 1 cm (was
+3 cm): travel / FAST-LIO travel on three lab-g1 walks (2026-10-27) 0.85-0.99 (mean 0.93) vs 0.62-0.95 (0.81), on sim
+walks / truth 0.82-0.84 vs 0.72-0.77; no extra drift standing.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ def _quat_matrix(q):
 
 
 class LegOdometry:
-    def __init__(self, xml=None, contact_m=0.03):
+    def __init__(self, xml=None, contact_m=0.01, scale=1.0, rotate_deg=0.0):
         import mujoco
 
         from sim.scene import G1_XML
@@ -40,6 +42,9 @@ class LegOdometry:
                                     and m.geom_type[g] == mujoco.mjtGeom.mjGEOM_SPHERE])
         self.radius = float(m.geom_size[self.foot_geoms[0][0]][0])
         self.contact = contact_m
+        # rehearsal error injection: each step's displacement scaled and turned (2026-10-27 robot: ~0.8 and -5..-11 deg)
+        a = np.radians(rotate_deg)
+        self.err = scale * np.array([[np.cos(a), -np.sin(a), 0.0], [np.sin(a), np.cos(a), 0.0], [0.0, 0.0, 1.0]])
         self.stance, self.anchor, self.p = None, None, None
 
     def feet(self, quat_wxyz, q_mj):
@@ -83,7 +88,7 @@ class LegOdometry:
                 best, best_err = i, err
         dp = -(f[best][0] - self.prev[best][0])
         self.stance, self.dp, self.prev = best, dp, f
-        self.p = self.p + dp
+        self.p = self.p + self.err @ dp
         self.p[2] = -f[self.stance][1][2]  # the planted sole is on the floor (z = 0)
         return self.p.copy()
 

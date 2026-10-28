@@ -371,3 +371,26 @@ def test_rehearsal_beside_the_robot_waits_for_gpu_memory(tmp_path, monkeypatch):
     monkeypatch.setattr(hub, "gpu_free_mib", lambda: 5800.0)
     r = h.rehearse({"profile": "deploy", "scan": "scan-150000", "goal": [1.5, 0.0]})
     assert not r["ok"] and "GB free" in r["error"]
+
+
+def test_rehearsal_pair_exact_then_drift_and_its_verdict(tmp_path, monkeypatch):
+    monkeypatch.setattr(hub, "STUDIO_DATA", tmp_path / "no-studio")
+    h = _hub(tmp_path)
+    _scan(h, "scan-140000")
+    launched = []
+    monkeypatch.setattr(hub.subprocess, "Popen", lambda cmd, **kw: launched.append((cmd, kw["env"])) or SimpleNamespace(pid=701, poll=lambda: 0))
+    monkeypatch.setattr(hub.threading, "Thread", lambda target, args, daemon: SimpleNamespace(start=lambda: target(*args)))
+    assert h.rehearse({"profile": "deploy", "scan": "scan-140000", "goal": [1.5, 0.0]})["ok"]
+    (exact, env0), (drift, env1) = launched
+    assert "--odom" not in exact and "G1_LEG_ODOM" not in env0
+    assert drift[drift.index("--odom") + 1] == "leg" and json.loads(env1["G1_LEG_ODOM"]) == hub.DRIFT
+    dirs = sorted(h.day.glob("rehearse*"), key=lambda d: "drift" in d.name)
+    t = np.linspace(0, 1, 50)
+    for d, side in zip(dirs, (0.0, 1.0)):  # the drifted walk goes 1 m to the side: another way
+        (d / "session.json").write_text("{}")
+        (d / "console_summary.json").write_text("{}")
+        (d / "attempts.jsonl").write_text(json.dumps({"n": 1, "result": "arrived"}) + "\n")
+        np.savez_compressed(d / "sim.npz", root_pos=np.column_stack([2 * t, side * np.sin(np.pi * t), 0.75 + 0 * t]),
+                            contact_n=np.zeros(50))
+    pairs = h.rehearsal_pairs([hub.session_summary(d, h.day) for d in dirs])
+    assert pairs[dirs[0].name]["verdict"] == "other way" and pairs[dirs[0].name]["apart_m"] > 0.9

@@ -180,7 +180,7 @@ class CloudMemory(RayCastMemory):
     def __init__(self, origin_xy, *, source=None, ground_tol_m=0.05, face_push_m=0.035, self_filter=True,
                  self_margin_m=0.05, overhead_min_bottom_m=0.8, min_low_points=3, low_ratio=0.2,
                  free_band_m=(0.1, 0.8), carve_step_m=0.05, carve_stop_m=0.1, edge_cells=2, edge_dz_m=0.05,
-                 carve_rays=4000, min_high_points=1, near_m=0.6, **kw):
+                 carve_rays=4000, min_high_points=1, near_m=0.6, clear_free=False, clear_min_samples=2, clear_keep=0.5, **kw):
         kw.pop("boxes", None)
         super().__init__([], origin_xy, overhead_min_bottom_m=overhead_min_bottom_m, **kw)
         self.source = source
@@ -189,6 +189,11 @@ class CloudMemory(RayCastMemory):
         self.edge_cells, self.edge_dz = int(edge_cells), float(edge_dz_m)
         self.carve_step, self.carve_stop, self.carve_rays = carve_step_m, carve_stop_m, int(carve_rays)
         self.min_high, self.near_m = int(min_high_points), float(near_m)
+        # free-space clearing (opt-in, deploy side; the student was trained on a memory that only adds evidence): a
+        # cell whose obstacle evidence a newer frame's rays pass through, inside the evidence's height range, with no
+        # return in it in that frame, keeps `clear_keep` (half) of its low-obstacle count per such frame. It undoes the smear an odometry
+        # error writes into the memory (2026-10-27: a 0.62 m gap closed to 0.45 m on leg odometry), where rays reach.
+        self.clear_free, self.clear_min, self.clear_keep = bool(clear_free), int(clear_min_samples), float(clear_keep)
         self.body_filter = BodyFilter(margin_m=self_margin_m) if self_filter else None
         shape = (self.n * self.n,)
         self.n_low = np.zeros(shape, dtype=np.int32)
@@ -240,12 +245,14 @@ class CloudMemory(RayCastMemory):
         valid &= (samp[..., 2] >= lo) & (samp[..., 2] < hi)
         fxy = self._apply_pose_error(samp[valid][:, :2], center)
         fi, fok = self._cells(fxy)
+        free_z = (fi[fok], samp[valid][:, 2][fok]) if self.clear_free else None
         ground = pts[:, 2] < self.ground_tol
         gi, gok = self._cells(self._apply_pose_error(pts[ground, :2], center))
         obj, ou = pts[~ground], unit[~ground]
         oi, ook = self._cells(self._apply_pose_error(obj[:, :2] + self.face_push * ou[:, :2], center))
         far = np.linalg.norm(obj[:, :2] - o[~ground, :2], axis=1) > self.near_m
-        return dict(free=np.unique(fi[fok]), ground=gi[gok], obj_idx=oi[ook], obj_z=obj[ook, 2], obj_far=far[ook])
+        return dict(free=np.unique(fi[fok]), ground=gi[gok], obj_idx=oi[ook], obj_z=obj[ook, 2], obj_far=far[ook],
+                    free_z=free_z)
 
     def add_cloud(self, t_ready, points_world, origin_world, qpos36=None):
         """A capture in the gravity-aligned odometry frame (floor at z = 0), usable at `t_ready`."""
@@ -291,12 +298,30 @@ class CloudMemory(RayCastMemory):
                     np.add.at(self.n_low_far, oi[low & far], 1)
                     np.add.at(self.n_high_far, oi[~low & far], 1)
                 self.stats["ground"] += len(ev["ground"])
+                if self.clear_free and ev.get("free_z") is not None:
+                    self._clear(ev["free_z"], oi)
                 touched.append(True)
             else:
                 keep.append(item)
         self.pending = keep
         if touched:
             self._derive()
+
+    def _clear(self, free_z, hit_idx, tol_m=0.05):
+        """Free-space clearing of one frame (see __init__): rays through a cell's obstacle height range, no return there,
+        at least `clear_min` samples -> the cell keeps `clear_keep` of its low-obstacle count."""
+        fi, fz = free_z
+        if not len(fi):
+            return
+        hit = np.zeros(self.n * self.n, dtype=bool)
+        hit[hit_idx] = True
+        inside = (self.n_low[fi] > 0) & ~hit[fi] & (fz >= self.zmin[fi] - tol_m) & (fz <= self.zmax[fi] + tol_m)
+        cells = np.flatnonzero(np.bincount(fi[inside], minlength=self.n * self.n) >= self.clear_min)
+        if len(cells):
+            self.n_low[cells] = (self.n_low[cells] * self.clear_keep).astype(np.int32)
+            self.n_low_far[cells] = (self.n_low_far[cells] * self.clear_keep).astype(np.int32)
+            self.n_ground[cells] = np.maximum(self.n_ground[cells], 1)  # seen through at floor height: open floor
+            self.stats["cleared"] = self.stats.get("cleared", 0) + len(cells)
 
     def _derive(self):
         """Re-derive both layers on the whole grid (241 x 241: ~1 ms)."""

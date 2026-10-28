@@ -178,6 +178,7 @@ ol.plan { margin:0; padding-left:20px; font-size:14px } ol.plan li { margin:4px 
         <div class="seg" id="policies"></div>
         <div class="row" style="margin-top:10px">
           <button class="btn primary" id="rehbtn" onclick="rehearse()">Rehearse</button>
+          <button class="btn" id="rehrobotbtn" onclick="rehearse(true)" hidden>Rehearse from where the robot stands</button>
           <span class="why" id="rehwhy"></span>
         </div>
         <div id="rehprog" hidden></div>
@@ -188,7 +189,7 @@ ol.plan { margin:0; padding-left:20px; font-size:14px } ol.plan li { margin:4px 
         <div id="startblock">
           <div id="checklist">
             <label class="check"><input type="checkbox" id="c-gantry"><span><b>Gantry</b>: the robot hangs in the gantry, feet on the floor</span></label>
-            <label class="check"><input type="checkbox" id="c-estop"><span><b>E-stops</b>: physical E-stop in reach; remote on, in hand (Select = E-STOP)</span></label>
+            <label class="check"><input type="checkbox" id="c-estop"><span><b>E-stops</b>: physical E-stop in reach; remote on, in hand. Only <b>Select</b> = E-STOP and <b>D-up</b> = stand; never D-left/right/down or L2 combos (the runner's boxing / other motion sets)</span></label>
             <label class="check"><input type="checkbox" id="c-remote"><span><b>Rope and spotter</b>: rope above ~1.6 m; spotter to the side, at least 1 m back</span></label>
             <label class="check"><input type="checkbox" id="c-clear"><span><b>Clear</b>: nobody within reach; the goal plus ~0.5 m free</span></label>
           </div>
@@ -371,8 +372,8 @@ function goalChecks() {
 
 // ---------------------------------------------------------------------------------------------------- actions
 async function scanNow() { const r = await api('/api/scan', {goal, seconds:8}); if (!r.ok) alert(r.error); else userScan = false; refresh(); }
-async function rehearse() {
-  const r = await api('/api/rehearse', {profile, scan:scanSel, goal});
+async function rehearse(fromRobot) {
+  const r = await api('/api/rehearse', {profile, scan:scanSel, goal, from_robot: !!fromRobot});
   if (!r.ok) { alert(r.error); return; }
   shown.clear(); livePath = []; livePathFor = r.dir.split('/').pop(); refresh();
 }
@@ -385,9 +386,29 @@ async function deploy() {
   const r = await api('/api/start', {mode:'robot', profile, goal, confirm:checklist(), scene_scan:scanSel, note:$('note').value || undefined});
   if (!r.ok) alert(r.error); refresh();
 }
+// the robot now vs where it stood for the scan (hub.start_check): goals are sent as the same spot in the scene
+let startChk = null, startChkT = 0, startChkKey = '', pairNote = '';
+async function updateStartCheck(force) {
+  const key = scanSel + '|' + goal.join(',');
+  if (!force && key === startChkKey && Date.now() - startChkT < 4000) return;
+  startChkKey = key; startChkT = Date.now();
+  try { startChk = await api('/api/start_check', {scan: scanSel, goal}); } catch (e) { startChk = null; }
+}
+function startCheckText(c) {
+  if (!c) return 'checking where the robot stands against the scan ...';
+  if (!c.ok) return '<span style="color:var(--warn)">' + esc(c.error || 'no start check') + '</span>';
+  const turn = Math.abs(c.turned_deg) < 0.5 ? 'same heading' : 'turned ' + f(Math.abs(c.turned_deg), 0) + '° ' + (c.turned_deg < 0 ? 'right' : 'left');
+  const line = 'Since the scan the robot moved ' + f(c.moved_m, 2) + ' m, ' + turn + ' (map match ' + f(100 * c.overlap, 0) + ' %). ' +
+    'The goal goes to the same spot: ' + esc(goalText(c.goal_now)) + ' from the robot now.';
+  return c.warn ? '<span style="color:var(--warn)">' + line + ' The rehearsals started from the scan\'s pose, not this one.</span>' : line;
+}
 async function sendGoal() {
-  if (!confirm('Send the goal ' + goalText(goal) + ' to the live robot?\nThen Clear the map and press GO in the robot panel.')) return;
-  const r = await api('/api/send_goal', {goal}); if (!r.ok) alert(r.error); refresh();
+  await updateStartCheck(true);
+  const c = startChk;
+  if (!c || !c.ok) { alert((c && c.error) || 'no start check'); return; }
+  if (!confirm('Send the goal to the live robot as ' + goalText(c.goal_now) + ' from where it stands now\n(' + goalText(goal) +
+      ' on the scan; the robot moved ' + f(c.moved_m, 2) + ' m and turned ' + f(c.turned_deg, 0) + '° since).\nThen Clear the map and press GO in the robot panel.')) return;
+  const r = await api('/api/send_goal', {goal, scan: scanSel}); if (!r.ok) alert(r.error); refresh();
 }
 async function estop() {
   try { const r = await fetch('/panel/act?t=' + T, {method:'POST', body:JSON.stringify({act:'estop'})});
@@ -491,6 +512,10 @@ function renderRehearse(s, ready, rehearsing, walking) {
     s.scan_job.running ? 'waits: a scan is running' : besideWhy(s);
   $('rehbtn').disabled = !!block || rehearsing; $('rehwhy').textContent = block;
   $('rehbtn').hidden = rehearsing;
+  // the live robot stands elsewhere than for the scan: rehearse from there (the twin moved into its frame)
+  const c = startChk && startChk.scan === scanSel ? startChk : null;
+  $('rehrobotbtn').hidden = rehearsing || !(s.live && s.live.robot && s.live.robot.running && c && c.ok && c.warn);
+  $('rehrobotbtn').disabled = !!block;
   // progress of the running rehearsal
   $('rehprog').hidden = !live;
   if (live) {
@@ -509,14 +534,21 @@ function renderRehearse(s, ready, rehearsing, walking) {
   $('results').innerHTML = rs.map(x => {
     const a = x.attempts[x.attempts.length - 1], g = x.rehearsal.goal, t = cache.traj[x.name], c = t && t.contact_max_n;
     const res = !x.ended ? pill('running', 'warn') : a ? pill(a.result || 'walking', a.result === 'arrived' ? 'ok' : a.result === 'E-STOP' ? 'bad' : 'na') : pill('no walk', 'bad');
-    return '<label class="res"><input type="checkbox" ' + (shown.has(x.name) ? 'checked' : '') + ' onchange="toggleTraj(\'' + esc(x.name) + '\')"><b>' + esc(label(prof(x.rehearsal.profile))) + '</b>' + res +
+    const pr = (s.pairs || {})[x.name], kind = (x.rehearsal.drift ? pill('odometry drift', 'na') : '') + (x.rehearsal.from_robot ? pill('from the robot', 'na') : '');
+    const pv = pr ? pill(pr.verdict === 'robust' ? 'same with drift' : pr.verdict === 'other way' ? 'drift: other way (' + f(pr.apart_m, 1) + ' m)' : 'drift: ' + (pr.drift_result || 'no walk'),
+      pr.verdict === 'robust' ? 'ok' : 'warn') : '';
+    return '<label class="res"><input type="checkbox" ' + (shown.has(x.name) ? 'checked' : '') + ' onchange="toggleTraj(\'' + esc(x.name) + '\')"><b>' + esc(label(prof(x.rehearsal.profile))) + '</b>' + kind + res + pv +
       '<span class="muted">' + esc(goalText(g)) + '</span>' + (a && a.duration_s != null ? '<span>' + f(a.duration_s, 1) + ' s</span>' : '') +
       (a && a.max_tilt != null ? '<span>tilt ≤ ' + f(a.max_tilt, 2) + '</span>' : '') + (c != null ? (c > 5 ? pill('contact ' + f(c, 0) + ' N', 'bad') : '<span>no contact</span>') : '') +
       (x.ended ? '<a class="small" href="' + host + ':' + s.studio.port + '/?session=' + encodeURIComponent(x.studio) + '" target="_blank" rel="noopener">3D</a>' : '') + '</label>';
   }).join('');
   for (const x of rs) if (shown.has(x.name) && (!cache.traj[x.name] || cache.traj[x.name].running)) loadTraj(x.name, true);
   if (!shown.size && rs.length && rs[0].ended) { shown.add(rs[0].name); loadTraj(rs[0].name); }
-  const same = rs.filter(x => x.ended && x.rehearsal.profile === profile && Math.hypot(x.rehearsal.goal[0] - goal[0], x.rehearsal.goal[1] - goal[1]) < 0.15);
+  const same = rs.filter(x => x.ended && !x.rehearsal.drift && x.rehearsal.profile === profile && Math.hypot(x.rehearsal.goal[0] - goal[0], x.rehearsal.goal[1] - goal[1]) < 0.15);
+  const pv = same.map(x => (s.pairs || {})[x.name]).filter(Boolean);
+  pairNote = !pv.length ? '' : pv.some(v => v.verdict === 'robust') ? 'Same result with odometry drift.' :
+    '<span style="color:var(--warn)">With odometry drift the rehearsal ' + (pv[0].verdict === 'other way' ? 'went another way' : 'did not arrive') +
+    ': this goal depends on odometry the robot may not have.</span>';
   return same.some(x => x.attempts.some(a => a.result === 'arrived'));
 }
 function renderDeploy(s, robotLive, walking, rehearsing, ready, rehearsed) {
@@ -525,11 +557,14 @@ function renderDeploy(s, robotLive, walking, rehearsing, ready, rehearsed) {
   const p = label(prof(profile));
   let block = '';
   if (robotLive) {
-    $('deploybtn').textContent = 'Send goal to robot: ' + goalText(goal);
+    if (scanSel && !walking) updateStartCheck(false);
+    const c = startChk && startChk.scan === scanSel ? startChk : null;
+    $('deploybtn').textContent = 'Send goal to robot: ' + goalText(c && c.ok ? c.goal_now : goal) + (c && c.ok ? ' (same spot as on the scan)' : '');
     $('deploybtn').onclick = sendGoal;
     block = walking ? 'waits: the robot is walking' : rehearsing ? 'waits: a rehearsal is running' : !ready.scan ? 'pick the current scan, or rescan from here (step 1)' :
-      !ready.goal ? 'fix the goal first' : '';
-    $('deploynote').innerHTML = 'Then in the robot panel: <b>Clear the map</b>, then <b>GO</b>. ' + (rehearsed ? 'Rehearsed in the twin.' : '<span style="color:var(--warn)">Not rehearsed to this goal yet (step 3).</span>');
+      !ready.goal ? 'fix the goal first' : c && !c.ok ? 'the live map does not match the scan: rescan from here (step 1)' : '';
+    $('deploynote').innerHTML = (scanSel ? startCheckText(c) + '<br>' : '') + 'Then in the robot panel: <b>Clear the map</b>, then <b>GO</b>. ' +
+      (rehearsed ? 'Rehearsed in the twin. ' + pairNote : '<span style="color:var(--warn)">Not rehearsed to this goal yet (step 3).</span>');
   } else {
     $('deploybtn').textContent = 'Start robot session (' + (((s.picker || {}).labels || {})[profile] || p) + ')';
     $('deploybtn').onclick = deploy;
@@ -538,7 +573,7 @@ function renderDeploy(s, robotLive, walking, rehearsing, ready, rehearsed) {
       scanSel && scanOf(scanSel) && scanOf(scanSel).verdict === 'SESSION' ? 'pick the current scan, or rescan from here (step 1)' :
       s.scan_job.running ? 'waits: a scan is running' : !ready.goal ? 'fix the goal first' : !cl ? 'Tick the four safety checks above to enable it' : '';
     $('checklist').classList.toggle('need', !cl && !rehearsing);
-    $('deploynote').innerHTML = (rehearsed ? 'Rehearsed in the twin. ' : '<span style="color:var(--warn)">Not rehearsed to this goal yet (step 3).</span> ') +
+    $('deploynote').innerHTML = (rehearsed ? 'Rehearsed in the twin. ' + pairNote + ' ' : '<span style="color:var(--warn)">Not rehearsed to this goal yet (step 3).</span> ') +
       'The runner starts only when you press <b>Arm</b> in the robot panel.';
   }
   $('deploybtn').disabled = !!block; $('deploywhy').textContent = block;

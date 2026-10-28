@@ -79,7 +79,8 @@ def node_frame_state(rec, plan_files):
 class Memory:
     """The node's memory, fused frame by frame up to a time; restarted at the node's start / clear_map times."""
 
-    def __init__(self, rec, state, pcfg, session, starts, rear_blind_deg, rear_blind_range_m, self_margin=None):
+    def __init__(self, rec, state, pcfg, session, starts, rear_blind_deg, rear_blind_range_m, self_margin=None,
+                 sensor_kw=None):
         from g1deploy.perception import mid360
         from g1deploy.perception.unitree_lidar import Mount
 
@@ -88,7 +89,7 @@ class Memory:
         mc = (session.get("mount_calib") or {}).get("content")  # the calibration in force that day, not today's file
         self.mount = Mount(np.asarray(mc["pos_torso"], float), mid360.rpy_matrix(tuple(mc["rpy"]))) if mc else Mount.nominal()
         self.blind = (rear_blind_deg, rear_blind_range_m)
-        self.self_margin = self_margin
+        self.self_margin, self.sensor_kw = self_margin, dict(sensor_kw or {})
         self.memory, self.i, self.start = None, 0, None
 
     def _new(self, t0, lo=None):
@@ -98,6 +99,7 @@ class Memory:
         sensor = dict(self.pcfg.sensor)
         if self.self_margin is not None:
             sensor["self_margin_m"] = self.self_margin
+        sensor.update(self.sensor_kw)
         half = float(sensor.get("half_extent_m", 6.0))
         # the node's own grid (its dumped `lo`): cells line up with the node's memory, so the rebuild can be checked
         origin = np.asarray(lo) + half if lo is not None else np.asarray(self.state.qpos_at(t0)[:2])

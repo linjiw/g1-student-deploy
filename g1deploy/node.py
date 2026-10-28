@@ -37,6 +37,7 @@ import copy
 import json
 import math
 import multiprocessing as mp
+import os
 import sys
 import threading
 import time
@@ -166,12 +167,21 @@ class OdomInput:
 
 class LegOdomSource:
     """`--odom leg`: pelvis pose from joints + pelvis IMU at 200 Hz (g1deploy/leg_odometry.py), no LIO needed.
-    The odometry frame starts at the first sample: origin under the pelvis, yaw from the IMU."""
+    The odometry frame starts at the first sample: origin under the pelvis, yaw from the IMU.
+    G1_LEG_ODOM='{"contact_m": 0.01, "scale": 0.8, "rotate_deg": -8}' sets LegOdometry's arguments (scale and rotate_deg
+    inject an error for rehearsals; the console refuses them on the robot)."""
 
-    def __init__(self, state: "DdsState"):
+    def __init__(self, state: "DdsState", publish=True):
+        """`publish=False`: only keep the estimate (`odo.p`), for OdomWatchdog beside another odometry."""
         from g1deploy.leg_odometry import LegOdometry
 
-        self.state, self.odo = state, LegOdometry()
+        self.publish = publish
+        cfg = json.loads(os.environ.get("G1_LEG_ODOM") or "{}") if publish else {}
+        if set(cfg) - {"contact_m", "scale", "rotate_deg"}:
+            raise SystemExit(f"G1_LEG_ODOM: unknown keys {sorted(set(cfg) - {'contact_m', 'scale', 'rotate_deg'})}")
+        if cfg:
+            print(f"leg odometry: {cfg}", flush=True)
+        self.state, self.odo = state, LegOdometry(**cfg)
         self.stop = threading.Event()
         threading.Thread(target=self.loop, daemon=True).start()
 
@@ -187,8 +197,38 @@ class LegOdomSource:
                 v = np.zeros(3) if last_p is None else (p - last_p) / max(now - last_t, 1e-3)
                 last_p, last_t = p, now
                 r = np.array(imu, dtype=float)
-                self.state.set_odometry(p, r, v, np.asarray(gyro, dtype=float))
+                if self.publish:
+                    self.state.set_odometry(p, r, v, np.asarray(gyro, dtype=float))
             time.sleep(0.005)
+
+
+class OdomWatchdog:
+    """`--odom zmq` (FAST-LIO) cross-checked by leg odometry running alongside: the robot stands when LIO says it moves
+    faster than it can walk, or the two speeds disagree by more than `max_dv_m_s`, for `hold_s` (LIO diverged once on
+    lab-g1 while people handled the robot; leg odometry under-counts 5-40 %, i.e. < 0.25 m/s at walking speed).
+    Speeds only: the two odometry frames need no alignment."""
+
+    def __init__(self, max_speed_m_s=1.2, max_dv_m_s=0.4, window_s=1.0, hold_s=0.5):
+        self.max_speed, self.max_dv, self.window, self.hold = max_speed_m_s, max_dv_m_s, window_s, hold_s
+        self.buf, self.bad_since = deque(), None
+
+    def update(self, t, lio_xy, leg_xy):
+        """One sample (monotonic time, LIO pelvis xy, leg-odometry pelvis xy) -> a reason to stop, or None."""
+        self.buf.append((t, np.asarray(lio_xy, float)[:2], np.asarray(leg_xy, float)[:2]))
+        while self.buf and self.buf[0][0] < t - self.window:
+            self.buf.popleft()
+        dt = self.buf[-1][0] - self.buf[0][0]
+        if dt < 0.5 * self.window:
+            return None
+        v_lio = float(np.linalg.norm(self.buf[-1][1] - self.buf[0][1]) / dt)
+        v_leg = float(np.linalg.norm(self.buf[-1][2] - self.buf[0][2]) / dt)
+        if v_lio <= self.max_speed and abs(v_lio - v_leg) <= self.max_dv:
+            self.bad_since = None
+            return None
+        self.bad_since = t if self.bad_since is None else self.bad_since
+        if t - self.bad_since < self.hold:
+            return None
+        return f"odometry disagrees: LIO {v_lio:.2f} m/s, legs {v_leg:.2f} m/s"
 
 
 class DdsCloudInput:
@@ -486,6 +526,8 @@ class StudentNode:
             sensor["self_margin_m"] = self.args.self_margin
         if self.guards.min_high_points:
             sensor["min_high_points"] = self.guards.min_high_points
+        if getattr(self.args, "memory_clear", False):
+            sensor["clear_free"] = True
         self.memory = CloudMemory(xy, rng=np.random.default_rng(self.args.seed), **sensor)
         self.memory.latency = 0.0  # real latency is already in the data; fuse on arrival
         from g1deploy.perception.unitree_lidar import CloudFromSensorFrame, Mount
@@ -945,6 +987,13 @@ class StudentNode:
             if snap["age_low"] > 0.5 or snap["age_odo"] > 0.5:
                 emit("estop", reason="state stale", age_low=snap["age_low"], age_odo=snap["age_odo"])
                 return "stale_state"
+            wd = getattr(self, "watchdog", None)
+            if wd is not None and self.phase == "RUN" and self.leg_check.odo.p is not None:
+                why = wd.update(time.monotonic(), q[:2], self.leg_check.odo.p[:2])
+                if why:
+                    emit("odom_disagree", reason=why, tick=self.tick)
+                    self.phase = "STOPPED"
+                    self.stand(self.tick, why)
             tilt = quat_tilt(snap["imu"])
             if self.phase == "RUN" and tilt > a.tilt_estop:
                 emit("estop", reason="tilt", tilt=tilt)
@@ -1092,6 +1141,10 @@ def parse(argv=None):
                          "0 = the whole rear sector")
     ap.add_argument("--self-margin", type=float, default=None,
                     help="self-filter margin override (m); default: CloudMemory's")
+    ap.add_argument("--no-odom-watchdog", action="store_true",
+                    help="with --odom zmq: do not cross-check LIO with leg odometry (OdomWatchdog)")
+    ap.add_argument("--memory-clear", action="store_true",
+                    help="free-space clearing in the lidar memory (CloudMemory clear_free)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-ticks", type=int, default=0)
     ap.add_argument("--log", default=None)
@@ -1114,6 +1167,9 @@ def main(argv=None):
     state = DdsState(args.iface, args.domain, args.odom)
     if args.odom == "leg":
         LegOdomSource(state)
+    elif args.odom == "zmq" and not args.no_odom_watchdog:  # FAST-LIO, cross-checked by the legs
+        node.leg_check, node.watchdog = LegOdomSource(state, publish=False), OdomWatchdog()
+        emit("odom_watchdog", max_speed_m_s=node.watchdog.max_speed, max_dv_m_s=node.watchdog.max_dv, hold_s=node.watchdog.hold)
     # created before the goal is anchored: with --odom zmq nothing else feeds the state until run() (the start-frame
     # wait below used to time out and the node died with "no robot state to anchor the goal")
     odom = OdomInput(state, args.odom_connect) if args.odom == "zmq" else None

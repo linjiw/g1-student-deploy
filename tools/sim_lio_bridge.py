@@ -4,7 +4,10 @@ on :5561, from the MuJoCo G1 (`g1 sim --odom lio`).
 
   odom   pos [3] f64, quat_wxyz [4] f64, lin_w [3] f64, ang_w [3] f64, stamp [1] f64 (time.monotonic())  at 50 Hz,
          from rt/odostate (simulator truth) plus an optional random-walk drift (--noise '{"xy_rw_m": 0.02,
-         "yaw_rw_rad": 0.01}', per sqrt(s)), the way a LIO estimate drifts
+         "yaw_rw_rad": 0.01}', per sqrt(s)), the way a LIO estimate drifts, and an optional odometry error
+         (--noise '{"scale": 0.9, "rotate_deg": -4}': each step's xy displacement scaled and turned, the way leg
+         odometry under-counts; the node registers the raw lidar frames with this pose, so its map smears as on the
+         robot - an odometry error on top of true odometry, for tolerance sweeps)
   cloud  points [N,3] f32 in the odometry frame (floor z = 0), origin [3] f64, stamp [1] f64, per lidar frame: the
          robot's raw rt/utlidar frames deskewed with the true pose and expressed in the drifted frame, so map and
          pose agree as they do in a real LIO
@@ -64,6 +67,10 @@ def main(argv=None):
     state, cloud = DdsState(args.iface, 0, "dds"), DdsCloudInput()
     conv = CloudFromSensorFrame(BodyFilter(), Mount.nominal())
     drift_xy, drift_yaw = np.zeros(2), 0.0
+    a = math.radians(float(noise.get("rotate_deg", 0.0)))
+    err = float(noise.get("scale", 1.0)) * np.array([[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]])
+    stepped = "scale" in noise or "rotate_deg" in noise
+    true_prev, odo_xy = None, None
     period, last = 1.0 / args.hz, time.monotonic()
     n_odom = n_cloud = 0
     print(f"[sim_lio] odom {args.hz:.0f} Hz + registered cloud on {args.bind}, noise {noise or 'none'}", flush=True)
@@ -88,7 +95,11 @@ def main(argv=None):
             snap = state.snapshot()
             if snap is None:
                 continue
-            q = snap["qpos"]
+            q = np.array(snap["qpos"], float)
+            if stepped:  # integrate the erroneous displacement
+                odo_xy = q[:2].copy() if odo_xy is None else odo_xy + err @ (q[:2] - true_prev)
+                true_prev = q[:2].copy()
+                q[:2] = odo_xy
             c, s = math.cos(drift_yaw), math.sin(drift_yaw)
             lin = snap["lin_w"].copy()
             lin[:2] = [c * lin[0] - s * lin[1], s * lin[0] + c * lin[1]]

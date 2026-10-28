@@ -406,7 +406,9 @@ def cmd_lio_replay(args):
     fl = start_fastlio(ros, env, out / "fastlio.log")
     try:
         rc = subprocess.run(["bash", "-c", ros + f"exec /usr/bin/python3 -u {ROOT}/tools/lio_replay.py {rec} "
-                             f"--loops {args.loops} --rate {args.rate} --out {out / 'report.json'}"], env=env).returncode
+                             f"--loops {args.loops} --rate {args.rate} --out {out / 'report.json'}"
+                             + (f" --window {args.window[0]} {args.window[1]}" if getattr(args, "window", None) else "")],
+                            env=env).returncode
     finally:
         os.killpg(fl.pid, signal.SIGINT)
         try:
@@ -501,6 +503,8 @@ def main(argv=None):
     p.add_argument("--robot")
     p.add_argument("--iface")
     p.add_argument("--loops", type=int, default=6, help="replay: play the recording N times back to back")
+    p.add_argument("--window", type=float, nargs=2, default=None, metavar=("T0", "T1"),
+                   help="replay: only the frames received in this span of the recorder clock (node.log event times)")
     p.add_argument("--rate", type=float, default=1.0, help="replay: playback speed")
     p.add_argument("--seconds", type=float, default=30.0, help="check: how long to score the standing robot")
     args = ap.parse_args(argv)

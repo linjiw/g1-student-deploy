@@ -61,6 +61,11 @@ OBS_CONFIG = LUCID / "config/observation_config_lucid_g1_1570.yaml"
 PANELS = Path(os.environ.get("G1_TASK_PANELS", "/home/linjiw/flow/artifacts/panels/test-v1"))
 COURSES = ROOT / "sim/courses"
 ROBOTS = ROOT / "robots"
+# The runner's gamepad map (lucid-g1-deploy gamepad_manager.hpp): a D-pad press selects a motion set and leaves the
+# student stream, in every input mode; in the boxing set the face and shoulder buttons are punches.
+RUNNER_SETS = {"Up": "standing", "Down": "squat/crawl", "Left": "BOXING", "Right": "styled-walking"}
+BOXING_KEYS = {"X": "walk boxing", "Y": "RANDOM PUNCHES", "B": "boxing idle", "L1": "LEFT PUNCH", "R1": "RIGHT PUNCH",
+               "L2": "LEFT HOOK", "R2": "RIGHT HOOK"}
 PORT_BASE = 5556  # the chain's local ports: stream +0, runner debug +1, cloud +4, LIO odometry +5, node control +6
 REHEARSAL_LOCK = ROOT / "runs/.rehearsal.lock"  # an isolated rehearsal is running (pid): the robot's GO waits for it
 
@@ -346,6 +351,8 @@ class Session:
             node_cmd += ["--guards", a.guards]
         if a.self_margin is not None:
             node_cmd += ["--self-margin", str(a.self_margin)]
+        if a.memory_clear:
+            node_cmd += ["--memory-clear"]
         if a.rear_blind_deg:
             node_cmd += ["--rear-blind-deg", str(a.rear_blind_deg)]
             if a.rear_blind_range_m:
@@ -403,7 +410,7 @@ class Session:
             for _, line in r.lines[-60:]:
                 st = self.runner_state
                 if "Switched to: ZMQ" in line:
-                    st["iface"] = "ZMQ"
+                    st["iface"], st["set"] = "ZMQ", None
                 elif "Switched to: GAMEPAD" in line:
                     st["iface"], st["stream"] = "GAMEPAD", False
                 elif "ZMQ STREAMING MODE: ENABLED" in line:
@@ -573,7 +580,10 @@ class Session:
             self.inbox.put(("node_quit", None, source))
 
     def on_remote(self, line):
-        """remote_watch.py output (pump thread): Select stops at once; D-up queues a takeover while streaming."""
+        """remote_watch.py output (pump thread): Select stops at once; D-up queues a takeover while streaming.
+        The runner reads every D-pad press itself and leaves the student stream for that motion set (RUNNER_SETS):
+        D-down / left / right also stand the student and raise an alarm (2026-10-27: an L2 + D-left meant as a stop put
+        the robot in the boxing set, then L2 = a left hook). Every press is logged."""
         try:
             m = json.loads(line)
         except json.JSONDecodeError:
@@ -587,11 +597,21 @@ class Session:
         elif m.get("remote") == "press":
             b = m.get("button")
             self.remote["last"] = b
+            st = self.runner_state
+            streaming = st["iface"] == "ZMQ"
+            if b in RUNNER_SETS:
+                st["set"] = b
             if b == "Select":
                 self.estop("remote Select")
-            elif b == "Up" and self.runner_state["iface"] == "ZMQ":  # in gamepad mode the runner reads D-up itself
+            elif b == "Up" and streaming:  # in gamepad mode the runner reads D-up itself
                 self.inbox.put(("key", "t", "remote D-up"))
-            elif b in ("Start", "F1", "Up"):
+            elif b in RUNNER_SETS and b != "Up" and streaming:
+                self.event(f"REMOTE D-{b.lower()}: the runner left the student stream for its {RUNNER_SETS[b]} motion set; "
+                           "D-up = standing set, Select = E-STOP")
+                self.inbox.put(("key", "h", f"remote D-{b.lower()}"))
+            elif st["iface"] == "GAMEPAD" and st.get("set") == "Left" and b in BOXING_KEYS:
+                self.event(f"REMOTE {b} in the boxing set: {BOXING_KEYS[b]}; D-up = standing set")
+            else:
                 self.event(f"remote: {b}")
 
     def panel_state(self):
@@ -601,6 +621,8 @@ class Session:
         src = "Unitree controller" if "runner" not in self.procs else "student stream" if (
             st["iface"] == "ZMQ" and st["stream"]) else (
             "SONIC planner" if st["iface"] == "GAMEPAD" and st["control"] else "SONIC reference")
+        if src == "SONIC planner" and st.get("set"):
+            src += f" ({RUNNER_SETS[st['set']]} set)"
         return {"t": time.monotonic() - self.t0, "mode": "ROBOT " + str(self.args.iface) if self.args.mode == "robot"
                 else "SIMULATION", "runner": runner, "driving": src, "phase": ns.get("phase"),
                 "goal_dist_m": ns.get("goal_dist_m"), "latency_s": ns.get("latency_s"),
@@ -698,6 +720,8 @@ class Session:
         runner = ("E-STOP" if st["estop"] else "CONTROL" if st["control"] else "INIT done" if st["init"] else "booting")
         src = "student stream" if (st["iface"] == "ZMQ" and st["stream"]) else (
             "SONIC planner" if st["iface"] == "GAMEPAD" and st["control"] else "SONIC reference")
+        if src == "SONIC planner" and st.get("set"):
+            src += f" ({RUNNER_SETS[st['set']]})"
         lat = ns.get("latency_s")
         rows = [
             f" G1 student deploy  |  {mode}  |  t = {t:6.1f} s",
@@ -978,6 +1002,9 @@ def parse_args(argv):
                        help="deploy-side guards (docs/ROBUSTNESS.md): deploy = self mask, split guidance boxes, walk "
                             "envelope, calm fallback, anchor check; walls = deploy + low overheads as walls (H5-H6)")
         p.add_argument("--self-margin", type=float, default=None, help="self-filter margin override (m)")
+        p.add_argument("--memory-clear", action="store_true", default=None,
+                       help="free-space clearing in the lidar memory: rays through old obstacle evidence clear it "
+                            "(repairs the smear of an odometry error; off by default, the student trained without it)")
         p.add_argument("--bundle", default=None, help="planner bundle directory (default bundle/)")
         p.add_argument("--rules", default=None, help="the bundle's deploy rules plugin (a .py file; needed by bundles "
                                                      "whose student config is not the deployed format)")
@@ -991,7 +1018,7 @@ def parse_args(argv):
                                                            "'course' = the course's own mission")
             p.add_argument("--odom", choices=("dds", "leg", "lio"), default="dds",
                            help="dds: simulator truth; leg: leg odometry (robot day 1); lio: LIO stand-in on :5561")
-            p.add_argument("--lio-noise", default=None, help="LIO stand-in drift, e.g. '{\"xy_rw_m\": 0.02}'")
+            p.add_argument("--lio-noise", default=None, help="LIO stand-in drift, e.g. '{\"xy_rw_m\": 0.02}', or an odometry error '{\"scale\": 0.9, \"rotate_deg\": -4}' (tools/sim_lio_bridge.py)")
             p.add_argument("--remote-start", action="store_true", help="press Start on the virtual remote for [s]")
             p.add_argument("--viewer", action="store_true", help="open the MuJoCo 3D window (needs a display)")
             p.add_argument("--runner-csv", dest="runner_csv", action="store_true", default=False,
@@ -1019,6 +1046,8 @@ def parse_args(argv):
         args.lidar = args.lidar or "dds"
         if not args.iface:
             raise SystemExit("--iface is required (or --robot NAME with an iface in its profile)")
+        if {"scale", "rotate_deg"} & set(json.loads(os.environ.get("G1_LEG_ODOM") or "{}")):
+            raise SystemExit("G1_LEG_ODOM scale / rotate_deg inject an odometry error: rehearsals only, never on the robot")
         if args.goal is None:
             raise SystemExit("--goal AHEAD LEFT is required on the robot (metres from the start pose; leg odometry "
                              "can overshoot ~25 %: keep that much clear floor beyond the goal)")

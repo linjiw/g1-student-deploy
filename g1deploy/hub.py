@@ -42,7 +42,7 @@ from urllib.parse import parse_qs, urlparse
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from g1deploy import attempts as A, machine, profiles, workspace  # noqa: E402
+from g1deploy import attempts as A, machine, profiles, registration, workspace  # noqa: E402
 
 STUDIO_DATA = Path(os.environ.get("G1_STUDIO_DATA", Path.home() / "research-data/g1-deploy-studio"))
 STUDIO_PORT = int(os.environ.get("G1_STUDIO_PORT", "8790"))
@@ -63,6 +63,11 @@ def gpu_free_mib():
         return None
 # the automatic rehearsal in a scanned twin: the robot-day ladder without a hand on it (the panel shows it live)
 REHEARSE_SCRIPT = "wait:init,key:s,wait:control,wait:ready,sleep:3,key:g,wait:arrived,sleep:3"
+# The second rehearsal of every pair: leg odometry with the error the robot's leg odometry showed on 2026-10-27
+# (stride x0.8, steps turned 8 deg right; G1_LEG_ODOM, refused on the robot). A goal the exact rehearsal reaches
+# but the drifted one does not, or reaches another way, depends on odometry the robot does not have.
+DRIFT = {"scale": 0.8, "rotate_deg": -8.0}
+OTHER_WAY_M = 0.5  # the drifted walk left the exact walk's path by more than this: it went another way
 SCAN_FRESH_S = 15 * 60  # a robot session reuses the scan its goal was picked on when it is younger than this
 REHEARSAL_COURSES = ("lab-door-real", "rp-door-rope", "rp-rope-behind", "lab-site-2m", "open-2m", "open-3m", "slalom",
                      "pillar", "box-low")
@@ -143,6 +148,7 @@ class Hub:
         self.scan_job = {"running": False, "name": None, "error": None, "t": None, "then": None}
         self.scans_dir = self.day / "scans"
         self.twinned = set()  # robot sessions whose final map already has a twin
+        self.pair_cache = {}  # (exact, drifted) rehearsal names -> rehearsal_pairs row
         self.adopt()
         self._pc = (0.0, None)
         self.studio_link = self.link_studio()
@@ -284,7 +290,8 @@ class Hub:
                     "chains": pc.get("chains"), "disk_free_gb": round(du.free / 1e9, 1)},
                 "robot_link": self.robot_link(), "profiles": list_profiles(), "courses": [c for c in REHEARSAL_COURSES
                                                                                          if (ROOT / "sim/courses" / c).is_dir()],
-                "live": (live := self.running()), "current": self.current_view(live), "sessions": [session_summary(d, self.day) for d in sessions[:40]],
+                "live": (live := self.running()), "current": self.current_view(live),
+                "sessions": (summ := [session_summary(d, self.day) for d in sessions[:40]]), "pairs": self.rehearsal_pairs(summ),
                 "studio": {"port": STUDIO_PORT, "linked": self.studio_link}, "doctor": self.doctor,
                 "panel_ports": PANEL_PORTS, "default_robot": self.args.robot, "plan": self.plan(),
                 "scans": self.list_scans(), "scan_job": dict(self.scan_job, then=bool(self.scan_job.get("then"))),
@@ -398,6 +405,29 @@ class Hub:
             g = workspace.code_grid(z["support"], z["ceiling"], z["lo"], float(z["res"]), start, 5.0, 0.1)
         return dict(g, start=[start[0], start[1], yaw])
 
+    def start_check(self, scan, goal=None):
+        """The live robot now vs where it stood for `scan` (g1deploy/registration.py): its move since the scan and the
+        scan's goal from the robot now. On 2026-10-27 every walk started 16-31 deg right of its scan's heading and
+        0.16-0.26 m off (the robot hangs in the gantry until the runner takes over)."""
+        if not self.live("robot"):
+            return {"ok": False, "error": "no robot session is live"}
+        grid = self.scan_grid(scan) if scan else None
+        if grid is None:
+            return {"ok": False, "error": "pick the scan the goal was placed on"}
+        code, data, _ = self.panel_proxy("GET", "/map")
+        try:
+            live = json.loads(data) if code == 200 else None
+        except ValueError:
+            live = None
+        out = registration.start_check(grid, live, goal)
+        return dict(out, scan=scan, goal_scan=goal, t=time.time())
+
+    def record_check(self, check):
+        cur = self.live("robot")
+        if cur is not None:
+            with open(Path(cur["dir"]) / "start_check.jsonl", "a") as f:
+                f.write(json.dumps(check, default=float) + "\n")
+
     def trajectory(self, name):
         """A sim session in a twin, in the start frame (ahead = x, left = y): the walked pelvis path, every plan's
         pelvis path, contacts and the attempt result."""
@@ -422,19 +452,90 @@ class Hub:
                     out["plans"].append(np.round(z["qpos"][::4, :2], 3).tolist())
             except (OSError, KeyError, ValueError):
                 continue
+        try:  # a rehearsal from where the robot stood: back into the scan's frame, where the page draws
+            fr = json.loads((d / "rehearsal.json").read_text()).get("from_robot")
+        except (OSError, ValueError):
+            fr = None
+        if fr:
+            back = lambda xy: np.round(registration.rotate(np.asarray(xy, float).reshape(-1, 2) - fr["t"], -fr["theta_rad"]), 3).tolist()  # noqa: E731
+            out["walked"] = back(out["walked"]) if out["walked"] else out["walked"]
+            out["plans"] = [back(pl) for pl in out["plans"]]
+        if (d / "rehearsal.json").exists() and json.loads((d / "rehearsal.json").read_text()).get("drift"):
+            out["plans"] = []  # planned in the drifted odometry's frame, not the scene's
         return out
 
     def rehearse(self, req):
-        """The automatic rehearsal of a goal in a scanned twin: `g1 sim --task TWIN --goal A L --script ...`."""
+        """The automatic rehearsal of a goal in a scanned twin: `g1 sim --task TWIN --goal A L --script ...`, then the
+        same with odometry drift (DRIFT) when it ends (`pair`, default on).
+        `from_robot`: from where the live robot stands now (start_check), not from the scan's pose: the twin moved
+        into the robot's frame and the goal sent as the same spot (needs the GPU room beside the live session)."""
         scan, goal = req.get("scan"), req.get("goal")
         if not scan or not goal:
             return {"ok": False, "error": "pick a scan and a goal first"}
-        r = dict(req, mode="sim", course="scan:" + scan, script=REHEARSE_SCRIPT, label="rehearse")
+        goal = [float(goal[0]), float(goal[1])]
+        r = dict(req, mode="sim", course="scan:" + scan, script=REHEARSE_SCRIPT, label="rehearse" + ("-drift" if req.get("drift") else ""))
+        meta = {"scan": scan, "goal": goal, "profile": req.get("profile"), "drift": DRIFT if req.get("drift") else None}
+        if req.get("from_robot"):
+            check = req.get("check") or self.start_check(scan, goal)
+            if not check.get("ok"):
+                return {"ok": False, "error": check.get("error") or "no start check"}
+            src = self.scan_file(scan, "course/task.json")
+            task = registration.repose_task(json.loads(src.read_text()), check["theta_rad"], check["t"])
+            f = self.day / "reposed" / f"{scan}-{time.strftime('%H%M%S')}.json"
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(json.dumps(task, indent=1) + "\n")
+            r.update(task_file=str(f), goal=check["goal_now"], label=r["label"] + "-from-robot")
+            meta.update(from_robot={k: check[k] for k in ("theta_rad", "t", "moved_m", "turned_deg", "goal_now")})
         res = self.start(r)
         if res.get("ok"):
-            (Path(res["dir"]) / "rehearsal.json").write_text(json.dumps(
-                {"scan": scan, "goal": [float(goal[0]), float(goal[1])], "profile": req.get("profile")}) + "\n")
+            (Path(res["dir"]) / "rehearsal.json").write_text(json.dumps(meta) + "\n")
+            if req.get("pair", True) and not req.get("drift"):
+                then = dict(req, drift=True, pair=False, check=req.get("check") or (meta.get("from_robot") and check))
+                threading.Thread(target=self._then_drift, args=(res["dir"], then), daemon=True).start()
         return res
+
+    def _then_drift(self, first_dir, req):
+        """The drifted rehearsal once the exact one has ended (whatever its result)."""
+        while self.live("sim") and self.live("sim").get("dir") == first_dir:
+            time.sleep(1.0)
+        res = self.rehearse(req)
+        if not res.get("ok"):
+            f = Path(first_dir) / "rehearsal.json"
+            meta = json.loads(f.read_text())
+            f.write_text(json.dumps(dict(meta, drift_error=res.get("error"))) + "\n")
+
+    def rehearsal_pairs(self, sessions):
+        """Exact / drifted rehearsals of the same scan, goal, profile and start: did the drifted one arrive the same
+        way? (sim.npz walked paths; OTHER_WAY_M)."""
+        import numpy as np
+
+        def key(x):
+            r = x["rehearsal"]
+            return (r["scan"], tuple(r["goal"]), r.get("profile"), json.dumps(r.get("from_robot"), sort_keys=True))
+        exact = {key(x): x for x in sessions if x.get("rehearsal") and not x["rehearsal"].get("drift") and x["ended"]}
+        out = {}
+        for x in sessions:
+            r = x.get("rehearsal")
+            if not r or not r.get("drift") or not x["ended"] or key(x) not in exact:
+                continue
+            e = exact[key(x)]
+            if (e["name"], x["name"]) in self.pair_cache:  # ended sessions do not change
+                out[e["name"]] = self.pair_cache[(e["name"], x["name"])]
+                continue
+            res = lambda s: (s["attempts"][-1].get("result") if s["attempts"] else None)  # noqa: E731
+            way = None
+            try:
+                with np.load(Path(e["dir"]) / "sim.npz") as a, np.load(Path(x["dir"]) / "sim.npz") as b:
+                    pa, pb = a["root_pos"][::10, :2], b["root_pos"][::10, :2]
+                way = round(float(np.max(np.min(np.linalg.norm(pb[:, None] - pa[None], axis=2), axis=1))), 2)
+            except (OSError, KeyError, ValueError):
+                pass
+            verdict = ("robust" if res(x) == "arrived" and res(e) == "arrived" and (way is None or way <= OTHER_WAY_M)
+                       else "other way" if res(x) == "arrived" and res(e) == "arrived" else
+                       "fails with drift" if res(e) == "arrived" else "fails")
+            out[e["name"]] = self.pair_cache[(e["name"], x["name"])] = {
+                "drift": x["name"], "exact_result": res(e), "drift_result": res(x), "apart_m": way, "verdict": verdict}
+        return out
 
     def scan_file(self, name, rel):
         if rel not in ("site.png", "twin.json", "scan.json", "site.json", "course/task.json", "memory.npz"):
@@ -470,9 +571,15 @@ class Hub:
             course = req.get("course") or "lab-door-real"
             if course.startswith("scan:"):  # a twin of a scan of today's real scene (tools/scan_scene.py)
                 task = (self.scans_dir / course[5:] / "course" / "task.json").resolve()
-                if self.scans_dir.resolve() not in task.parents or not task.is_file():
+                if req.get("task_file"):  # the twin moved to where the live robot stands (rehearse from_robot)
+                    task = Path(req["task_file"]).resolve()
+                    if (self.day / "reposed").resolve() not in task.parents:
+                        raise ValueError("a reposed course lives in the day's reposed/")
+                if self.scans_dir.resolve() not in task.parents and not req.get("task_file") or not task.is_file():
                     raise ValueError(f"no scanned twin {course[5:]}")
                 cmd += ["--task", str(task)]
+                if req.get("drift"):
+                    cmd += ["--odom", "leg"]
             elif not (ROOT / "sim/courses" / course).is_dir():
                 raise ValueError(f"no course {course}")
             else:
@@ -540,6 +647,8 @@ class Hub:
         if req.get("scene_scan"):
             (out / "scene_scan.txt").write_text(req["scene_scan"] + "\n")
         env = dict(os.environ, G1_PANEL_TOKEN=self.token, G1_HUB_PORT=str(self.args.port))
+        if req.get("drift") and slot == "sim":
+            env["G1_LEG_ODOM"] = json.dumps(DRIFT)
         log = open(out / "console.out", "w")
         # its own process group and session: the console (and the runner it owns) outlive the hub
         proc = subprocess.Popen(cmd, cwd=str(ROOT), env=env, stdin=subprocess.DEVNULL, stdout=log,
@@ -568,15 +677,25 @@ class Hub:
             pass
         return {"ok": True}
 
-    def send_goal(self, goal):
-        """A new goal for the live robot session, relative to the robot now (the panel's Set goal)."""
+    def send_goal(self, goal, scan=None):
+        """A new goal for the live robot session. With `scan`, `goal` is where it was placed on that scan (ahead / left
+        of the robot at the scan) and is sent as the same spot in the scene, from the robot now (start_check); without,
+        it is relative to the robot now (the panel's Set goal)."""
         if not self.live("robot"):
             return {"ok": False, "error": "no robot session is live"}
         if self.walking():
             return {"ok": False, "error": "the robot is walking: send the goal when it stands"}
         a, l = (float(v) for v in goal)
+        check = None
+        if scan:
+            check = self.start_check(scan, [a, l])
+            self.record_check(dict(check, action="send_goal"))
+            if not check.get("ok"):
+                return {"ok": False, "check": check, "error": (check.get("error") or "no start check") +
+                        "; or set the goal relative to the robot now in the robot panel"}
+            a, l = check["goal_now"]
         code, data, _ = self.panel_proxy("POST", "/act", body=json.dumps({"act": "goal", "ahead": a, "left": l}).encode())
-        return {"ok": code == 200, "error": None if code == 200 else data.decode()[:200]}
+        return {"ok": code == 200, "sent": [a, l], "check": check, "error": None if code == 200 else data.decode()[:200]}
 
     def run_doctor(self):
         if self.doctor["running"]:
@@ -692,7 +811,12 @@ def serve(hub: Hub, port: int, host="127.0.0.1"):
                 out = hub.stop(msg.get("slot"))
             elif path == "/api/send_goal":
                 try:
-                    out = hub.send_goal(msg.get("goal") or [])
+                    out = hub.send_goal(msg.get("goal") or [], scan=msg.get("scan"))
+                except (TypeError, ValueError):
+                    out = {"ok": False, "error": "goal must be two numbers"}
+            elif path == "/api/start_check":
+                try:
+                    out = hub.start_check(msg.get("scan"), [float(v) for v in msg.get("goal") or [2.0, 0.0]])
                 except (TypeError, ValueError):
                     out = {"ok": False, "error": "goal must be two numbers"}
             elif path == "/api/doctor":

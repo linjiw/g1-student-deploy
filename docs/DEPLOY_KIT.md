@@ -92,11 +92,30 @@ Rehearsals run beside a live robot session: the hub starts every sim as `nice -n
 isolated chain (its own stream, runner debug, cloud, odometry and control ports; DDS on loopback while the robot's
 chain is on its own interface). While it runs, `runs/.rehearsal.lock` holds its pid and the robot console refuses GO
 (and the hub's panel proxy refuses `g`); it is not started while the robot walks, nor beside a robot console older
-than this interlock. Two sims never run together (both on loopback DDS). Within a live session the hub's *Send goal
-to the robot* sets the panel's goal (ahead / left of the robot now, as a scan taken where it stands).
-Every robot session that ends also gets a twin of its final node map (`scan_scene.py --from-session`). Do not move the
-robot between the scan and GO: the goal is relative to where it stood. Studio accepts loopback requests only, so its
-links open on the deploy PC itself.
+than this interlock. Two sims never run together (both on loopback DDS).
+Every rehearsal is a pair: the exact one (simulator odometry), then, when it ends, the same goal with leg odometry and
+the error lab-g1's leg odometry showed (`G1_LEG_ODOM='{"scale": 0.8, "rotate_deg": -8}'`, stride ×0.8, steps turned
+8° right; refused on the robot). The results list marks the pair *same with drift*, *drift: other way (x m)* (the
+drifted walk left the exact path by more than 0.5 m) or *drift: did not arrive*; a goal that only works with exact
+odometry is flagged before GO (§13).
+*Start check* (`g1deploy/registration.py`, since 2026-10-27): within a live session the hub registers the node's live
+map to the scan's (obstacle cells, heading search ±30° plus an FFT over translation, 0.1 s on the CPU) and shows how far
+the robot moved and turned since the scan (a match below 60 % is not trusted: rescan). *Send goal to the robot* then
+sends the scan's goal as the same spot in the room, from the robot now; every check is appended to the session's
+`start_check.jsonl`. On 2026-10-27 every walk started 16–31° right of its scan's heading and 0.16–0.26 m off (the
+robot hangs in the gantry until the runner takes over), so an unconverted goal pointed up to 1 m beside the rehearsed
+one. When the robot stands more than 0.10 m or 5° off, *Rehearse from where the robot stands* moves the twin into the
+robot's frame (`registration.repose_task`, `runs/.../reposed/`); it needs the GPU room beside the live session.
+Every robot session that ends also gets a twin of its final node map (`scan_scene.py --from-session`). Studio accepts
+loopback requests only, so its links open on the deploy PC itself.
+
+**The wireless remote: two buttons only.** Select = E-STOP (the console's watcher turns it into the runner's damping in
+every input mode) and D-up = takeover (the runner's standing motion set). The SONIC runner reads every D-pad press
+itself, also while the student streams, and switches to its own planner in that motion set: D-down squat/crawl,
+**D-left boxing** (arms up in a guard; then L1/R1/L2/R2 are punches and hooks), D-right styled walking. Stock
+Unitree combos (L2 + ...) mean something else here. On 2026-10-27 an L2 then D-left during a walk put lab-g1 in the
+boxing set mid-turn, and a later L2 threw a left hook. The console logs every press, and a D-down / left / right
+during a walk stands the student and raises an alarm; the panel names the runner's motion set.
 
 **H0 desk (the day before or that morning).** `./g1 doctor` all ✓; `./g1 test`; one `./g1 sim --layout open-3m`
 and one `./g1 sim --layout nav-room --mission course` (also builds the TensorRT engines and planner kernels).
@@ -232,6 +251,11 @@ the ROS python cannot import the deploy stack, so `g1deploy/adapters/dds_lio_bri
 ./g1 robot --robot NAME --odom zmq --goal 2 0          # the console warns if no bridge runs
 ./g1 lio status | stop          # logs in runs/lio/
 ```
+
+With `--odom zmq` the node also runs leg odometry alongside as a watchdog (`OdomWatchdog`, node event `odom_watchdog`
+at start): the robot stands (`odom_disagree`) when LIO says it moves faster than 1.2 m/s, or the two speeds differ by
+more than 0.4 m/s, for 0.5 s (leg odometry under-counts 5–40 %; speeds only, the frames need no alignment).
+`--no-odom-watchdog` turns it off.
 
 FAST-LIO is the Click-and-Traverse `lidar_ws` build with `config/lio/fastlio_mid360_g1.yaml` (input: the adapter's
 10 Hz `/livox/lidar_10hz` + `/livox/imu`). Like every FAST-LIO run, it rewrites its own debug logs under that
@@ -458,3 +482,52 @@ G1_STUDENT_BUNDLE=$PWD/bundle-x G1_DEPLOY_RULES=path/to/rules.py .venv/bin/pytho
 - **On the robot at a door:** expect forward-pitched ducks close to the limit, and side brushes. The gantry or rope must
   be ready to catch a damped collapse there. Stop the pass, with the remote's Select or the panel, if the robot rocks
   back and forth under the beam for more than a few seconds.
+
+## 13. Odometry smear: the stuck walk at a tower gap (lab-g1, 2026-10-27)
+
+**What happened.** The goal was through a 0.69 m gap between two block towers. Walking on leg odometry, the robot turned
+toward it, then turned ~90° away; no safe plan followed. A remote press (L2, D-left) then put the runner in its
+boxing set (§3).
+
+**Why.**
+- *The map smeared.* Leg odometry counted 0.62–0.85 of the distance FAST-LIO measured on that walk (FAST-LIO replayed
+  offline on the recorded lidar and IMU, `g1 lio replay --window`), and turned its steps 5–11° right. The node's
+  memory only adds evidence, so each frame registered with the drifting pose widened the towers: the gap closed from
+  0.62 m standing to 0.45 m after 1 m of walking. FAST-LIO's map kept it at 0.60–0.65 m.
+- *The planner turned away.* Re-planning the 7 plans before the turn with the same everything but FAST-LIO's pose and
+  map, none turns away (as deployed: all 7 turn 70–82° right). A memory of the last 2 s still turns away (the error
+  grows ~0.15 m/s while walking); the last 0.6 s does not, but forgets the robot's blind sides. Clearing the map where
+  newer rays pass through (`--memory-clear`, experimental) widens the gap back to 0.55–0.60 m and still turns away 6/7:
+  the smear beside the robot, in the body-blocked lidar sectors, cannot be seen through.
+- *The rehearsal could not show it.* Sim odometry is exact; and the robot stood 16° right of its scan's heading at GO
+  (every walk that day: 16–31°, 0.16–0.26 m; it hangs in the gantry until the runner takes over).
+
+**Rehearsed from the robot's real start** (`tools/repose_course.py`, the scan's twin moved to the start the robot had):
+exact odometry and the FAST-LIO stand-in go through the gap (4/4); every leg odometry, the sim's own at 1 or 3 cm or
+with the robot's error injected, goes around the left tower instead (8/8).
+
+**How good must odometry be for that gap?** True odometry (the sim LIO stand-in) with an injected error, from the same
+start, one run per row unless noted:
+
+| odometry error | through the gap |
+|---|---|
+| none | 4/4 (with the exact runs) |
+| stride ×0.95 | 3/3 |
+| steps turned 1° (stride ×1.0 or ×0.97) | 2/2 |
+| steps turned 2° | 1/2 |
+| stride ×0.9 or ×0.8; steps turned 4° or 8°; ×0.95 and 2°; ×0.9 and 4° | 0/6 (around the left tower) |
+| random walk 2 cm/√s in xy and 0.01 rad/√s in yaw | 0/2 |
+
+So about 5 % in distance and 1–2° in direction over the approach. Leg odometry (0.85–0.99 and 5–11°) is outside it.
+FAST-LIO standing drifted under 0.5 cm and 0.1° in 50–60 s (§7); walking accuracy is the next robot-day check (< 3 % and < 1° on a
+tape-measured 3 m walk).
+
+**What changed.** Leg odometry's contact threshold 3 → 1 cm (0.93 of FAST-LIO's travel on three walks, was 0.81; not
+enough on its own). The hub's start check and scene-anchored goals, and exact + drifted rehearsal pairs (§3). The
+FAST-LIO watchdog (§7). Error injection for experiments: `G1_LEG_ODOM='{"contact_m": .., "scale": .., "rotate_deg":
+..}'` (sim only; the robot refuses scale / rotate_deg) and the sim LIO stand-in's `--lio-noise '{"scale": ..,
+"rotate_deg": ..}'` (an error on top of true odometry; the node registers the raw frames with it, so its map smears as
+on the robot).
+
+**For gaps: walk on FAST-LIO** (`g1 lio start`, `g1 lio check`, `--odom zmq`; §7), after a standing check and a
+tape-measured walk.

@@ -33,6 +33,7 @@ KEYS = {
     "candidates": (int, None),
     "ode_steps": (int, None),
     "self_margin": (float, None),
+    "memory_clear": (bool, None),
     # settings for the bundle's deploy rules plugin (G1_RULES_OVERRIDES, JSON), e.g. its route's keep-out; the plugin
     # decides which keys it honours and refuses the rest
     "rules_overrides": (dict, None),
