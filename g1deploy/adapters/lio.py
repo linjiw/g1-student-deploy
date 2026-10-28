@@ -138,6 +138,21 @@ def default_standing_q():
     return C.DEFAULT_MJ.copy()
 
 
+def fix_time(stamp_s, now_mono=None, now_unix=None, max_age_s=0.3):
+    """The monotonic time a LIO pose is valid at, from its header stamp (FAST-LIO: the scan's end, on the lidar clock,
+    which the MID-360 keeps within a few ms of this PC's clock), so PoseFilter predicts it forward to now instead of
+    treating a pose a scan + processing old as current (at 0.5 m/s, 50-100 ms of age put every walking frame 2.5-5 cm
+    behind the robot). Returns (t_mono, age_s); an age outside [0, max_age_s] (clocks apart) counts as 0."""
+    import time
+
+    now_mono = time.monotonic() if now_mono is None else now_mono
+    now_unix = time.time() if now_unix is None else now_unix
+    age = now_unix - float(stamp_s)
+    if not 0.0 <= age <= max_age_s:
+        return now_mono, None
+    return now_mono - age, age
+
+
 class PoseFilter:
     """50 Hz pelvis pose from 10 Hz LIO fixes + high-rate pelvis IMU attitude.
 

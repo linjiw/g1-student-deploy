@@ -383,7 +383,7 @@ def test_rehearsal_pair_exact_then_drift_and_its_verdict(tmp_path, monkeypatch):
     assert h.rehearse({"profile": "deploy", "scan": "scan-140000", "goal": [1.5, 0.0]})["ok"]
     (exact, env0), (drift, env1) = launched
     assert "--odom" not in exact and "G1_LEG_ODOM" not in env0
-    assert drift[drift.index("--odom") + 1] == "leg" and json.loads(env1["G1_LEG_ODOM"]) == hub.DRIFT
+    assert drift[drift.index("--odom") + 1] == "lio" and json.loads(drift[drift.index("--lio-noise") + 1])["motion"] == "lab-g1-leg"
     dirs = sorted(h.day.glob("rehearse*"), key=lambda d: "drift" in d.name)
     t = np.linspace(0, 1, 50)
     for d, side in zip(dirs, (0.0, 1.0)):  # the drifted walk goes 1 m to the side: another way

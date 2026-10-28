@@ -175,7 +175,8 @@ def test_clear_map_only_while_standing(node):
 def test_lio_lost_in_fused_odometry_stands_the_robot(node):
     """`--odom fused`: once the filter calls LIO lost (rejected or silent), the walk stops and no GO walks on legs."""
     st, cl = FakeState(), FakeCloud()
-    node.fused = SimpleNamespace(lost=None, filter=SimpleNamespace(x=np.array([0.0, 0.0, 0.0, 1.05, 0.01]), bad_since=None))
+    node.fused = SimpleNamespace(lost=None, filter=SimpleNamespace(x=np.array([0.0, 0.0, 0.0, 1.05, 0.01]), bad_since=None, discontinuity=None),
+                                 speed_alarm=None)
     threading.Timer(4.0, lambda: setattr(node.fused, "lost", time.monotonic())).start()
     try:
         ev, _ = _run(node, st, cl, lambda e: "lio_lost" in e and "stand" in e)

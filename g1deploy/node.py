@@ -168,9 +168,11 @@ class OdomInput:
 class FusedOdom:
     """`--odom fused`: the LIO bridge's `odom` and leg odometry + IMU yaw in one EKF (g1deploy/odom_fusion.py), at
     200 Hz -> DdsState.set_odometry. LIO corrects (one pose per 0.1 s: the bridge's 50 Hz poses are not independent);
-    legs predict and calibrate. LIO refused for 0.2 s stops the walk (`lio_doubt`); `lost` is the time LIO started
-    being refused for good (0.5 s) or went silent: the node then walks no further on legs alone, not even after a GO. Pose: the filter's x, y, yaw; height and roll / pitch from
-    the latest LIO pose."""
+    legs predict and calibrate. Three checks stop the walk (`lio_doubt`) and mark LIO lost (`lost`; no GO walks again
+    on legs alone): a LIO discontinuity (its step 0.25 m off the filter's between two poses: a jump), LIO and leg
+    speeds disagreeing (OdomWatchdog: a runaway or a frozen LIO), and LIO refused by the filter's gate for 0.5 s (lost
+    after 1 s); LIO silent for 0.5 s is lost too. Tuned on 3 real and 8 sim walks (no false stop) and injected faults
+    (private analysis fusion_tune.py). Pose: the filter's x, y, yaw; height and roll / pitch from the latest LIO pose."""
 
     def __init__(self, state: "DdsState", connect="tcp://localhost:5561"):
         import zmq
@@ -178,7 +180,8 @@ class FusedOdom:
         from g1deploy.leg_odometry import LegOdometry
         from g1deploy.odom_fusion import LegLioFilter
 
-        self.state, self.leg, self.filter = state, LegOdometry(), LegLioFilter()
+        self.state, self.leg, self.filter = state, LegOdometry(), LegLioFilter(lost_after_s=1.0)
+        self.watchdog, self.speed_alarm = OdomWatchdog(), None
         self.sock = zmq.Context.instance().socket(zmq.SUB)
         self.sock.setsockopt(zmq.CONFLATE, 1)
         self.sock.setsockopt(zmq.SUBSCRIBE, b"odom")
@@ -220,8 +223,11 @@ class FusedOdom:
             if self.t_msg > self.t_update and now - self.t_update >= 0.1:  # a new LIO pose, at most every 0.1 s
                 self.t_update = now
                 self.filter.update_lio(self.lio[0][:2], self._yaw(self.lio[1]), now)
-            if self.lost is None and (self.filter.lio_lost is not None or now - self.t_msg > self.filter.lost_after):
-                self.lost = self.filter.lio_lost if self.filter.lio_lost is not None else self.t_msg  # rejected, or silent
+                if self.speed_alarm is None and self.watchdog.update(now, self.lio[0][:2], p[:2]):
+                    self.speed_alarm = now
+            alarm = self.filter.discontinuity or self.speed_alarm
+            if self.lost is None and (alarm or self.filter.lio_lost is not None or now - self.t_msg > 0.5):
+                self.lost = alarm or self.filter.lio_lost or self.t_msg  # a jump, a speed mismatch, refused, or silent
             x, y, yaw = self.filter.pose
             pos = np.array([x, y, self.lio[0][2]])
             h = 0.5 * (yaw - self._yaw(self.lio[1]))
@@ -1056,11 +1062,12 @@ class StudentNode:
                 emit("estop", reason="state stale", age_low=snap["age_low"], age_odo=snap["age_odo"])
                 return "stale_state"
             fz = getattr(self, "fused", None)
-            doubt = fz is not None and fz.filter.bad_since is not None and time.monotonic() - fz.filter.bad_since >= 0.2
-            if doubt and self.phase == "RUN":  # LIO refused for 0.2 s: stop now (a tight gap has no room for 0.2 m)
+            doubt = fz is not None and (fz.filter.discontinuity or fz.speed_alarm or (
+                fz.filter.bad_since is not None and time.monotonic() - fz.filter.bad_since >= 0.5))
+            if doubt and self.phase == "RUN":  # stop now: a tight gap has no room for a wrong pose
                 emit("lio_doubt", since=fz.filter.bad_since, tick=self.tick)
                 self.phase = "STOPPED"
-                self.stand(self.tick, "LIO doubtful: refused by the leg / IMU filter for 0.2 s")
+                self.stand(self.tick, "LIO doubtful: a jump, a speed mismatch with the legs, or refused by the filter")
             if fz is not None and fz.lost is not None:  # once lost, no walk (not even a new GO) on legs alone
                 if not getattr(self, "lio_lost_handled", False):
                     self.lio_lost_handled = True

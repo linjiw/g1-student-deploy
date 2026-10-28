@@ -34,7 +34,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from g1deploy.adapters.lio import LioFrames, PoseFilter, hom, quat_to_rot  # noqa: E402
+from g1deploy.adapters.lio import LioFrames, PoseFilter, fix_time, hom, quat_to_rot  # noqa: E402
 from g1deploy.zmq_stream import pack  # noqa: E402
 
 
@@ -76,7 +76,7 @@ def main(argv=None):
             frames.initialise(imu, q_mj, t_cb)
         last["t_caminit_body"] = t_cb
         pos, quat = frames.pelvis_pose(t_cb, q_mj)
-        filt.fix(time.monotonic(), pos, quat, imu)
+        filt.fix(fix_time(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)[0], pos, quat, imu)
 
     def on_cloud(msg):
         if frames.t_world_caminit is None or last["t_caminit_body"] is None:

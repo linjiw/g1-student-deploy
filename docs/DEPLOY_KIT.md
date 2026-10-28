@@ -93,9 +93,9 @@ isolated chain (its own stream, runner debug, cloud, odometry and control ports;
 chain is on its own interface). While it runs, `runs/.rehearsal.lock` holds its pid and the robot console refuses GO
 (and the hub's panel proxy refuses `g`); it is not started while the robot walks, nor beside a robot console older
 than this interlock. Two sims never run together (both on loopback DDS).
-Every rehearsal is a pair: the exact one (simulator odometry), then, when it ends, the same goal with leg odometry and
-the error lab-g1's leg odometry showed (`G1_LEG_ODOM='{"scale": 0.8, "rotate_deg": -8}'`, stride ×0.8, steps turned
-8° right; refused on the robot). The results list marks the pair *same with drift*, *drift: other way (x m)* (the
+Every rehearsal is a pair: the exact one (simulator odometry), then, when it ends, the same goal on true odometry with
+the step-tied error lab-g1's leg odometry showed (`--odom lio --lio-noise '{"motion": "lab-g1-leg"}'`,
+g1deploy/odom_error.py). The results list marks the pair *same with drift*, *drift: other way (x m)* (the
 drifted walk left the exact path by more than 0.5 m) or *drift: did not arrive*; a goal that only works with exact
 odometry is flagged before GO (§13).
 *Start check* (`g1deploy/registration.py`, since 2026-10-27): within a live session the hub registers the node's live
@@ -259,18 +259,31 @@ more than 0.4 m/s, for 0.5 s (leg odometry under-counts 5–40 %; speeds only, t
 
 **`--odom fused` (FAST-LIO + legs, since 2026-10-28).**
 - What runs: the node runs `g1deploy/odom_fusion.py`'s filter at 200 Hz.
-  - Leg-odometry steps and the IMU's yaw predict.
-  - The bridge's poses correct (one per 0.1 s). They are refused when they imply more than 1.5 m/s, or fail the filter's χ² gate.
-  - The filter learns the leg correction while LIO is good.
-- Two levels of response:
-  - LIO refused for 0.2 s (`lio_doubt`): the walk stops.
-  - LIO refused for 0.5 s or silent (`lio_lost`): no further walk, not even after a new GO. The robot never walks on legs alone.
-  - Why two levels: with a 0.5 m/s runaway injected, the robot touched a tower in a 0.69 m gap 1 s after the fault began, when only the 0.5 s level existed.
-- Offline, on the three lab walks of 10-27:
-  - it follows FAST-LIO within 2–7 cm RMS, with no false alarm;
-  - it flags a 0.3 m jump within 0.1 s and a 0.5 m/s runaway within 0.3–0.7 s.
+  - Leg-odometry steps and the IMU's yaw predict, with extra noise while turning (leg odometry breaks in turns).
+  - The bridge's poses correct (one per 0.1 s). The filter learns the leg correction while LIO is good.
+- Three checks stop the walk (`lio_doubt`). Any of them also marks LIO lost (`lio_lost`): no further walk, not even after a new GO; the robot never walks on legs alone.
+  - A discontinuity: LIO's step between two poses more than 0.25 m off the filter's (a jump).
+  - LIO and leg speeds disagreeing (OdomWatchdog): a runaway, or a frozen LIO.
+  - LIO refused by the filter's χ² gate for 0.5 s; this one marks LIO lost after 1 s.
+  - LIO silent for 0.5 s also marks it lost.
+- Tuned on 3 real walks (FAST-LIO replays) and 8 sim walks. With no fault, nothing stopped. Faults injected 2 s into the walk:
+
+  | Fault | Caught | How fast |
+  |---|---|---|
+  | 0.3 m jump | 11/11 | within 0.1 s |
+  | 0.5 m/s runaway | 11/11 | mostly within 1–1.4 s (one 3 s) |
+  | 0.3 m/s runaway | 10/11 | 1.2–5.5 s |
+  | Frozen pose | every walk that was still moving | about 1 s |
+
+- Slow drift is the limit of a leg-based cross-check: legs are only good to ±10–15 % per second. In a tight gap, walk slowly.
+- Offline, on the three lab walks of 10-27, it follows FAST-LIO within 2–7 cm RMS.
 - Starting it: `g1 robot --odom fused`, or the hub's *Odometry* choice. The hub refuses it until `g1 lio start` runs.
 - In sim: `g1 sim --odom fused` (the LIO stand-in), and `tools/drift_gate.py --levels "fused;fused+jump;..."` for injected LIO faults.
+
+**LIO pose age.** FAST-LIO stamps each pose with its scan's end time, on the lidar clock, which runs within a few ms of this PC's clock.
+- The fix: the bridges give the pose filter that time (`adapters/lio.py fix_time`), so it predicts the pose forward to now.
+- Before: a pose a scan plus processing old (50–100 ms) counted as current, so at walking speed every frame was registered 2.5–5 cm behind the robot.
+- `dds_lio_bridge` prints the mean pose age with its stats. Read it on the next robot day.
 
 FAST-LIO is the Click-and-Traverse `lidar_ws` build with `config/lio/fastlio_mid360_g1.yaml` (input: the adapter's
 10 Hz `/livox/lidar_10hz` + `/livox/imu`). Like every FAST-LIO run, it rewrites its own debug logs under that

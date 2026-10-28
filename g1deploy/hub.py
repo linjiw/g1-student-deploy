@@ -63,10 +63,11 @@ def gpu_free_mib():
         return None
 # the automatic rehearsal in a scanned twin: the robot-day ladder without a hand on it (the panel shows it live)
 REHEARSE_SCRIPT = "wait:init,key:s,wait:control,wait:ready,sleep:3,key:g,wait:arrived,sleep:3"
-# The second rehearsal of every pair: leg odometry with the error the robot's leg odometry showed on 2026-10-27
-# (stride x0.8, steps turned 8 deg right; G1_LEG_ODOM, refused on the robot). A goal the exact rehearsal reaches
-# but the drifted one does not, or reaches another way, depends on odometry the robot does not have.
-DRIFT = {"scale": 0.8, "rotate_deg": -8.0}
+# The second rehearsal of every pair: true odometry with the step-tied error lab-g1's leg odometry showed
+# (g1deploy/odom_error.py preset lab-g1-leg, through the sim LIO stand-in: the node registers raw lidar frames with
+# that pose, as on the robot). A goal the exact rehearsal reaches but the drifted one does not, or reaches another way,
+# depends on odometry the robot may not have. (Not the sim's own leg odometry: it already under-counts ~17 %.)
+DRIFT = {"motion": "lab-g1-leg"}
 OTHER_WAY_M = 0.5  # the drifted walk left the exact walk's path by more than this: it went another way
 SCAN_FRESH_S = 15 * 60  # a robot session reuses the scan its goal was picked on when it is younger than this
 REHEARSAL_COURSES = ("lab-door-real", "rp-door-rope", "rp-rope-behind", "lab-site-2m", "open-2m", "open-3m", "slalom",
@@ -581,7 +582,7 @@ class Hub:
                     raise ValueError(f"no scanned twin {course[5:]}")
                 cmd += ["--task", str(task)]
                 if req.get("drift"):
-                    cmd += ["--odom", "leg"]
+                    cmd += ["--odom", "lio", "--lio-noise", json.dumps(dict(DRIFT, seed=int(time.time()) % 10000))]
             elif not (ROOT / "sim/courses" / course).is_dir():
                 raise ValueError(f"no course {course}")
             else:
@@ -657,8 +658,6 @@ class Hub:
         if req.get("scene_scan"):
             (out / "scene_scan.txt").write_text(req["scene_scan"] + "\n")
         env = dict(os.environ, G1_PANEL_TOKEN=self.token, G1_HUB_PORT=str(self.args.port))
-        if req.get("drift") and slot == "sim":
-            env["G1_LEG_ODOM"] = json.dumps(DRIFT)
         log = open(out / "console.out", "w")
         # its own process group and session: the console (and the runner it owns) outlive the hub
         proc = subprocess.Popen(cmd, cwd=str(ROOT), env=env, stdin=subprocess.DEVNULL, stdout=log,

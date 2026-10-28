@@ -32,18 +32,23 @@ def _wrap(a):
 
 
 class LegLioFilter:
-    def __init__(self, step_sigma=0.15, turn_sigma_m_per_rad=0.4, yaw_sigma_deg_sqrt_s=0.2, s_sigma=0.03,
+    def __init__(self, step_sigma=0.15, turn_sigma_m_per_rad=1.2, yaw_sigma_deg_sqrt_s=0.2, s_sigma=0.03,
                  beta_sigma_deg=1.0, lio_xy_sigma=0.03, lio_yaw_sigma_deg=3.0, gate_chi2=16.3, lost_after_s=0.5,
-                 max_speed_m_s=1.5):
+                 max_speed_m_s=1.5, jump_m=0.25):
         """`step_sigma`: the 1-sigma error of a step as a fraction of its length; `yaw_sigma_deg_sqrt_s`: IMU yaw noise
         density; `s_sigma`, `beta_sigma_deg`: correction random walk per sqrt(metre); `gate_chi2` 16.3 = 99.9 % (3 dof);
-        `max_speed_m_s`: LIO implying more than this since its last accepted pose is a fault. `turn_sigma_m_per_rad`:
-        extra step error while turning (leg odometry breaks in turns: on one walk legs and LIO parted 0.3 m sideways
-        over ~0.6 rad of turning). LIO's yaw only corrects slow drift (3 deg): the pelvis yaw it gives wobbles +-1.5 deg
+        `max_speed_m_s`: LIO implying more than this since its last accepted pose is a fault. `jump_m`: LIO moving
+        this much more (or less) than the filter's own prediction between two consecutive LIO poses is a
+        discontinuity, latched in `discontinuity` (a jump; between two LIO poses the legs differ from LIO by up to 13 cm
+        on the real walks, 21 cm in sim turns).
+        `turn_sigma_m_per_rad`: extra step error while turning (leg odometry breaks in turns: on one walk legs and LIO
+        parted 0.3 m sideways over ~0.6 rad of turning; tuned on 3 real + 8 sim walks to give no false refusal, so
+        the gate is a slow consistency check - jumps and runaways are caught by `jump_m` and the caller's speed check). LIO's yaw only corrects slow drift (3 deg): the pelvis yaw it gives wobbles +-1.5 deg
         with the gait, while the IMU's yaw changes are smooth."""
         self.turn_var = turn_sigma_m_per_rad ** 2
         self.step_sigma, self.yaw_var = step_sigma, math.radians(yaw_sigma_deg_sqrt_s) ** 2
-        self.max_speed, self.last_lio = max_speed_m_s, None
+        self.max_speed, self.last_lio, self.jump_m = max_speed_m_s, None, jump_m
+        self.prev_lio = self.discontinuity = None  # (xy, filter xy) at the previous LIO pose; time of a jump
         self.s_var, self.b_var = s_sigma ** 2, math.radians(beta_sigma_deg) ** 2
         self.R = np.diag([lio_xy_sigma ** 2, lio_xy_sigma ** 2, math.radians(lio_yaw_sigma_deg) ** 2])
         self.gate, self.lost_after = gate_chi2, lost_after_s
@@ -85,7 +90,14 @@ class LegLioFilter:
         d2 = float(r @ np.linalg.solve(S, r))
         jump = self.last_lio is not None and (
             np.hypot(xy[0] - self.last_lio[0], xy[1] - self.last_lio[1]) > self.max_speed * max(t - self.last_lio[2], 0.05))
+        if self.prev_lio is not None:  # LIO's own step against the filter's step since the previous LIO pose
+            d_lio = np.asarray(xy[:2], float) - self.prev_lio[0]
+            d_flt = self.x[:2] - self.prev_lio[1]
+            if np.hypot(*(d_lio - d_flt)) > self.jump_m:
+                jump = True
+                self.discontinuity = self.discontinuity or t
         if jump or d2 > self.gate:
+            self.prev_lio = (np.asarray(xy[:2], float).copy(), self.x[:2].copy())
             self.rejected += 1
             self.bad_since = t if self.bad_since is None else self.bad_since
             if self.lio_lost is None and t - self.bad_since >= self.lost_after:
@@ -99,4 +111,5 @@ class LegLioFilter:
         self.x[3] = float(np.clip(self.x[3], 0.7, 1.6))
         self.P = (np.eye(5) - K @ H) @ self.P
         self.accepted += 1
+        self.prev_lio = (np.asarray(xy[:2], float).copy(), self.x[:2].copy())  # after the correction
         return True, d2

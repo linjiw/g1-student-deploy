@@ -29,7 +29,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from g1deploy.adapters.lio import LioFrames, PoseFilter, hom, quat_to_rot  # noqa: E402
+from g1deploy.adapters.lio import LioFrames, PoseFilter, fix_time, hom, quat_to_rot  # noqa: E402
 from g1deploy.zmq_stream import pack  # noqa: E402
 
 
@@ -85,7 +85,11 @@ def main(argv=None):
         last["t_cb"], last["lio_xyz"] = t_cb, (p.x, p.y, p.z)
         last["odom"] += 1
         pos, quat = frames.pelvis_pose(t_cb, q_mj)
-        filt.fix(time.monotonic(), pos, quat, imu)
+        t_fix, age = fix_time(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)
+        if age is not None:
+            last["age_sum"] = last.get("age_sum", 0.0) + age
+            last["age_n"] = last.get("age_n", 0) + 1
+        filt.fix(t_fix, pos, quat, imu)
 
     def on_cloud(msg):
         if frames.t_world_caminit is None or last["t_cb"] is None:
@@ -125,8 +129,10 @@ def main(argv=None):
                                 ("stamp", np.array([time.monotonic()]))], topic=b"odom"))
             last["pub"] += 1
             if args.stats_s and t_last - t_stat >= args.stats_s:
+                age = last.get("age_sum", 0.0) / max(last.get("age_n", 0), 1) if last.get("age_n") else None
                 print(f"[dds_lio] LIO odom in {last['odom']}, clouds {last['cloud']}, odom out {last['pub']}, "
-                      f"pelvis {np.round(pos, 3).tolist()}", flush=True)
+                      f"pelvis {np.round(pos, 3).tolist()}, LIO pose age "
+                      + (f"{age * 1000:.0f} ms" if age is not None else "unknown (clocks apart)"), flush=True)
                 t_stat = t_last
     except KeyboardInterrupt:
         pass

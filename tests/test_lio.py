@@ -64,3 +64,26 @@ def test_pose_filter_gives_smooth_50hz_velocity_from_10hz_fixes():
         prev = p
     assert np.mean(err) < 0.03
     assert np.std(vel) < 0.25 and abs(np.mean(vel) - speed) < 0.1  # no 10 Hz velocity spikes
+
+
+def test_stamped_fixes_remove_the_lio_age_lag():
+    """FAST-LIO poses arrive a scan + processing old: fed at their stamp time (fix_time) the filter predicts them to
+    now; fed as if current, the pose lags the walking robot by speed x age."""
+    from g1deploy.adapters.lio import PoseFilter, fix_time
+
+    imu_q = np.array([1.0, 0.0, 0.0, 0.0])
+    speed, age = 0.5, 0.08
+    stamped, naive = PoseFilter(), PoseFilter()
+    err_s, err_n = [], []
+    for k in range(250):
+        now = k * 0.02
+        if k % 5 == 0:  # a 10 Hz LIO fix of where the robot was `age` ago
+            p = np.array([speed * (now - age), 0.0, 0.75])
+            t_fix, a = fix_time(now - age, now_mono=now, now_unix=now)
+            stamped.fix(t_fix, p, imu_q, imu_q)
+            naive.fix(now, p, imu_q, imu_q)
+        if k > 50:
+            err_s.append(abs(stamped.pose(now, imu_q)[0][0] - speed * now))
+            err_n.append(abs(naive.pose(now, imu_q)[0][0] - speed * now))
+    assert np.mean(err_s) < 0.005 and np.mean(err_n) > 0.03  # 4 cm behind without the stamps
+    assert fix_time(100.0, now_mono=5.0, now_unix=99.0) == (5.0, None)  # a stamp from the future: clocks apart
