@@ -2955,8 +2955,29 @@ class Hub:
             gate = row.get("passage_gate") or sent.get("passage")
             row["passage_gate"] = gate
             row["passage"], row["passage_basis"] = self.attempt_passage(d, row, gate, sj.get("t0"), practice)
+            # Studio's Replay of a console session starts at its first lowstate sample (host monotonic, like t0)
+            origin = self.replay_origin(d)
+            row["replay_t_s"] = (round(float(sj["t0"]) + float(row["t_go"]) - origin, 2)
+                                 if origin is not None and sj.get("t0") is not None and row.get("t_go") is not None
+                                 else None)
             out.append(row)
         return out
+
+    @staticmethod
+    def replay_origin(d):
+        """The time of the first lowstate sample of session `d` (Studio's Replay time zero), or None."""
+        import numpy as np
+
+        for path in sorted((Path(d) / "rec" / "lowstate").glob("[0-9]*.npz"))[:3]:
+            try:
+                with np.load(path, allow_pickle=False) as z:
+                    t = np.asarray(z["t"], dtype=float)
+            except Exception:  # a cut first chunk: try the next one
+                continue
+            t = t[np.isfinite(t)]
+            if len(t):
+                return float(t.min())
+        return None
 
     @staticmethod
     def manifest_summary(m):
