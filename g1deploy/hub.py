@@ -87,7 +87,9 @@ REHEARSAL_COURSES = ("lab-door-real", "rp-door-rope", "rp-rope-behind", "lab-sit
 CONFIRM_ROBOT = ("gantry", "estop", "remote", "rope")  # the robot start checklist (stored in the session)
 CONFIRM_LEGACY = ("gantry", "estop", "remote", "clear")  # the legacy page's
 RUN_KINDS = ("exact", "drift", "offset")  # a rehearsal set, in order
-ENVELOPE_SLACK_M, ENVELOPE_SLACK_DEG = 0.05, 5.0  # the start check is inside a set's offset envelope with this slack
+# The start check is inside a set's offset envelope with this slack: the registration itself was off by up to
+# ~0.1 m / 4 deg on the sparse gap-069 room (0.30 m / -19 deg measured for a true 0.20 m / -20 deg, 2026-10-28)
+ENVELOPE_SLACK_M, ENVELOPE_SLACK_DEG = 0.15, 6.0
 TRACK_HZ, CONTACT_N = 25.0, 5.0
 # A rehearsal arrived for real when the simulator's truth ends this close to the goal. The node judges arrival on its
 # own estimate, which the drift run corrupts on purpose: its "arrived" can be a metre off (2026-10-28, gap-069).
@@ -1906,13 +1908,15 @@ class Hub:
         out.update(scan=scan, slot=slot, session=Path(cur["dir"]).name, at=time.time())
         env = self.offset_envelope(scan)
         out["offset_envelope"] = env
-        if out.get("ok") and env:
+        cs = (self.console_state.get(slot) or (None, None))[1] or {}
+        out["closed_attempts"] = sum(1 for a in cs.get("attempts") or [] if a.get("result") is not None)
+        # The envelope covers the first walk from the scan pose. After a walk the robot starts where it stopped: the
+        # rehearsal's start offset says nothing about that start (None, and the page says where it starts from).
+        if out.get("ok") and env and not out["closed_attempts"]:
             out["within_offset_envelope"] = bool(out["moved_m"] <= env["moved_m"] + ENVELOPE_SLACK_M
                                                  and abs(out["turned_deg"]) <= env["turned_deg"] + ENVELOPE_SLACK_DEG)
         else:
             out["within_offset_envelope"] = None
-        cs = (self.console_state.get(slot) or (None, None))[1] or {}
-        out["closed_attempts"] = sum(1 for a in cs.get("attempts") or [] if a.get("result") is not None)
         self.checks[slot] = out
         self.record_check(dict(out, action="start_check"), slot=slot)
         return out, live
