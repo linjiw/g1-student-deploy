@@ -231,8 +231,27 @@ def test_studio_lease_refuses_only_the_phone_panels_go(tmp_path):
     assert s.go_locks("panel") == []
     s.run_act(s.make_act("lease", "studio", holder="c", ttl_s=3.0))
     assert s.lease_active()["holder"] == "c"
-    s.run_act(s.make_act("lease", "studio", holder=None))
+    s.run_act(s.make_act("lease", "studio", holder=None, until=0))  # Studio's release / lost lease
     assert s.lease is None and s.act("g", source="panel")["result"] == "done"
+
+
+def test_lease_renewals_through_http_and_direct_stand(tmp_path):
+    """Studio renews its lease every 2 s (possibly with the same id): each renewal moves `until`; its Stand and
+    Takeover come straight to the panel with an id and no operator, and need no lease."""
+    s = arm(session(tmp_path))
+    stop = main_loop(s)
+    try:
+        lease = {"act": "lease", "id": "lease-1", "source": "studio", "holder": "ana", "until": time.time() + 1.0}
+        assert s.submit(lease)[1]["result"] == "done"
+        assert s.submit(dict(lease, until=time.time() + 30.0))[1]["result"] == "done"
+        assert s.lease_active()["until"] > time.time() + 20 and s.go_locks("panel")
+        for k in ("h", "t"):
+            code, r = s.submit({"act": k, "id": f"direct-{k}", "source": "studio"})
+            assert code == 200 and r["result"] == "done", r
+        assert s.submit({"act": "lease", "id": "lease-2", "source": "studio", "holder": None, "until": 0})[1]["ok"]
+        assert s.lease is None
+    finally:
+        stop.set()
 
 
 def test_odometry_lost_locks_go(tmp_path):

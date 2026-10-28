@@ -597,9 +597,10 @@ class Session:
         return None
 
     def submit(self, msg):
-        """POST /act from the panel's HTTP thread (the panel page, the hub, Studio's gateway through the hub). E-STOP
-        runs here and now; every other act is validated, a repeated id returns its first result, then it is queued for
-        the main loop and the reply waits up to ACT_WAIT_S for its result. Returns (HTTP code, reply)."""
+        """POST /act from the panel's HTTP thread (the panel page, the hub, Studio's gateway: through the hub, or
+        straight here for E-STOP, Stand and Takeover). E-STOP runs here and now (no id needed); every other act is
+        validated, a repeated id returns its first result (except `lease`, re-applied), then it is queued for the main
+        loop and the reply waits up to ACT_WAIT_S for its result. Returns (HTTP code, reply)."""
         if msg.get("act") == "estop":
             src = msg.get("source") or "panel"
             return 200, self.estop(f"{src} E-STOP", operator=msg.get("operator"), act_id=msg.get("id"),
@@ -614,7 +615,8 @@ class Session:
             for k in [k for k, r in self.acts_by_id.items() if now - r["t_mono"] > ACT_ID_TTL_S]:
                 del self.acts_by_id[k]
             rec = self.acts_by_id.get(key)
-            repeat = rec is not None
+            # a lease renewal may reuse its id: setting the lease is idempotent, so it is applied again (new until)
+            repeat = rec is not None and msg["act"] != "lease"
             if not repeat:
                 rec = self.acts_by_id[key] = self.make_act(msg["act"], msg.get("source") or "panel", msg.get("operator"),
                                                            key, msg.get("expect"), **args)
