@@ -13,7 +13,9 @@ MuJoCo and fused ONNX. Deployment effects can be switched on one at a time:
   --anchor predict  plan from the predicted state at t + L (g1deploy/latency.py) instead of t.
   --inflight N    up to N requests in flight (pipelined planner workers), one every `replan_ticks`;
                   predictions use only the plan that has landed, as on hardware.
-  --odom-noise    random-walk xy/yaw error on the planner's pose (flow `StateEstimate` config JSON).
+  --odom-noise    random-walk xy/yaw error on the planner's pose (flow `StateEstimate` config JSON), or
+                  '{"motion": "lab-g1-leg"}' (a preset or ranges): the step-tied leg-odometry error of
+                  g1deploy/odom_error.py; '{"leg": true}': leg odometry itself.
   --start stand   start standing at SONIC's default pose instead of the recorded walk.
   --route sensor  lidar route (A* on the sensor memory, 0.3 s pre-scan) instead of the true boxes.
   --prescan-s P   lidar captures during P s before the first plan (hardware: the robot stands while
@@ -236,6 +238,10 @@ def run_episode(task_path, seed, out, *, device="cuda", latency_s=0.0, anchor_mo
         from g1deploy.leg_odometry import LegOdomEstimate
 
         estimate = LegOdomEstimate(odom_noise)
+    elif odom_noise and odom_noise.get("motion"):  # the leg-odometry-like, step-tied error (g1deploy/odom_error.py)
+        from g1deploy.odom_error import MotionOdomError
+
+        estimate = MotionOdomError(odom_noise["motion"], np.random.default_rng([int(seed), 7]))
     else:
         estimate = flow.callback.StateEstimate(odom_noise, np.random.default_rng([int(seed), 7]))
 

@@ -531,3 +531,25 @@ on the robot).
 
 **For gaps: walk on FAST-LIO** (`g1 lio start`, `g1 lio check`, `--odom zmq`; §7), after a standing check and a
 tape-measured walk.
+
+**Tools for odometry robustness (2026-10-28).**
+- `tools/drift_gate.py --profile P --course gap-069 [--task T.json] --levels "exact;lio;0.95,0;1.0,-4;motion;leg"`:
+  - The full real-time chain, one walk per odometry level and repeat, on isolated ports.
+  - Each walk is scored on the simulator's true path:
+    - arrival;
+    - the task's `gates` (segments the walk must cross: through an opening, not around it);
+    - contact.
+  - Courses `gap-069` (0.69 m tower gap, straight) and `gap-069-diag` (the same at 30°, the real approach).
+  - Levels:
+    - `exact`, `lio`: the simulator's odometry and the LIO stand-in;
+    - `scale,rot`: an error on true odometry;
+    - `motion[:lab-g1-leg|training]`: the step-tied error below, a new draw per repeat;
+    - `leg`: the sim's own leg odometry.
+- `g1deploy/odom_error.py` (`MotionOdomError`): leg-odometry-like error tied to each step (stride scale, displacement
+  heading bias, per-second jitter, turn slip; none while standing), fitted to lab-g1's walks.
+  - Its `err` is the lidar memory's `pose_error`, so the memory smears as on the robot.
+  - Used by `sim/lockstep.py --odom-noise '{"motion": "lab-g1-leg"}'` and the LIO stand-in (`--lio-noise '{"motion": ...}'`).
+- `g1deploy/odom_fusion.py` (`LegLioFilter`): an EKF on (x, y, yaw, leg correction scale and turn).
+  - Leg-odometry steps and the IMU's yaw predict; LIO poses correct, behind a χ² gate.
+  - LIO rejected for 0.5 s is flagged lost (`lio_lost`): the filter carries on, on calibrated legs, so the robot can stop safely.
+  - Offline so far: `tests/test_odom_fusion.py`, and the recorded walks (private analysis).

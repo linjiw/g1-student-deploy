@@ -7,7 +7,10 @@ on :5561, from the MuJoCo G1 (`g1 sim --odom lio`).
          "yaw_rw_rad": 0.01}', per sqrt(s)), the way a LIO estimate drifts, and an optional odometry error
          (--noise '{"scale": 0.9, "rotate_deg": -4}': each step's xy displacement scaled and turned, the way leg
          odometry under-counts; the node registers the raw lidar frames with this pose, so its map smears as on the
-         robot - an odometry error on top of true odometry, for tolerance sweeps)
+         robot - an odometry error on top of true odometry, for tolerance sweeps), or the step-tied leg-odometry
+         error of g1deploy/odom_error.py (--noise '{"motion": "lab-g1-leg"}', a preset or ranges), and LIO faults
+         for the odometry safety path (--noise '{"fault": {"at_s": 31, "kind": "jump" | "runaway" | "freeze", "m": 0.5}}':
+         from `at_s` after the stand-in started, the pose jumps by m, runs away at m per second, or stops updating)
   cloud  points [N,3] f32 in the odometry frame (floor z = 0), origin [3] f64, stamp [1] f64, per lidar frame: the
          robot's raw rt/utlidar frames deskewed with the true pose and expressed in the drifted frame, so map and
          pose agree as they do in a real LIO
@@ -55,7 +58,8 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
     noise = json.loads(args.noise) if args.noise else {}
-    rng = np.random.default_rng(args.seed)
+    seed = int(noise.pop("seed", args.seed))  # a "seed" in --noise: one per repeat of a sweep (the console has none)
+    rng = np.random.default_rng(seed)
     import zmq
 
     from g1deploy.perception.cloud_memory import BodyFilter
@@ -71,6 +75,12 @@ def main(argv=None):
     err = float(noise.get("scale", 1.0)) * np.array([[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]])
     stepped = "scale" in noise or "rotate_deg" in noise
     true_prev, odo_xy = None, None
+    motion, fault, t_start = None, noise.get("fault"), time.monotonic()
+    frozen = None
+    if noise.get("motion"):
+        from g1deploy.odom_error import MotionOdomError
+
+        motion = MotionOdomError(noise["motion"], np.random.default_rng([seed, 11]))
     period, last = 1.0 / args.hz, time.monotonic()
     n_odom = n_cloud = 0
     print(f"[sim_lio] odom {args.hz:.0f} Hz + registered cloud on {args.bind}, noise {noise or 'none'}", flush=True)
@@ -100,6 +110,17 @@ def main(argv=None):
                 odo_xy = q[:2].copy() if odo_xy is None else odo_xy + err @ (q[:2] - true_prev)
                 true_prev = q[:2].copy()
                 q[:2] = odo_xy
+            elif motion is not None:
+                q[:2] = motion.step_xy(q[:2], math.atan2(2 * (q[3] * q[6] + q[4] * q[5]), 1 - 2 * (q[5] ** 2 + q[6] ** 2)), dt)
+            if fault and now - t_start >= float(fault["at_s"]):
+                late = now - t_start - float(fault["at_s"])
+                if fault["kind"] == "jump":
+                    q[0] += float(fault["m"])
+                elif fault["kind"] == "runaway":
+                    q[0] += float(fault["m"]) * late
+                elif fault["kind"] == "freeze":
+                    frozen = q.copy() if frozen is None else frozen
+                    q = frozen.copy()
             c, s = math.cos(drift_yaw), math.sin(drift_yaw)
             lin = snap["lin_w"].copy()
             lin[:2] = [c * lin[0] - s * lin[1], s * lin[0] + c * lin[1]]

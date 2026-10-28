@@ -1,0 +1,71 @@
+{
+ "task_id": "course-gap-069-diag",
+ "family": "course",
+ "description": "the 0.69 m tower gap 1.9 m away at 30 deg left (the real approach of 2026-10-27), a block behind-left; `gates`: cross between the towers",
+ "scene_boxes_world": [
+  {
+   "center_xy": [
+    1.878,
+    0.547
+   ],
+   "half_xy": [
+    0.12,
+    0.12
+   ],
+   "z_bottom": 0.0,
+   "z_top": 1.0,
+   "yaw": 0.5235987755982988
+  },
+  {
+   "center_xy": [
+    1.383,
+    1.405
+   ],
+   "half_xy": [
+    0.12,
+    0.18
+   ],
+   "z_bottom": 0.0,
+   "z_top": 1.25,
+   "yaw": 0.5235987755982988
+  },
+  {
+   "center_xy": [
+    -1.2,
+    0.2
+   ],
+   "half_xy": [
+    0.25,
+    0.2
+   ],
+   "z_bottom": 0.0,
+   "z_top": 0.8,
+   "yaw": 0.0
+  }
+ ],
+ "initial_state_record": "sim/courses/stand_start.npz",
+ "initial_frame": 0,
+ "initial_root_xy": [
+  0.0,
+  0.0
+ ],
+ "goal_world_xy": [
+  2.511,
+  1.45
+ ],
+ "deadline_s": 25.0,
+ "goal_radius_m": 0.4,
+ "goal_speed_m_s": 2.0,
+ "goal_hold_s": 0.1,
+ "fall_height_m": 0.38,
+ "fall_tilt_rad": 0.8,
+ "obstacle_contact_threshold_n": 5.0,
+ "gates": [
+  [
+   1.818,
+   0.651,
+   1.473,
+   1.249
+  ]
+ ]
+}
