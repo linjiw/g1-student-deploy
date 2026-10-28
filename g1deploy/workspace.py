@@ -136,10 +136,18 @@ def checks(ctx):
     if "rec" in procs:
         low = streams.get("lowstate", {})
         rate, age = low.get("rate_hz"), low.get("age_s")
+        free = (rec.get("disk") or {}).get("free_bytes")
+        dropped = rec.get("dropped_total") or 0
         if not procs["rec"]:
             out.append(_check("rec", "Recording", "bad", "the recorder stopped: this session is not being recorded"))
-        elif rec.get("errors"):
-            out.append(_check("rec", "Recording", "warn", f"recorder errors: {rec.get('errors')}"))
+        elif rec.get("paused"):
+            out.append(_check("rec", "Recording", "bad", f"recording paused ({rec['paused']}): samples are dropped"
+                              + (f", disk free {free / 1e9:.1f} GB" if free is not None else "")))
+        elif dropped or rec.get("errors"):
+            out.append(_check("rec", "Recording", "warn", (f"{dropped} samples dropped; " if dropped else "")
+                              + (f"recorder errors: {rec.get('errors')}" if rec.get("errors") else "")))
+        elif free is not None and free < 5e9:
+            out.append(_check("rec", "Recording", "warn", f"disk free {free / 1e9:.1f} GB"))
         else:
             out.append(_check("rec", "Recording", "ok" if rate else "warn",
                               f"lowstate {rate:.0f} Hz" if rate else "waiting for the first streams"))

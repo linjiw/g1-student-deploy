@@ -48,7 +48,7 @@ import termios
 import threading
 import time
 import tty
-from collections import deque
+from collections import OrderedDict, deque
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -92,6 +92,7 @@ ACTS = ("s", "g", "h", "t", "c", "r", "?", "goal", "goal_odom", "arm", "quit", "
 ACT_SOURCES = ("panel", "studio", "hub", "remote", "key", "script", "node")
 ACT_WAIT_S = 1.0  # an HTTP act waits this long for the main loop, then answers result "queued"
 ACT_ID_TTL_S = 600.0  # a repeated act id within this returns its first result (a retry never acts twice)
+ACT_RECEIPTS = 500  # GET /act_result?id= answers for the last this many acts of the session, any source (CONTRACT v3 D)
 GOAL_READBACK_S = 0.5  # a goal counts once the node's status echoes its seq within this
 CLEAR_READBACK_S = 1.5  # Clear map counts once the node reports map_cleared within this
 ESTOP_CONFIRM_S = 0.15  # an E-STOP reply looks this long for the runner's EMERGENCY STOP line (`confirmed`)
@@ -195,10 +196,14 @@ class Proc:
         threading.Thread(target=self._pump, daemon=True).start()
 
     def _pump(self):
+        self.log_errors = 0
         for raw in iter(self.p.stdout.readline, b""):
             line = raw.decode(errors="replace").rstrip("\n")
             t = time.monotonic()
-            self.f.write(f"{t:.3f} {line}\n")
+            try:  # a full disk loses log lines, never the pump: an undrained pipe would block the child (the runner)
+                self.f.write(f"{t:.3f} {line}\n")
+            except (OSError, ValueError):
+                self.log_errors += 1
             with self.lines_lock:
                 self.lines.append((t, line))
                 self.count += 1
@@ -208,7 +213,10 @@ class Proc:
                 try:
                     self.on_line(line)
                 except Exception as exc:  # a bad line must not stop the pump (it also feeds the log)
-                    self.f.write(f"{t:.3f} [console] on_line error: {exc!r}\n")
+                    try:
+                        self.f.write(f"{t:.3f} [console] on_line error: {exc!r}\n")
+                    except (OSError, ValueError):
+                        self.log_errors += 1
 
     def new_lines(self, seen):
         """(lines after the first `seen` ever printed, the count now): trimming the buffer never hides or repeats one."""
@@ -265,7 +273,8 @@ class Session:
         self.ctl = f"tcp://localhost:{self.ports['control']}"
         # the robot-day workspace (panel): attempts, motor temperatures, the node's map, the ladder's timestamps
         prof = getattr(args, "profile", None)
-        self.attempts = Attempts(self.dir / "attempts.jsonl", prof["name"] if prof else None)
+        self.attempts = Attempts(self.dir / "attempts.jsonl", prof["name"] if prof else None,
+                                 on_error=lambda exc: self.write_failed("attempts.jsonl", exc))
         self.temps, self.map_lock, self.map_cache = None, threading.Lock(), (0.0, None)
         self.cleared_t = self.control_t = None
         try:
@@ -285,6 +294,8 @@ class Session:
         self.start_goal_counts = args.mode == "sim" and not getattr(args, "require_sent_goal", False)
         self.act_lock, self.log_lock = threading.Lock(), threading.Lock()
         self.acts_by_id, self.acts_recent, self.pending, self.n_acts = {}, deque(maxlen=20), [], 0
+        self.receipts, self.receipt_lock = OrderedDict(), threading.Lock()  # id -> act record, the last ACT_RECEIPTS
+        self.write_errors = {}  # file -> [count, last error]: the console's own records on a failing disk
         self.lease, self.quit_requested, self.estop_logged = None, False, False
         self.node_seen, self.node_events = 0, []
         self.events_log = open(self.dir / "console_events.jsonl", "a", buffering=1)
@@ -339,6 +350,7 @@ class Session:
                     rear_blind_range_m=a.rear_blind_range_m,
                     # the operator's start confirmations (the hub's checklist: gantry, E-stops, remote, rope, ...)
                     confirm=getattr(a, "confirm", None),
+                    console_pid=os.getpid(),  # g1deploy/evidence.py: is this session still running?
                     go_gate={"start_goal_counts": self.start_goal_counts, "settle_s": GO_SETTLE_S,
                              "clear_map_scan_s": CLEAR_MAP_SCAN_S, "goal_readback_s": GOAL_READBACK_S})
         (self.dir / "session.json").write_text(json.dumps(meta, indent=1) + "\n")
@@ -536,36 +548,75 @@ class Session:
             return f"{prefix}-{os.getpid()}-{self.n_acts}"
 
     def make_act(self, act, source, operator=None, act_id=None, expect=None, **args):
-        return {"id": str(act_id) if act_id is not None else self.new_id(source), "act": act, "source": source,
-                "operator": operator if operator is not None else getattr(self.args, "operator", None),
-                "expect": expect or None, "args": args, "t_mono": time.monotonic(), "wall": time.time(),
-                "result": None, "reason": None, "done": threading.Event()}
+        """A new act record, findable by its id (GET /act_result) from this moment: before it runs, before any reply."""
+        rec = {"id": str(act_id) if act_id is not None else self.new_id(source), "act": act, "source": source,
+               "operator": operator if operator is not None else getattr(self.args, "operator", None),
+               "expect": expect or None, "args": args, "t_mono": time.monotonic(), "wall": time.time(),
+               "result": None, "reason": None, "state": "queued", "t_done": None, "done": threading.Event()}
+        with self.receipt_lock:
+            self.receipts.pop(rec["id"], None)  # a lease renewal reusing its id: the newest record answers
+            self.receipts[rec["id"]] = rec
+            while len(self.receipts) > ACT_RECEIPTS:
+                self.receipts.popitem(last=False)
+        return rec
 
-    def log_act(self, rec, result, reason):
-        """One line per act in console_events.jsonl (whatever its source) and the last 20 in /state.acts."""
+    def act_result(self, act_id):
+        """GET /act_result?id=: what became of an act (a reply lost in transit, a timed-out relay): {known, id, act,
+        result: done | refused | queued (not handled yet) | pending (waiting for the node to confirm it), reason,
+        t_mono (when the console received it), t_done, source, operator, session}. Never acts."""
+        with self.receipt_lock:
+            rec = self.receipts.get(str(act_id))
+        if rec is None:
+            return {"known": False, "id": act_id, "act": None, "result": None, "t_mono": None, "t_done": None,
+                    "reason": f"no act with this id in this console session (it never arrived, or it is older than the "
+                              f"last {ACT_RECEIPTS} acts)", "source": None, "operator": None, "session": self.dir.name}
+        res = rec["result"] or rec["state"]
+        why = rec["reason"] if rec["result"] else ("waiting for the node to confirm it" if res == "pending"
+                                                   else "the console's main loop has not handled it yet")
+        return {"known": True, "id": rec["id"], "act": rec["act"], "result": res, "reason": why,
+                "t_mono": round(rec["t_mono"], 3), "t_done": rec["t_done"], "source": rec["source"],
+                "operator": rec.get("operator"), "session": self.dir.name}
+
+    def write_failed(self, name, exc):
+        """One of the console's own files could not be written (disk full): counted, shown once, never fatal."""
+        n = self.write_errors.setdefault(name, [0, None])
+        n[0] += 1
+        n[1] = f"{type(exc).__name__}: {exc}"
+        if n[0] == 1:
+            self.event(f"cannot write {name} ({n[1]}): the session goes on, this record has a hole")
+
+    def log_act(self, rec, result, reason, final=True):
+        """One line per act in console_events.jsonl (whatever its source) and the last 20 in /state.acts. final=False:
+        the line of an act answered "queued" (its HTTP reply left before its result; the result line follows)."""
         row = {"t_mono": round(rec["t_mono"], 3), "wall": round(rec["wall"], 3), "id": rec["id"],
                "source": rec["source"], "operator": rec.get("operator"), "act": rec["act"], "args": rec.get("args") or {},
-               "result": result, "reason": reason, "t_done": round(time.monotonic(), 3)}
+               "result": result, "reason": reason, "t_done": round(time.monotonic(), 3) if final else None}
+        if final:
+            rec["t_done"] = row["t_done"]
         with self.log_lock:
             try:
                 self.events_log.write(workspace.dumps(row) + "\n")
-            except (OSError, ValueError):  # the log is closed at shutdown: the act itself stands
+            except ValueError:  # the log is closed at shutdown: the act itself stands
                 pass
-            self.acts_recent.append({k: row[k] for k in ("id", "act", "source", "operator", "result", "reason", "t_mono")})
+            except OSError as exc:  # disk full: the act stands, its receipt answers from memory
+                self.write_failed("console_events.jsonl", exc)
+            if final:
+                self.acts_recent.append({k: row[k] for k in ("id", "act", "source", "operator", "result", "reason",
+                                                             "t_mono")})
 
     def finish(self, rec, result, reason=None):
-        rec["result"], rec["reason"] = result, reason
+        rec["result"], rec["reason"], rec["state"] = result, reason, result
         self.log_act(rec, result, reason)
         if result == "refused":
             self.event(f"{rec['source']} [{rec['act']}] refused: {reason}")
         rec["done"].set()
         return rec
 
-    @staticmethod
-    def act_reply(rec, **extra):
+    def act_reply(self, rec, **extra):
         res = rec["result"] or "queued"
         return {"ok": res != "refused", "id": rec["id"], "act": rec["act"], "result": res,
-                "reason": rec["reason"] if rec["result"] else "the console's main loop has not handled it yet", **extra}
+                "reason": rec["reason"] if rec["result"] else "the console's main loop has not handled it yet",
+                "session": self.dir.name, **extra}
 
     @staticmethod
     def validate_act(msg):
@@ -623,6 +674,9 @@ class Session:
         if not repeat:
             self.inbox.put(("act", rec, rec["source"]))
         rec["done"].wait(ACT_WAIT_S)
+        if rec["result"] is None and not rec.get("queued_logged"):  # the reply says queued: a line on disk first
+            rec["queued_logged"] = True
+            self.log_act(rec, "queued", "replied before the main loop handled it", final=False)
         return 200, self.act_reply(rec, repeat=repeat)
 
     def act(self, key, source="key", **args):
@@ -648,6 +702,8 @@ class Session:
             out = ("refused", f"bad arguments: {type(exc).__name__}: {exc}")
         if out is not None:
             self.finish(rec, *out)
+        elif rec["result"] is None:
+            rec["state"] = "pending"  # waits for the node (goal read-back, Clear map); check_pending ends it
         return rec
 
     def expect_mismatch(self, expect):
@@ -1021,7 +1077,10 @@ class Session:
         reply = {"ok": True, "id": rec["id"], "act": "estop", "result": "done", "reason": reason, "key_sent": alive,
                  "runner_alive": r is not None and r.alive(), "runner": self.runner_label(), "confirmed": confirmed,
                  "t_mono": time.monotonic()}
-        self.log_act(rec, "done", reason + ("; runner confirmed" if confirmed else ""))
+        rec["result"], rec["state"], rec["reason"] = "done", "done", reason + ("; runner confirmed" if confirmed else "")
+        self.log_act(rec, "done", rec["reason"])
+        rec["done"].set()
+        reply["session"] = self.dir.name
         return reply
 
     def on_remote(self, line):
@@ -1102,6 +1161,7 @@ class Session:
                 "goal_seq": self.goal_seq, "clear_map_scan_left_s": round(self.scan_left(), 1), "acts": acts,
                 "operator": getattr(self.args, "operator", None),
                 "record": self.record_line().strip(), "events": [f"{t:6.1f}  {e}" for t, e in self.events[-12:]][::-1],
+                "write_errors": {k: {"count": n, "last": e} for k, (n, e) in self.write_errors.items()},
                 "dir": str(self.dir), "remote": dict(self.remote), "node_ready": self.node_ready(),
                 "procs": {k: p.alive() for k, p in self.procs.items()}, **self.workspace(locks)}
 
@@ -1203,7 +1263,10 @@ class Session:
         return "\n".join(rows)
 
     def record_frame(self, text):
-        self.frames.write(json.dumps({"wall": time.monotonic(), "text": text}) + "\n")
+        try:
+            self.frames.write(json.dumps({"wall": time.monotonic(), "text": text}) + "\n")
+        except (OSError, ValueError) as exc:
+            self.write_failed("console_frames.jsonl", exc)
 
     def shutdown(self):
         self.attempts.close(time.monotonic() - self.t0, "session ended", self.node_status)

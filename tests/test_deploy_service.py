@@ -585,7 +585,7 @@ def test_http_v1_routes(tmp_path):
 def test_manifest_present_missing_and_na(tmp_path):
     d = tmp_path / "robot-150000-deploy"
     (d / "rec" / "lowstate").mkdir(parents=True)
-    (d / "rec" / "lowstate" / "000000.npz").write_bytes(b"x" * 10)
+    np.savez(d / "rec" / "lowstate" / "000000.npz", t=np.linspace(0.0, 2.0, 5))  # a real chunk (v2 reads its span)
     (d / "rec" / "meta.json").write_text(json.dumps({"lidar": False, "zmq": ["odom=odom=tcp://127.0.0.1:5561"]}))
     (d / "session.json").write_text(json.dumps({"mode": "robot", "odom": "fused", "deploy_identity": {"short": "a"},
                                                 "confirm": {"gantry": True}}))
@@ -598,8 +598,10 @@ def test_manifest_present_missing_and_na(tmp_path):
     m = evidence.manifest(d)
     st = {i["id"]: i for i in m["items"]}
     assert [i["id"] for i in m["items"]] == list(evidence.ITEMS)
-    assert st["lowstate"]["status"] == "present" and st["lowstate"]["bytes"] == 10
-    assert st["lidar_raw"]["status"] == "n/a" and st["lio_cloud"]["status"] == "missing"
+    assert st["lowstate"]["status"] == "present" and st["lowstate"]["bytes"] == (d / "rec/lowstate/000000.npz").stat().st_size
+    assert st["lowstate"]["span_s"] == 2.0 and st["lowstate"]["required"]
+    # raw lidar is a required stream on the robot (2026-10-28): recorded without it, it is missing
+    assert st["lidar_raw"]["status"] == "missing" and st["lidar_raw"]["required"] and st["lio_cloud"]["status"] == "missing"
     assert "did not record the LIO cloud" in st["lio_cloud"]["reason"]
     assert st["scan"]["status"] == "present" and st["rehearsal"]["status"] == "present"
     assert st["operator_confirmations"]["status"] == "present" and st["start_checks"]["status"] == "missing"
