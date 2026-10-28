@@ -341,3 +341,35 @@ def test_new_lines_survive_the_buffer_trim(tmp_path):
     lines, n = p.new_lines(4990)
     assert n == 5000 and [line for _, line in lines] == [str(i) for i in range(4990, 5000)]
     assert p.new_lines(5000) == ([], 5000) and len(p.new_lines(0)[0]) == len(p.lines)
+
+
+# ---------------------------------------------------------------------------------------------------- evidence
+def test_session_json_keeps_confirmations_and_the_gate(tmp_path, monkeypatch):
+    class NoProc:
+        def __init__(self, name, cmd, log, env, stdin=False, on_line=None):
+            self.name, self.cmd = name, cmd
+
+    monkeypatch.setattr(console, "Proc", NoProc)
+    monkeypatch.setattr(console, "_env", lambda: dict(os.environ))
+    a = console.parse_args(["sim", "--layout", "open-2m", "--arm", "--record", str(tmp_path / "s"), "--port-base", "5756",
+                            "--operator", "ana", "--confirm", '{"gantry": true, "estop": true}', "--require-sent-goal"])
+    a.machine = None
+    s = console.Session(a)
+    s.start()
+    meta = json.loads((tmp_path / "s" / "session.json").read_text())
+    assert meta["operator"] == "ana" and meta["confirm"] == {"gantry": True, "estop": True}
+    assert meta["go_gate"]["start_goal_counts"] is False and "runner" not in s.procs
+    rec_cmd = s.procs["rec"].cmd
+    assert "cloud=cloud=tcp://127.0.0.1:5761" in rec_cmd and "odom=odom=tcp://127.0.0.1:5761" in rec_cmd
+    s.events_log.close()
+
+
+def test_recorder_keeps_the_lio_cloud_and_studio_workers_are_heavy():
+    import re
+
+    from g1deploy import machine, recorder
+
+    assert "cloud=cloud=tcp://127.0.0.1:5561" in recorder.DEFAULT_ZMQ
+    for cmd in ("/x/.venv/bin/python -u /home/u/g1-deploy-studio/studio/nav_worker.py --request r.json",
+                "/x/python -u /home/u/g1-deploy-studio/studio/flow_policy_worker.py", "/x/python -u studio/policy_worker.py"):
+        assert any(re.search(p, cmd) for p in machine.heavy_patterns()), cmd
