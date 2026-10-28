@@ -16,6 +16,11 @@ from g1deploy import attempts as A, hub, workspace as W
 from g1deploy.node import StudentNode
 
 
+@pytest.fixture(autouse=True)
+def _panel_token(monkeypatch):
+    monkeypatch.setenv("G1_PANEL_TOKEN", "test-token")  # never the operator's token file
+
+
 # ----------------------------------------------------------------------------------------------- attempts
 def test_attempt_life_cycle(tmp_path):
     log = A.Attempts(tmp_path / "attempts.jsonl", "deploy")

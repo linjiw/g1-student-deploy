@@ -15,8 +15,14 @@ geometry on it and reports what the planner will act on:
 Verdict: NO-GO (a box contains start or goal, or no route), CHECK (merged giant box, ceiling near start/goal, mostly
 unseen route), GO. Writes a PNG of support, boxes, route, start and goal.
 
+With --live-out FILE it also writes, at 2 Hz (a temporary file renamed over FILE, so a reader never sees half of
+it), what the scan has so far for Deploy Studio: the robot (qpos, scene frame), the last lidar frame with each point's
+fate (fused, self-filtered, rear-blind dropped; scene frame), the memory so far (memory_S) and start_S (g1deploy/wire.py
+encodings).
+
 usage: site_check.py (--robot NAME | --iface NIC) --goal AHEAD LEFT [--seconds 4] [--odom leg|dds] [--png out.png]
-       (simulation: --iface lo --odom dds while `g1 sim` holds the robot standing)
+       [--live-out live.json]
+       (simulation: --iface lo --odom dds while `g1 sim` (or robot_sim alone) holds the robot standing)
 """
 
 from __future__ import annotations
@@ -34,7 +40,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from g1deploy import bundle  # noqa: E402
+from g1deploy import bundle, contract, frames, wire  # noqa: E402
 from g1deploy.node import DdsCloudInput, DdsState, LegOdomSource  # noqa: E402
 
 ROBOT_RADIUS_M = 0.30
@@ -60,6 +66,62 @@ def low_ceiling_near(memory, xy, radius=CEILING_NEAR_M, below=CEILING_BELOW_M):
     return [(round(float(dd), 2), round(float(c[i, j]), 2)) for (i, j), dd in zip(ij[sel], d[sel])]
 
 
+LIVE_PERIOD_S = 0.5
+LIVE_POINTS = 4000
+
+
+def pose_of(qpos):
+    """[x, y, yaw] of the pelvis in a 36-D qpos."""
+    return [float(qpos[0]), float(qpos[1]), frames.yaw_of_quat(qpos[3:7])]
+
+
+def classify_frame(conv, pts_s, qpos):
+    """One raw sensor frame as the memory sees it, with one pose for the whole frame (the robot stands): world points,
+    the lidar origin and each point's class (wire.CLASS_*: fused, removed by the self filter, dropped as rear blind)."""
+    pts_s = np.asarray(pts_s, dtype=float).reshape(-1, 3)
+    cls = np.full(len(pts_s), wire.CLASS_FUSED, dtype=np.uint8)
+    if conv.front_half_deg < 180.0 and len(pts_s):
+        p_t = pts_s @ conv.mount.rot_torso.T + conv.mount.pos_torso
+        front = np.abs(np.degrees(np.arctan2(p_t[:, 1], p_t[:, 0]))) <= conv.front_half_deg
+        if conv.rear_range > 0:
+            front |= np.hypot(p_t[:, 0], p_t[:, 1]) >= conv.rear_range
+        cls[~front] = wire.CLASS_REAR
+    p_t, r_t = conv.fk(qpos)
+    r_s, o = r_t @ conv.mount.rot_torso, p_t + r_t @ conv.mount.pos_torso
+    pw = pts_s @ r_s.T + o
+    fused = cls == wire.CLASS_FUSED
+    if fused.any():
+        keep = conv.bf.mask(pw[fused], qpos, origins=o)
+        idx = np.flatnonzero(fused)
+        cls[idx[~keep]] = wire.CLASS_SELF
+    return pw, o, cls
+
+
+def write_live(path, memory, conv, last_raw, qpos, frames_n, t0, done=False, verdict=None):
+    """The scan so far for a live view (tmp + rename). Cloud and robot in scene (the robot as it stands now at the
+    origin), the memory in memory_S, start_S the robot's pose now in memory_S."""
+    start_s = pose_of(qpos)
+    s_from_m = frames.inverse(start_s)
+    q_scene = frames.qpos_to(s_from_m, np.asarray(qpos, dtype=float)[:36])
+    cloud = None
+    if last_raw is not None and conv is not None:
+        pw, o, cls = classify_frame(conv, last_raw, qpos)
+        ps = np.c_[frames.apply(s_from_m, pw[:, :2]), pw[:, 2]] if len(pw) else np.zeros((0, 3))
+        org = [*frames.apply(s_from_m, o[:2]).tolist(), float(o[2])]
+        cloud = wire.encode_cloud(ps, cls, origin=org, max_points=LIVE_POINTS)
+    mem = None
+    if memory is not None:
+        near = memory.near_only() if hasattr(memory, "near_only") else None
+        mem = wire.encode_memory(memory.support, memory.ceiling, memory.lo, memory.res, near=near, seq=frames_n, epoch=0)
+    out = {"running": not done, "t": time.time(), "elapsed_s": round(time.monotonic() - t0, 2), "n_frames": frames_n,
+           "frame": "scene", "joint_names": list(contract.MJ_JOINTS), "qpos": q_scene, "cloud": cloud, "memory": mem,
+           "memory_frame": "memory_S", "start_S": start_s, "verdict": verdict}
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(wire.dumps(out))
+    os.replace(tmp, path)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--robot", default=None)
@@ -76,6 +138,7 @@ def main(argv=None):
     ap.add_argument("--rear-blind-range-m", type=float, default=None)
     ap.add_argument("--rear-blind-deg", type=float, default=None,
                     help="ignore this rear lidar sector, as the node does (robot profile key rear_blind_deg)")
+    ap.add_argument("--live-out", default=None, help="write the scan so far here at 2 Hz (JSON, tmp + rename)")
     args = ap.parse_args(argv)
     prof = {}
     if args.robot:
@@ -103,8 +166,8 @@ def main(argv=None):
         LegOdomSource(state)
     cloud = DdsCloudInput()
     mount = Mount.load(mount_path) if mount_path else Mount.nominal()
-    memory = conv = None
-    t0, frames = time.monotonic(), 0
+    memory = conv = last_raw = None
+    t0, nframes, t_live = time.monotonic(), 0, 0.0
     while time.monotonic() - t0 < args.seconds or memory is None and time.monotonic() - t0 < args.seconds + 5:
         snap = state.snapshot()
         for c in cloud.poll():
@@ -118,8 +181,16 @@ def main(argv=None):
             pts, org = conv(c["points"], c["t_s"], c["wall"], state.qpos_at)
             memory.add_cloud(0.0, pts, org, None)
             memory.step(time.monotonic() - t0)
-            frames += 1
+            last_raw = c["points"]
+            nframes += 1
+        if args.live_out and snap is not None and time.monotonic() - t_live >= LIVE_PERIOD_S:
+            t_live = time.monotonic()
+            try:
+                write_live(args.live_out, memory, conv, last_raw, snap["qpos"], nframes, t0)
+            except Exception as exc:  # a picture for the operator: never takes the scan down
+                print(f"site_check: live-out failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         time.sleep(0.005)
+    frames_n = nframes
     if memory is None:
         print(json.dumps({"verdict": "NO-GO", "reasons": ["no lidar frames on rt/utlidar/cloud_livox_mid360 "
                                                            "(g1 lidar start / lidar service)"]}, indent=1))
@@ -163,7 +234,7 @@ def main(argv=None):
             reasons_check.append(f"{len(near)} ceiling cells below {CEILING_BELOW_M} m within {CEILING_NEAR_M} m of the "
                                  f"{name} (closest {min(near)[0]} m at {min(near)[1]} m high): the node defers its stand there")
     verdict = "NO-GO" if reasons_nogo else "CHECK" if reasons_check else "GO"
-    report = {"verdict": verdict, "reasons": reasons_nogo + reasons_check, "frames": frames,
+    report = {"verdict": verdict, "reasons": reasons_nogo + reasons_check, "frames": frames_n,
               "start_xy": np.round(start, 3).tolist(), "start_yaw": round(yaw, 4), "goal_xy": np.round(goal, 3).tolist(),
               "goal_ahead_left": [a, l],
               "route": {"found": bool(getattr(route, "found", False)), "length_m": None if length is None else round(length, 2),
@@ -173,9 +244,16 @@ def main(argv=None):
               "mount": mount_path or "nominal", "odom": odom}
     print(json.dumps(report, indent=1))
     if args.dump_memory:  # the node's --dump-memory format (g1deploy/node.py), plus where the robot stood
+        extra = {"near": memory.near_only()} if hasattr(memory, "near_only") else {}
         np.savez_compressed(args.dump_memory, support=memory.support, ceiling=memory.ceiling, lo=memory.lo,
                             res=memory.res, boxes=json.dumps(boxes), stats=json.dumps(memory.stats),
-                            start_xy=start, start_yaw=yaw, goal_xy=goal)
+                            start_xy=start, start_yaw=yaw, goal_xy=goal, **extra)
+    if args.live_out:
+        try:
+            write_live(args.live_out, memory, conv, last_raw, state.snapshot()["qpos"], frames_n, t0, done=True,
+                       verdict=verdict)
+        except Exception as exc:
+            print(f"site_check: live-out failed: {type(exc).__name__}: {exc}", file=sys.stderr)
     if args.json:
         Path(args.json).write_text(json.dumps(report, indent=1) + "\n")
     if args.png:

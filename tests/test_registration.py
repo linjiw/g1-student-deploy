@@ -64,6 +64,7 @@ def test_hub_sends_the_scan_goal_as_the_same_spot(tmp_path, monkeypatch):
     from g1deploy import hub
 
     monkeypatch.setattr(hub, "STUDIO_DATA", tmp_path / "no-studio")
+    monkeypatch.setenv("G1_PANEL_TOKEN", "test-token")
     h = hub.Hub(SimpleNamespace(day=str(tmp_path / "lab-day-x"), robot="lab-g1", iface="lo", port=8769))
     world, now = scene(), (0.15, -0.2, math.radians(-17.0))
     (h.day / "robot-x").mkdir(parents=True)

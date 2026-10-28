@@ -17,7 +17,12 @@
 
 Everything lands in OUT (default runs/lab-day-YYYYMMDD/scans/scan-HHMMSS/), summarised in scan.json.
 
-usage: scan_scene.py --robot lab-g1 --goal 2 0 [--seconds 8] [--out DIR] [--no-studio]
+Practice (no robot): with robot_sim holding the simulated robot standing on DDS (lo), `--iface lo --odom dds` scans it
+the same way, with the robot profile's mount calibration and rear blind; `--practice SOURCE` records where the scene
+came from. `--live-out FILE` passes on to `g1 site` (the scan so far at 2 Hz, for Deploy Studio).
+
+usage: scan_scene.py --robot lab-g1 --goal 2 0 [--seconds 8] [--out DIR] [--no-studio] [--live-out FILE]
+       scan_scene.py --robot lab-g1 --iface lo --odom dds --practice COURSE ...
        scan_scene.py --from-scan DIR | --from-session SESSION_DIR [--goal A L]
 """
 
@@ -65,6 +70,9 @@ print(json.dumps({"arena": arena, "fine": fine, "fine_warnings": warn}, default=
 def run_scan(args, out: Path):
     cmd = [str(ROOT / "g1"), "site", "--robot", args.robot, "--goal", *map(str, args.goal), "--seconds", str(args.seconds),
            "--json", str(out / "site.json"), "--png", str(out / "site.png"), "--dump-memory", str(out / "memory.npz")]
+    for flag, value in (("--iface", args.iface), ("--odom", args.odom), ("--live-out", args.live_out)):
+        if value:
+            cmd += [flag, str(value)]
     with open(out / "site.log", "w") as log:
         rc = subprocess.call(cmd, cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
     if not (out / "site.json").exists() or not (out / "memory.npz").exists():
@@ -124,6 +132,10 @@ def main(argv=None):
     ap.add_argument("--from-scan", default=None)
     ap.add_argument("--from-session", default=None)
     ap.add_argument("--no-studio", action="store_true")
+    ap.add_argument("--iface", default=None, help="g1 site --iface (default: the robot profile's; lo: the simulator)")
+    ap.add_argument("--odom", choices=("leg", "dds"), default=None, help="g1 site --odom (dds: the simulator's truth)")
+    ap.add_argument("--live-out", default=None, help="g1 site --live-out: the scan so far at 2 Hz")
+    ap.add_argument("--practice", default=None, metavar="SOURCE", help="a practice scan of the simulator in SOURCE")
     args = ap.parse_args(argv)
     stamp = time.strftime("%H%M%S")
     if args.from_scan:
@@ -144,6 +156,8 @@ def main(argv=None):
                "reasons": site.get("reasons", []), "frames": site.get("frames"), "goal_ahead_left": site.get("goal_ahead_left"),
                "planner_boxes": len(site.get("boxes") or []), "twin_boxes": None, "course": None, "studio_arena": None,
                "warnings": []}
+    if args.practice:
+        summary["practice"] = {"source": args.practice, "iface": args.iface, "odom": args.odom}
     arena, err = studio_twin(out / "memory.npz", site, f"Scan {name} ({time.strftime('%H:%M')})")
     if arena is None:  # no Studio here: the planner's own (merged) boxes are the twin
         summary["warnings"].append(err + "; the course uses the planner's merged boxes")

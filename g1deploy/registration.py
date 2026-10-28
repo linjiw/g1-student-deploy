@@ -16,6 +16,8 @@ import math
 
 import numpy as np
 
+from g1deploy import frames
+
 OBSTACLE_CODES = "23"  # workspace.MAP_CODES: obstacles >= 0.3 m (the floor and low clutter do not register well)
 RADIUS_M = 4.0  # cells this far from the robot take part
 RES_M = 0.05  # correlation raster
@@ -98,7 +100,9 @@ def start_check(scan_grid, live_map, goal_scan=None):
     """The robot now vs at the scan. `scan_grid`: Hub.scan_grid (coded grid + start [x, y, yaw]); `live_map`: the node's
     map_snapshot (coded grid + robot [x, y, yaw]); `goal_scan`: (ahead, left) of the robot at the scan.
     Returns moved_m / turned_deg (the robot's move since the scan; turned > 0 = to the left), the goal in the robot's
-    frame now, overlap, and the transform scan frame -> robot frame now (theta_rad, t)."""
+    frame now, overlap, the transform scan frame -> robot frame now (theta = theta_rad, t: p_robot_now = R(theta)
+    p_scene + t), the node's pose when the live map was taken (P_c, odometry frame) and from both scene_from_odom
+    (g1deploy/frames.py). `t` is the translation, never a time."""
     if not live_map or not live_map.get("ok"):
         return {"ok": False, "error": "no live map yet"}
     src = to_frame(grid_points(scan_grid), scan_grid["start"])
@@ -106,7 +110,9 @@ def start_check(scan_grid, live_map, goal_scan=None):
     theta, t, overlap = register(src, dst)
     # the robot now in the scan's frame: the inverse transform of its origin
     pos = rotate(-np.asarray(t)[None], -theta)[0]
-    out = {"ok": overlap >= MIN_OVERLAP, "overlap": round(overlap, 2), "theta_rad": theta, "t": [float(v) for v in t],
+    p_c = frames.pose(live_map["robot"])
+    out = {"ok": overlap >= MIN_OVERLAP, "overlap": round(overlap, 2), "theta": float(theta), "theta_rad": float(theta),
+           "t": [float(v) for v in t], "P_c": p_c, "scene_from_odom": frames.scene_from_odom(theta, t, p_c),
            "moved_m": round(float(np.hypot(*pos)), 3), "turned_deg": round(-math.degrees(theta), 1),
            "robot_in_scan": [round(float(pos[0]), 3), round(float(pos[1]), 3)], "cells": [len(src), len(dst)]}
     if goal_scan is not None:
