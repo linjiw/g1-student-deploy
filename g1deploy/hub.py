@@ -2993,6 +2993,13 @@ class Hub:
                 "required_missing": [i.get("id") for i in items if i.get("required") and i.get("status") != "present"]
                 if v2 else None}
 
+    @classmethod
+    def manifest_full(cls, m):
+        """The whole manifest (items, state, reasons) for Review, with the summary's counts and id lists on top (the
+        summary keys and the manifest's own share their meaning where they overlap)."""
+        summary = cls.manifest_summary(m)
+        return dict(m or {}, **summary, summary=summary)
+
     @staticmethod
     def recording_of(d):
         """evidence.recording_health(d) (contract v3 G), or {supported: false} with a kit that has none."""
@@ -3026,7 +3033,8 @@ class Hub:
         return 200, {"ok": True, "name": d.name, "receipt": rec, "ended": self.is_ended(d), "live_slot": slot,
                      "summary_ended": (d / "console_summary.json").exists(), "attempts": self.attempts_detail(d),
                      "rehearsal_run": reh, "replay": {"studio_id": studio_id(self.day, d), "linked": self.studio_linked(d)},
-                     "manifest": self.manifest_summary(m), "recording": self.recording_of(d),
+                     # the whole manifest (items, state, reasons) with its summary: Review shows every item
+                     "manifest": self.manifest_full(m), "recording": self.recording_of(d),
                      "report": (d / "report.md").exists(), "tags": list(A.TAGS)}
 
     def tag_v1(self, name, req):

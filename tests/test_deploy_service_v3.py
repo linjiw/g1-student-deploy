@@ -449,6 +449,8 @@ def test_session_detail_and_labels_of_an_ended_session(tmp_path, profs, monkeypa
     assert [x["via"] for x in a["tag_history"]] == ["console"] and a["tag"] == "clean"
     assert det["replay"] == {"studio_id": hub.studio_id(h.day, d), "linked": False}
     assert det["manifest"]["version"] in (1, 2) and "present" in det["manifest"]
+    # Review lists every evidence item from the session detail alone (a fresh browser has nothing else; 2026-10-28)
+    assert isinstance(det["manifest"]["items"], list) and det["manifest"]["items"] and "summary" in det["manifest"]
     # labels after the end: append-only, the newest wins, every change kept
     code, r = h.tag_v1(d.name, {"n": 1, "tag": "touched", "note": "brushed the left tower", "operator": "lw"})
     assert code == 200 and r["via"] == "service" and r["attempt"]["tag"] == "touched"
