@@ -55,7 +55,7 @@ and `robot`; command-line flags win.
 Stop at the first failure. Gantry or spotter, the wireless remote and the physical E-stop in hand every time. Two
 people: the remote operator watches the robot, the console operator watches the screen.
 
-**The lab hub and the panel (since 2026-10-27).** `G1_PANEL_TOKEN=... ./g1 lab` serves the day's home page on
+**The lab hub and the panel (since 2026-10-27).** `./g1 lab` serves the day's home page (at `/legacy` since 2026-10-28) on
 127.0.0.1:8769 (reached from the operator's tailnet devices like the panel). It lists the deploy profiles, starts a
 sim rehearsal (`g1 sim --profile P --arm --panel 8771 --layout COURSE`) or, after a four-item checklist (gantry,
 E-stops, rope and spotter, clear area), a robot session (`g1 robot --robot NAME --profile P --arm --panel 8770`),
@@ -108,6 +108,48 @@ one. When the robot stands more than 0.10 m or 5° off, *Rehearse from where the
 robot's frame (`registration.repose_task`, `runs/.../reposed/`); it needs the GPU room beside the live session.
 Every robot session that ends also gets a twin of its final node map (`scan_scene.py --from-session`). Studio accepts
 loopback requests only, so its links open on the deploy PC itself.
+
+**The deploy service for Deploy Studio (API v1, since 2026-10-28).** `./g1 lab --headless` is the same hub without a
+page to open: Deploy Studio's Deploy workspace is the operator surface, and its gateway calls the hub's JSON API on
+127.0.0.1 (`/` says so; the page above stays at `/legacy`). The token is `G1_PANEL_TOKEN`, else
+`~/.config/g1-deploy/panel_token` (0600, created once; the consoles read the same file, so a restarted hub still
+reaches them). A restarted hub re-attaches to every console still running from any `lab-day-*` directory beside its
+day, with the token in that session's `panel_url.txt`. A development hub: `./g1 lab --headless --port 8789 --day
+SCRATCH/lab-day-x --no-studio-link` (never 8769). Every reply is strict JSON (non-finite numbers are `null`).
+- `GET /api/v1/state` (computed at 1 Hz in the background, served from a cache): versions, PC, robot link with the
+  lidar rate from the adapter's stats log and the LIO pose age, profiles, the live robot / sim session with its panel
+  port, the path of its token file and the console's heartbeat age, scans (goal-independent reasons only), robot
+  sessions uncapped (others paged: `/api/v1/sessions?offset=&limit=`), rehearsal sets, GPU, the last doctor run
+  (kept in the day's `doctor.json`). `GET /api/v1/readiness?scan=&slot=`: every check with its evidence kind, when it
+  was measured, its maximum age, the step after which it can be measured, and its 3D anchor.
+- Scans: `POST /api/v1/scan`, `GET /api/v1/scan/live` (the scan so far, from `g1 site --live-out`: robot, the last
+  frame with each point's fate (fused, self-filtered, rear-blind dropped) and the memory, 2 Hz),
+  `GET /api/v1/scan/<name>/scene` (memory, twin, course and the frames between them).
+- Practice, no robot: `POST /api/v1/practice/scan {course | scan}` runs `robot_sim` alone (unarmed, held standing) and
+  scans it like the robot (`g1 site --iface lo --odom dds` with the robot profile's mount and rear blind), then stops
+  it: a normal scan named `practice-*`. `POST /api/v1/start {mode: "sim", practice: true, scan, start_offset}` starts
+  a practice session on that scan's course reposed by a start offset (default the 2026-10-27 one: 20° right, 0.2 m),
+  with Arm and the panel, so the start check and the goal conversion run for real. Practice and robot sessions never
+  run together; every sim runs alone.
+- `POST /api/v1/rehearse {scan, goal_scene, profile}`: a set of three runs in sequence in the sim slot: exact, drift
+  (`lab-g1-leg`) and start offset; verdict as before plus `offset_ok`. `GET /api/v1/rehearsal/<run>/track` after a
+  run: sim truth in the scene (29 joints picked by name from the sim's 43-DoF model, 25 Hz) and contacts over 5 N.
+- `POST /api/v1/start_check {scan, slot}` and `POST /api/v1/send_goal {slot, scan, goal_scene, check_id}`: the goal
+  goes to the console as `goal_odom` only with a goal check's id, after a start check and a coarse check on the live
+  node memory. `GET /api/v1/live/<slot>/view`: the node's `view` (one 5 Hz poller per live slot on the node's control
+  port) with the frame to draw it in. `POST /api/v1/act` relays an operator act to the console (audited to the day's
+  `hub_actions.jsonl`); `POST /api/v1/stop` ends a session only before Arm, after an E-STOP or standing after an
+  attempt; a robot start refuses a stale scan instead of scanning again. `GET /api/v1/session/<name>/manifest`: the
+  session's evidence (`g1deploy/evidence.py`, also written when a session ends).
+
+*Frames* (`g1deploy/frames.py`). Poses are [x, y, yaw]; "A_from_B" is B's origin in A. A scan's memory grid (and its
+twins) are in *memory_S*, where the robot stood at `start_S` (leg odometry carries the IMU yaw: 1.2–1.4 rad on several
+10-27 scans). The *scene* is the scan robot frame (`start_S` at the origin, x ahead; the course is in it):
+`scene_from_memory = inverse(start_S)`. A start check returns `theta, t` (robot now from scene) taken with the node at
+`P_c` in its odometry, so `scene_from_odom = inverse(P_c ∘ [t, theta])`. Goals cross the API as `goal_scene`; the hub
+sends `inverse(scene_from_odom)` of it. A course reposed by a start offset O starts the robot at O in the scene:
+`scene_from_course = O`. On scan-145338 (start yaw 1.381 rad) the twin maps onto the course within 1.3 mm and the
+scan's goal lands on its typed 2.5 / −0.3 m.
 
 **The wireless remote: two buttons only.** Select = E-STOP (the console's watcher turns it into the runner's damping in
 every input mode) and D-up = takeover (the runner's standing motion set). The SONIC runner reads every D-pad press

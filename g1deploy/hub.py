@@ -377,6 +377,7 @@ class Hub:
         self._pc = (0.0, None)
         self.studio_link = None if getattr(args, "no_studio_link", False) else self.link_studio()
         self.bg_stop = threading.Event()
+        self.bg_wake = threading.Event()  # set after an action: the state is computed again now
 
     def adopt(self):
         """Re-attach to the consoles still running (the hub restarted under them): any session of a lab-day-*
@@ -1316,6 +1317,10 @@ class Hub:
                 x = dict(x, console_t_mono_age_s=round(time.monotonic() - self.console_seen[slot], 3))
             live[slot] = x
         st["live"] = live
+        job = dict(self.scan_job)  # the jobs as they are now (a POST may have started one since the last refresh)
+        job.pop("then", None)
+        st["scan_job"] = job
+        st["rehearsal_job"] = {k: v for k, v in (self.set_job or {}).items() if k != "cancel"} or None
         return st
 
     def refresh(self):
@@ -1332,7 +1337,8 @@ class Hub:
                     self.refresh()
                 except Exception as exc:  # a state that fails once must not stop the service
                     print(f"g1 lab: state failed: {type(exc).__name__}: {exc}", flush=True)
-                self.bg_stop.wait(max(0.05, period - (time.monotonic() - t0)))
+                self.bg_wake.wait(max(0.05, period - (time.monotonic() - t0)))
+                self.bg_wake.clear()
         t = threading.Thread(target=loop, daemon=True)
         t.start()
         return t
@@ -1933,7 +1939,7 @@ class Hub:
         seq = self.next_seq()
         act = {"act": "goal_odom", "x": round(g_odom[0], 4), "y": round(g_odom[1], 4), "seq": seq, "check_id": check_id,
                "id": req.get("id") or str(uuid.uuid4()), "source": req.get("source") or "studio",
-               "operator": req.get("operator"), "goal_scene": goal}
+               "operator": req.get("operator")}
         if req.get("expect") is not None:
             act["expect"] = req["expect"]
         code, reply = self.act(slot, act)
@@ -2338,6 +2344,7 @@ def serve(hub: Hub, port: int, host="127.0.0.1"):
                     self._json(400, {"ok": False, "error": "act missing"})
                     return
                 code, reply = hub.act(slot, msg)
+                hub.bg_wake.set()
                 self._json(code, reply)
                 return
             handlers = {"scan": hub.scan_v1, "practice/scan": hub.practice_scan, "start": hub.start_v1,
@@ -2350,6 +2357,7 @@ def serve(hub: Hub, port: int, host="127.0.0.1"):
             out = handlers[path](msg)
             if not out.get("ok") and out.get("error") and "reason" not in out:
                 out["reason"] = out["error"]
+            hub.bg_wake.set()
             self._json(200, out)
 
     server = ThreadingHTTPServer((host, port), Handler)
