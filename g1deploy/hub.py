@@ -363,6 +363,7 @@ class Hub:
         self.checks = {}  # slot -> the last start check (with its session)
         self.views = {}  # slot -> (session dir, ViewPoller)
         self.set_job = None  # the rehearsal set running (or the last one)
+        self.last_lease = {}  # slot -> (holder, HTTP code) of the last relayed Studio lease
         self.practice_proc = None
         self.summaries = {}  # session dir -> (key, summary)
         self.scene_cache = {}  # scan -> scene dict
@@ -1971,6 +1972,11 @@ class Hub:
                 reply = {"ok": False, "error": data.decode(errors="replace")[:300]}
         if code != 200:
             reply.setdefault("ok", False)
+        if msg.get("act") == "lease":  # renewed every 2 s while held: audit when the holder or the outcome changes
+            key = (msg.get("holder"), code)
+            if self.last_lease.get(slot) == key:
+                return code, reply
+            self.last_lease[slot] = key
         rec = {"wall": time.time(), "t_mono": time.monotonic(), "slot": slot,
                "session": Path(cur["dir"]).name if cur else None, "act": msg.get("act"), "id": msg.get("id"),
                "source": msg.get("source"), "operator": msg.get("operator"), "expect": msg.get("expect"),

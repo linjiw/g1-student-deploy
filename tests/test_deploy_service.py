@@ -215,6 +215,13 @@ def test_start_check_and_send_goal_convert_into_odom(tmp_path):
         assert audit[-1]["act"] == "goal_odom" and audit[-1]["code"] == 200 and audit[-1]["session"] == "robot-100000-deploy"
         rows = [json.loads(x) for x in (h.day / "robot-100000-deploy" / "start_check.jsonl").read_text().splitlines()]
         assert [x["action"] for x in rows] == ["start_check", "send_goal"] and rows[1]["check_id"] == "gc-1"
+        # Studio's operator lease goes through like any act; its 2 s renewals are audited only when they change
+        for until in (10, 12, 14):
+            assert h.act("robot", {"act": "lease", "holder": "lw", "until": until, "id": f"l{until}"})[0] == 200
+        h.act("robot", {"act": "lease", "holder": None, "until": 0, "id": "l0"})
+        assert [a["until"] for a in con.acts if a["act"] == "lease"] == [10, 12, 14, 0]
+        audit = [json.loads(x) for x in (h.day / "hub_actions.jsonl").read_text().splitlines()]
+        assert [a["args"].get("holder") for a in audit if a["act"] == "lease"] == ["lw", None]
         # a goal on an obstacle of the live map is refused before anything is sent
         n = len(con.acts)
         r = h.send_goal_v1({"slot": "robot", "scan": "scan-a", "goal_scene": [1.8, 0.3], "check_id": "gc-2"})
