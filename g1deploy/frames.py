@@ -98,6 +98,23 @@ def offset_envelope(offset):
     return math.hypot(x, y), abs(math.degrees(t))
 
 
+def crosses(path, a, b):
+    """Does the polyline `path` [N, 2] cross the segment a-b (a passage gate, e.g. between two towers' inner faces)?
+    A path that reaches the gate's line inside the segment counts; one that only runs along that line does not."""
+    p = np.asarray(path, dtype=float).reshape(-1, 2)
+    a, b = np.asarray(a, dtype=float).reshape(2), np.asarray(b, dtype=float).reshape(2)
+    p = p[np.all(np.isfinite(p), axis=1)]
+    if len(p) < 2 or not (np.all(np.isfinite(a)) and np.all(np.isfinite(b))):
+        return False
+    u, v = p[:-1], p[1:]
+
+    def side(o, d, w):  # the sign of (d - o) x (w - o)
+        return np.sign((d[..., 0] - o[..., 0]) * (w[..., 1] - o[..., 1]) - (d[..., 1] - o[..., 1]) * (w[..., 0] - o[..., 0]))
+    s1, s2 = side(a, b, u), side(a, b, v)
+    s3, s4 = side(u, v, a[None]), side(u, v, b[None])
+    return bool(np.any((s1 * s2 <= 0) & (s1 != s2) & (s3 * s4 <= 0) & (s3 != s4)))
+
+
 def yaw_of_quat(q_wxyz):
     w, x, y, z = (float(v) for v in q_wxyz)
     return math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))

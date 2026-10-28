@@ -90,9 +90,10 @@ def make_scan(h, name, start=START_S, pts_scene=None, age_s=0.0):
 class FakeConsole:
     """A console panel: /state, /map, /act (token checked), recording every act."""
 
-    def __init__(self, state=None, live_map=None, token=TOKEN):
+    def __init__(self, state=None, live_map=None, token=TOKEN, act_results=None):
         self.state = state or {"runner": "CONTROL", "phase": "WAIT", "attempts": [], "checks": [], "ladder": []}
         self.map, self.acts, self.token = live_map, [], token
+        self.act_results = act_results  # id -> record: a console with GET /act_result (contract v3 D); None: without
         fake = self
 
         class H(BaseHTTPRequestHandler):
@@ -114,6 +115,10 @@ class FakeConsole:
                     return self._reply(200, fake.state)
                 if u.path == "/map":
                     return self._reply(200, fake.map or {"ok": False})
+                if u.path == "/act_result" and fake.act_results is not None:
+                    i = parse_qs(u.query).get("id", [""])[0]
+                    return self._reply(200, dict(fake.act_results.get(i) or {"result": None}, known=i in fake.act_results,
+                                                 id=i))
                 return self._reply(404, {})
 
             def do_POST(self):
@@ -140,20 +145,34 @@ def go_live(h, slot, d, port, **info):
         "port_base": 47000 if slot == "robot" else 47100, "profile": "deploy"}, **info)}
 
 
-def rehearsal_run(h, name, kind, set_name, result="arrived", scan="scan-a", offset=None, n=200, walk=None):
+def rehearsal_run(h, name, kind, set_name, result="arrived", scan="scan-a", offset=None, n=200, walk=None, contact=4.5,
+                  identity=None, passage=None, goal=(2.5, -0.3), lag=0.2, started=None, ended=True, profile="deploy"):
     d = h.day / name
     d.mkdir(parents=True)
-    (d / "session.json").write_text(json.dumps({"mode": "sim", "odom": "lio" if kind == "drift" else "dds"}))
-    (d / "console_summary.json").write_text("{}")
+    ran = identity or {}
+    (d / "session.json").write_text(json.dumps({"mode": "sim", "odom": "lio" if kind == "drift" else "dds",
+                                                "profile": {"name": profile, "sha256": ran.get("profile_sha")},
+                                                "bundle_manifest_sha256": ran.get("bundle_sha"),
+                                                "deploy_identity": {"rules_sha256": ran.get("rules_sha")}}))
+    if ended:
+        (d / "console_summary.json").write_text("{}")
+        (d / "report.json").write_text(json.dumps({"node": {"max_lag_s": lag, "overruns": 0}, "machine_busy": []}))
     (d / "attempts.jsonl").write_text(json.dumps({"n": 1, "result": result, "duration_s": 8.5}) + "\n")
+    if started is not None:
+        (d / "hub_start.json").write_text(json.dumps({"t": started}))
     s_from_c = offset or [0.0, 0.0, 0.0]
-    meta = {"scan": scan, "goal": [2.5, -0.3], "goal_scene": [2.5, -0.3], "profile": "deploy", "set": set_name,
+    goal = list(goal)
+    meta = {"scan": scan, "goal": goal, "goal_scene": goal, "profile": profile, "set": set_name,
             "kind": kind, "drift": {"motion": "lab-g1-leg"} if kind == "drift" else None, "scene_from_course": s_from_c}
     if kind == "offset":
         meta["offset"] = {"pose": s_from_c}
+    if identity is not None:
+        meta.update(identity=identity, started=started)
+    if passage is not None:
+        meta["passage"] = passage
     (d / "rehearsal.json").write_text(json.dumps(meta))
     t = np.arange(1, 2 * n + 1) * 0.01  # the 100 Hz log
-    end = F.apply(F.inverse(s_from_c), [2.5, -0.3])  # a walk that ends at the goal on the simulator's truth
+    end = F.apply(F.inverse(s_from_c), goal)  # a walk that ends at the goal on the simulator's truth
     xy = np.c_[np.linspace(0, end[0], 2 * n), np.linspace(0, end[1], 2 * n)] if walk is None else walk
     q = np.zeros((n, 50))
     q[:, :2] = xy[::2]
@@ -163,7 +182,7 @@ def rehearsal_run(h, name, kind, set_name, result="arrived", scan="scan-a", offs
     for k, jn in enumerate(names):
         q[:, 7 + k] = 0.01 * k + (0.5 if "hand" in jn else 0.0)  # hand joints recognisable
     cn = np.zeros(2 * n)
-    cn[100:104] = [3.0, 7.5, 9.0, 4.0]
+    cn[100:104] = [3.0, contact * 0.8, contact, 4.0]
     np.savez_compressed(d / "sim.npz", t=t, root_pos=np.c_[xy, 0.78 + 0 * t], root_quat=np.tile([1.0, 0, 0, 0], (2 * n, 1)),
                         contact_n=cn, qpos=q)
     return d
@@ -294,7 +313,7 @@ def test_rehearsal_sets_verdicts_and_tracks(tmp_path):
     rehearsal_run(h, "rehearse-100000-deploy-twin-scan-a", "exact", "set-100000")
     rehearsal_run(h, "rehearse-drift-100040-deploy-twin-scan-a", "drift", "set-100000")
     rehearsal_run(h, "rehearse-offset-100120-deploy-twin-scan-a", "offset", "set-100000", offset=OFFSET,
-                  result="stopped")
+                  result="stopped", contact=9.0)
     st = h.refresh()
     s = next(x for x in st["rehearsals"] if x["name"] == "set-100000")
     assert s["verdict"] == "robust" and s["apart_m"] == 0.0 and s["offset_ok"] is False and s["runs"]["drift"]
