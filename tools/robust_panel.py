@@ -20,9 +20,10 @@ evaluation packet:
                static here, on the robot it follows the robot)
   door         a 1.0 m wide door with its beam underside at 1.17 m, 1.5 m ahead (ducking: --guards deploy)
   door-rope    the door with the rope behind: the lab test that E-stopped
+  gap-069      a 0.69 m gap between two block towers 1.8 m ahead (the lab-g1 walk of 2026-10-27)
 
 Conditions (`--conditions`, comma separated, see CONDITIONS): self-filter margin, guard preset, head
-occlusion bands. Results: <out>/<condition>/<course>__s<seed>/ (score.json, plans.json, closed_loop.npz),
+occlusion bands, odometry (`*-legdrift`: lab-g1's leg-odometry error, g1deploy/odom_error.py). Results: <out>/<condition>/<course>__s<seed>/ (score.json, plans.json, closed_loop.npz),
 <out>/summary.json and a table on stdout.
 
 usage: robust_panel.py --out runs/robust/panel1 [--conditions tag,kit,kit-guards,leaky-guards] [--seeds 3]
@@ -58,6 +59,9 @@ CONDITIONS = {
     "kit-slow": dict(margin=0.05, guards=None, lookahead=1.0),  # --goal-lookahead 1.0: the first-walk speed
     "kit-guards-slow": dict(margin=0.05, guards="deploy", lookahead=1.0),
     "kit-walls-slow": dict(margin=0.05, guards="walls", lookahead=1.0),
+    # odometry like lab-g1's leg odometry instead of LIO noise (g1deploy/odom_error.py: step-tied, smears the memory)
+    "kit-guards-legdrift": dict(margin=0.05, guards="deploy", odom={"motion": "lab-g1-leg"}),
+    "kit-guards-trainingdrift": dict(margin=0.05, guards="deploy", odom={"motion": "training"}),
 }
 WALL_H = 1.2
 
@@ -95,6 +99,9 @@ def courses():
         "rope-behind": dict(boxes=[ROPE], goal=[2.0, 0.0], deadline=12.0),
         "door": dict(boxes=DOOR, goal=[3.0, 0.0], deadline=16.0),
         "door-rope": dict(boxes=DOOR + [ROPE], goal=[3.0, 0.0], deadline=16.0),
+        # the 0.69 m gap between two block towers of 2026-10-27, 1.8 m ahead (sim/courses/gap-069)
+        "gap-069": dict(boxes=[box(1.8, -0.465, 0.12, 0.12, 1.0), box(1.8, 0.525, 0.12, 0.18, 1.25)], goal=[2.8, 0.0],
+                        deadline=14.0),
     }
     rng = np.random.default_rng(20261023)
     dense = walls(-1.5, 4.5, -3.5, 3.5)
@@ -147,7 +154,8 @@ def _run(job):
     t0 = time.time()
     try:
         run_episode(job["task"], job["seed"], out, latency_s=job["latency_s"], anchor_mode="predict", start="stand",
-                    route_source="sensor", lidar="mid360", lidar_cfg=lidar_cfg, prescan_s=job["prescan_s"], odom_noise=LIO,
+                    route_source="sensor", lidar="mid360", lidar_cfg=lidar_cfg, prescan_s=job["prescan_s"],
+                    odom_noise=cond.get("odom", LIO),
                     planner_overrides={"sensor": sensor}, guards=cond.get("guards"), dump_memory=True,
                     goal_lookahead=cond.get("lookahead"))
     except Exception as exc:  # recorded as runtime_error in score.json by run_episode
