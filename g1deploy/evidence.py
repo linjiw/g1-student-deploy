@@ -272,6 +272,8 @@ def manifest(d) -> dict:
     rs = recorder_state(d, s)
     live = rs["stats"].get("streams") or {}
     rec = d / "rec"
+    console_alive = _pid_alive(s["console_pid"], b"console")
+    running = (rs["state"] in ("recording", "stalled") or console_alive) and not s["closed"]
     items = []
 
     def add(id_, path, status=None, reason=None, note=None, **extra):
@@ -404,8 +406,10 @@ def manifest(d) -> dict:
         add("report", "report.md")
     elif s["closed"]:
         add("report", "report.md", "missing", "the session ended without a report")
-    else:
+    elif running:
         add("report", "report.md", "n/a", "written when the session ends")
+    else:
+        add("report", "report.md", "missing", "the console did not close the session (no report)")
     videos = sorted(d.glob("*.mp4"))
     if videos:
         add("video", videos[0].name)
@@ -413,8 +417,6 @@ def manifest(d) -> dict:
         add("video", None, "n/a", "no video is recorded in v1")
 
     # -- the session's state and completeness
-    console_alive = _pid_alive(s["console_pid"], b"console")
-    running = (rs["state"] in ("recording", "stalled") or console_alive) and not s["closed"]
     has_rec = rs["state"] != "absent"
     missing = [i["id"] for i in items if i["required"] and i["status"] == "missing"]
     partial = [i["id"] for i in items if i["required"] and i["status"] == "partial"]

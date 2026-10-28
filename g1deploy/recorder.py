@@ -496,7 +496,10 @@ class Recorder:
         """Chunks off the receive threads and off the heartbeat: a slow disk shows as a growing queue and drops."""
         while True:
             stopping = self.stop.wait(self.args.flush_s)
-            self.flush_all(close=stopping)
+            try:
+                self.flush_all(close=stopping)
+            except Exception as exc:  # never the end of the writer: the next round tries again
+                self.error("writer", f"{type(exc).__name__}: {exc}")
             if stopping:
                 return
 

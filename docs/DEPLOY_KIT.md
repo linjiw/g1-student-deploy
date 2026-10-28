@@ -39,8 +39,30 @@ for t, pts, t_s in rec.lidar_frames(): ...   # raw MID-360 frames (sensor frame,
 status = rec.node_status()                   # phase, goal, odometry xy, tilt, latency, ...
 ```
 
-A robot session records about 3 MB/s (lidar ~1.5 MB/s compressed; `--no-record-lidar` skips it). Copy session
-directories off the machine after each robot day (lucid's HARDWARE_RUNS.md lesson: the first hardware run left no data).
+**Recording health and evidence (since 2026-10-28).** The recorder rewrites `rec/stats.json` every second: its pid
+and heartbeat (`t_unix`), disk free, and per stream the samples, the rate over the last 5 s against the expected rate,
+the last sample and the last chunk write, gaps (silences longer than max(3 expected periods, 0.1 s)), samples dropped
+and why, the writer's queue, chunks, bytes, write errors. It never stops for a fault, it reports it: a chunk that
+cannot be written (disk full, I/O error) is dropped and counted; chunks are written on their own thread with a bounded
+queue, so a slow disk shows as a busy writer and then as dropped samples; below 1 GB free (`--min-free-gb`) or past
+`--quota-gb` it keeps its heartbeat but drops (and counts) samples. `meta.json` gets the lidar fields at the first frame
+(a cut recording stays decodable) and `rec/finalized.json` is written last, at a clean exit: without it the recording
+was cut (kill, power loss) and everything up to the last whole chunk is still usable (`g1deploy/recording.py` skips a
+cut chunk and lists it in `rec.skipped`). If its console disappears, the recorder notes it, records 60 s more (the
+aftermath) and finalizes itself. The console's own files on a full disk lose lines, never the session (a child's
+stdout is always drained, so a full disk cannot block the runner).
+`g1deploy/evidence.py`: `recording_health(dir)` (live: each stream's required / active / stalled state, rates, last
+write age, drops, gaps, bytes; disk free; errors; problems; finalized; recorder alive) and `manifest(dir)` v2 (each
+record present / partial / missing / n/a, required or not, span, gaps, drops, reason). Required: lowstate, lowcmd,
+lidar_raw, node_status, node_events, plans, console_events, attempts (+ the LIO odometry and cloud with zmq / fused
+odometry, and lio in simulation; + the sim truth for a rehearsal; + node memory, start checks, scan, identity, the
+robot checklist and the rehearsal set with a robot attempt where they apply); optional: video, runner log, report. A
+record that does not apply to the session as it went (no Arm, no GO) is n/a and not required. `complete` only when
+every required record is present (not partial), the recording is finalized and the console closed the session; a
+running session is `recording`. `python -m g1deploy.evidence DIR --health`.
+
+A robot session records about 3 MB/s (lidar ~1.5 MB/s compressed; `--no-record-lidar` skips it, and makes the session
+incomplete: raw lidar is required). Copy session directories off the machine after each robot day (lucid's HARDWARE_RUNS.md lesson: the first hardware run left no data).
 Write what the robot cannot measure with `./g1 note latest "..."`: tape-measured stop positions, who was spotting,
 floor, lighting, anything unusual.
 
@@ -84,8 +106,11 @@ the terminal keys, the remote and `--script` steps are acts too. E-STOP runs at 
 `{ok, key_sent, runner_alive, runner, confirmed, t_mono}` (`confirmed`: the runner's log shows its EMERGENCY STOP).
 Every other act needs a client `id` (a repeated id returns its first result, so a retry never acts twice), is refused
 when a field of `expect` (`session, runner, phase, goal_seq, attempts`) no longer matches, and is answered within 1 s:
-`{ok, id, result: done | refused | queued, reason}`. Each one is a line in `console_events.jsonl` (source, operator,
-arguments, result, reason); `/state.acts` shows the last 20. Goals: `goal {ahead, left}` (the panel) or
+`{ok, id, result: done | refused | queued, reason, session}`. Each one is a line in `console_events.jsonl` (source,
+operator, arguments, result, reason; an act answered `queued` has a `queued` line there before its reply leaves);
+`/state.acts` shows the last 20. `GET /act_result?id=` answers what became of any act of the last 500 (any source,
+recorded the moment the console receives it): `{known, id, act, result: done | refused | queued | pending, reason,
+t_mono, t_done, source, operator, session}`; a relay whose reply was lost asks it instead of sending again. Goals: `goal {ahead, left}` (the panel) or
 `goal_odom {x, y, seq, check_id}` (the hub's Send goal, converted to the node's odometry frame after its start check)
 count only once the node's status echoes their seq (within 0.5 s; otherwise "goal not confirmed by the node").
 GO (`g`) is refused, with every reason, unless: the runner is in CONTROL and not in E-STOP, 2 s have passed since

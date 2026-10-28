@@ -594,6 +594,10 @@ class Session:
         if final:
             rec["t_done"] = row["t_done"]
         with self.log_lock:
+            if not final:  # checked under the lock: a result line never precedes its queued line
+                if rec["result"] is not None or rec.get("queued_logged"):
+                    return
+                rec["queued_logged"] = True
             try:
                 self.events_log.write(workspace.dumps(row) + "\n")
             except ValueError:  # the log is closed at shutdown: the act itself stands
@@ -673,9 +677,7 @@ class Session:
                                                            key, msg.get("expect"), **args)
         if not repeat:
             self.inbox.put(("act", rec, rec["source"]))
-        rec["done"].wait(ACT_WAIT_S)
-        if rec["result"] is None and not rec.get("queued_logged"):  # the reply says queued: a line on disk first
-            rec["queued_logged"] = True
+        if not rec["done"].wait(ACT_WAIT_S):  # the reply will say queued: its line is on disk first
             self.log_act(rec, "queued", "replied before the main loop handled it", final=False)
         return 200, self.act_reply(rec, repeat=repeat)
 
