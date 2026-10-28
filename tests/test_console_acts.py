@@ -297,6 +297,20 @@ def test_http_acts_expect_ids_and_replies(tmp_path):
     assert [a["id"] for a in s.panel_state()["acts"]] == ["u1", "u2", "u3", "t1", "t2"]
 
 
+def test_a_stop_is_never_refused_over_a_stale_page(tmp_path):
+    s = arm(session(tmp_path))
+    stop = main_loop(s)
+    try:
+        for act in ("h", "t"):  # a page that names another session or an old state still stands the robot
+            code, r = s.submit({"act": act, "id": f"stop-{act}", "source": "studio",
+                                "expect": {"session": "some-other-session", "runner": "booting"}})
+            assert code == 200 and r["result"] != "refused", (act, r)
+        code, r = s.submit({"act": "s", "id": "go-ish", "source": "studio", "expect": {"session": "some-other-session"}})
+        assert r["result"] == "refused" and "the state changed" in r["reason"]  # motion acts still are
+    finally:
+        stop.set()
+
+
 def test_an_act_reply_waits_at_most_a_second(tmp_path):
     s = arm(session(tmp_path))  # no main loop running
     t0 = time.monotonic()

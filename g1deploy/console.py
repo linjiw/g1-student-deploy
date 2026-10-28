@@ -694,7 +694,9 @@ class Session:
         """Main loop: one act -> done | refused (with its reason) | pending (a goal or Clear map waits for the node to
         confirm it; check_pending ends it). Every result goes to console_events.jsonl."""
         why = self.expect_mismatch(rec.get("expect"))
-        if why:
+        if why and rec["act"] in ("h", "t"):  # a stop is never refused over bookkeeping: stand now, note the mismatch
+            self.event(f"{rec['source']}: {rec['act']} despite a stale page ({why})")
+        elif why:
             return self.finish(rec, "refused", why)
         handler = {"goal": self.act_goal, "goal_odom": self.act_goal_odom, "arm": self.act_arm, "quit": self.act_quit,
                    "lease": self.act_lease, "tag": self.act_tag}.get(rec["act"], self.act_key)
