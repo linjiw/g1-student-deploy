@@ -20,6 +20,7 @@ power loss loses at most one chunk):
     zmq_pose     node -> runner reference stream (:5556), raw messages (g1deploy.zmq_stream.unpack)
     zmq_debug    runner g1_debug (:5557), raw messages
     zmq_odom     LIO bridge odometry (:5561) when running
+    zmq_cloud    LIO bridge registered cloud (:5561, topic `cloud`) when running, compressed chunks
     node_status  node.py status (phase, goal, odometry xy, tilt, latency, ...) at 5 Hz, node_status.jsonl
 Every row carries `t` (time.monotonic(), the clock of the console/node/runner logs) and `t_unix`.
 `stats.json` (rates, gaps, bytes) is rewritten every second; `meta.json` describes the recording.
@@ -364,7 +365,7 @@ class Recorder:
 
 
 DEFAULT_ZMQ = ["pose=pose=tcp://127.0.0.1:5556", "debug=g1_debug=tcp://127.0.0.1:5557",
-               "odom=odom=tcp://127.0.0.1:5561"]
+               "odom=odom=tcp://127.0.0.1:5561", "cloud=cloud=tcp://127.0.0.1:5561"]
 
 
 def main(argv=None):

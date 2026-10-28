@@ -146,7 +146,11 @@ class TorsoFK:
 
 
 class CloudFromSensorFrame:
-    """Raw sensor-frame frames -> world points + per-point origins, deskewed with the node's own odometry."""
+    """Raw sensor-frame frames -> world points + per-point origins, deskewed with the node's own odometry.
+
+    `keep_dropped = True` (the node sets it while a live view is polled) also keeps what the frame dropped, in the
+    world frame, for display: `last_dropped = (self-filtered points, rear-blind points)`. The rear-blind points are
+    registered with one sensor pose (the last slice's, else the frame's end); they never reach the memory."""
 
     def __init__(self, body_filter, mount: Mount | None = None, transport_s=0.01, slice_s=0.005, rear_blind_deg=0.0,
                  rear_blind_range_m=0.0):
@@ -161,22 +165,48 @@ class CloudFromSensorFrame:
         # stay out of the memory while the far rear stays observed (the frozen planner was trained seeing all around)
         self.rear_range = float(rear_blind_range_m or 0.0)
         self.stats = {"frames": 0, "points": 0, "self_removed": 0, "rear_blind": 0}
+        self.keep_dropped, self.last_dropped, self.last_origin = False, None, None
+
+    def _pose(self, q):
+        p_t, r_t = self.fk(q)
+        return r_t @ self.mount.rot_torso, p_t + r_t @ self.mount.pos_torso
+
+    def _dropped(self, self_pts, rear_s, pose, t_end, qpos_at):
+        """The display copy of what this frame dropped (keep_dropped)."""
+        rear = np.zeros((0, 3))
+        if rear_s is not None and len(rear_s):
+            if pose is None:
+                q = qpos_at(t_end)
+                pose = None if q is None else self._pose(q)
+            if pose is not None:
+                rear = rear_s @ pose[0].T + pose[1]
+                self.last_origin = pose[1]
+        self.last_dropped = (np.concatenate(self_pts) if self_pts else np.zeros((0, 3)), rear)
 
     def __call__(self, pts_s, t_s, recv_wall, qpos_at):
         """qpos_at(t_wall) -> 36-D qpos (odometry pelvis pose + joints) or None."""
+        keep_dropped, rear_s, self_pts, pose = self.keep_dropped, None, [], None
+        self.last_dropped = None
         if len(pts_s) == 0:
+            if keep_dropped:
+                self.last_dropped = (np.zeros((0, 3)), np.zeros((0, 3)))
             return np.zeros((0, 3)), np.zeros((0, 3))
+        t_end = recv_wall - self.transport
         if self.front_half_deg < 180.0:
             p_t = pts_s @ self.mount.rot_torso.T + self.mount.pos_torso
             front = np.abs(np.degrees(np.arctan2(p_t[:, 1], p_t[:, 0]))) <= self.front_half_deg
             if self.rear_range > 0:
                 front |= np.hypot(p_t[:, 0], p_t[:, 1]) >= self.rear_range
             self.stats["rear_blind"] += int((~front).sum())
+            if keep_dropped:
+                rear_s = pts_s[~front]
             pts_s, t_s = pts_s[front], t_s[front]
             if len(pts_s) == 0:
                 self.stats["frames"] += 1
+                if keep_dropped:
+                    self._dropped(self_pts, rear_s, None, t_end, qpos_at)
                 return np.zeros((0, 3)), np.zeros((0, 3))
-        t_wall = recv_wall - self.transport - (t_s.max() - t_s)
+        t_wall = t_end - (t_s.max() - t_s)
         bins = np.floor((t_wall - t_wall.min()) / self.slice).astype(int)
         out_p, out_o = [], []
         for b in np.unique(bins):
@@ -184,21 +214,24 @@ class CloudFromSensorFrame:
             q = qpos_at(float(t_wall[sel].mean()))
             if q is None:
                 continue
-            p_t, r_t = self.fk(q)
-            r_s, o = r_t @ self.mount.rot_torso, p_t + r_t @ self.mount.pos_torso
+            r_s, o = pose = self._pose(q)
             pw = pts_s[sel] @ r_s.T + o
             keep = self.bf.mask(pw, q, origins=o)
             self.stats["self_removed"] += int((~keep).sum())
             out_p.append(pw[keep])
             out_o.append(np.repeat(o[None], int(keep.sum()), 0))
+            if keep_dropped:
+                self_pts.append(pw[~keep])
+            self.last_origin = o
         self.stats["frames"] += 1
         self.stats["points"] += len(pts_s)
+        if keep_dropped:
+            self._dropped(self_pts, rear_s, pose, t_end, qpos_at)
         if not out_p:
             return np.zeros((0, 3)), np.zeros((0, 3))
         return np.concatenate(out_p), np.concatenate(out_o)
 
 
-# ------------------------------------------------------------------------------------- calibration
 def calibrate_mount(frames, qpos, mount: Mount, body_filter, floor_band_m=0.15, iters=3):
     """Correct the mount so the floor seen standing still is level at z = 0.
 

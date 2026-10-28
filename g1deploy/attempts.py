@@ -25,8 +25,11 @@ class Attempts:
         self.open: dict | None = None
 
     # -- life cycle --------------------------------------------------------------------------------------
-    def start(self, t: float, status: dict, goal_rel=None):
-        """GO reached the node. A still-open attempt ends here (a new GO after a stand without an end)."""
+    def start(self, t: float, status: dict, goal_rel=None, **context):
+        """GO reached the node. A still-open attempt ends here (a new GO after a stand without an end). `context`: what
+        was in force at GO, stored in the row (the console passes the goal's seq, kind and odometry position, the start
+        check's check_id and result, the rehearsal set (names + verdict), the odometry mode and its health at GO, the
+        operator, the act's source and id)."""
         if self.open is not None:
             self.close(t, "superseded", status)
         xy = [round(float(v), 3) for v in status["xy"]] if status.get("xy") is not None else None
@@ -34,7 +37,7 @@ class Attempts:
                      "result": None, "goal_rel": goal_rel, "goal": status.get("goal"), "start_xy": xy,
                      "start_phase": status.get("phase"), "left_start": False, "max_tilt": None, "min_pelvis_z": None,
                      "max_latency_s": None, "max_lag_s": None, "plans": 0, "no_safe_plans": 0, "end_goal_dist_m": None,
-                     "walked_m": None, "tag": None, "note": ""}
+                     "walked_m": None, "tag": None, "note": "", **context}
         self.rows.append(self.open)
         self._plans_seen = status.get("plans") or 0
         self.save()
@@ -97,7 +100,9 @@ class Attempts:
         if self.path is None:
             return
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text("".join(json.dumps(r, default=float) + "\n" for r in self.public()))
+        from g1deploy.workspace import dumps  # strict JSON: the hub serves these rows to Studio as they are
+
+        tmp.write_text("".join(dumps(r) + "\n" for r in self.public()))
         tmp.replace(self.path)
 
     def public(self) -> list[dict]:

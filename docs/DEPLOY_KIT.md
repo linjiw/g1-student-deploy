@@ -19,13 +19,13 @@ node exchange, and ends every session with a report. This page is the robot-day 
 
 | process | sim | robot | log / data in the session directory |
 |---|---|---|---|
-| recorder (`g1deploy/recorder.py`), subscribe-only | ✓ | ✓ | `rec/`: lowstate (all 35 motors, IMU, remote), lowcmd, secondary IMU, raw lidar frames, lidar IMU, `pose` / `g1_debug` / `odom` streams, node status at 5 Hz |
+| recorder (`g1deploy/recorder.py`), subscribe-only | ✓ | ✓ | `rec/`: lowstate (all 35 motors, IMU, remote), lowcmd, secondary IMU, raw lidar frames, lidar IMU, `pose` / `g1_debug` / `odom` streams, the LIO registered `cloud` (when a bridge runs), node status at 5 Hz |
 | SONIC runner | ✓ | ✓ | `runner.log`; `runner_csv/` per-tick CSVs (robot default; sim `--runner-csv`) |
 | student node | ✓ | ✓ | `node.log` (events), `node_plans.json`, `node_memory.npz` (map at exit) |
 | MuJoCo G1 | ✓ | | `sim.npz` (truth: pose, contact) |
 | Livox driver + adapter (`--lidar livox`) | | ✓ | `livox.log`, `lidar_adapter.log` |
 | LIO stand-in (`--odom lio`) | ✓ | | `lio.log` |
-| console | ✓ | ✓ | `session.json` (code, bundle, runner, calibration, robot, operator, note), `console_frames.jsonl`, `console_summary.json` |
+| console | ✓ | ✓ | `session.json` (code, bundle, runner, calibration, robot, operator, start confirmations, note), `console_events.jsonl` (every act: source, operator, result, reason), `attempts.jsonl`, `console_frames.jsonl`, `console_summary.json` |
 | report (at exit) | ✓ | ✓ | `report.md`, `report.json`: walks, planner latency vs the 0.32 s gate, stream rates and losses, tilt, motor temperatures and torques, PD tracking, flags |
 
 All times are `time.monotonic()` of the deploy PC, so the recorder, the node events and the runner log line up.
@@ -65,8 +65,8 @@ robot: the console it starts runs in its own process group (it outlives the hub)
 panel's Arm, and a robot session with the runner up is ended from its panel only. The panel (`g1deploy/panel.html`)
 keeps the sticky E-STOP and adds the robot day around it:
 - *Next step*: the ladder (systems, Arm, stand ramp, Start SONIC, planner warm, Clear map, goal, GO, the walk, its tag)
-  with the button for the step to do now (`g1deploy/workspace.py`). GO is refused before CONTROL, before the planner is
-  warm, and for 2 s after CONTROL while SONIC settles the stand.
+  with the button for the step to do now (`g1deploy/workspace.py`). GO is refused, with the reasons on the button, by
+  the console's GO gate (below).
 - *What the planner sees*: the node's memory around the robot (`{"cmd": "map"}` on the node's control port, 10 cm
   cells, 0.7 s refresh), robot-centred and facing up, with the rear blind, the active plan and the goal; tap to pick a
   goal. Cells seen only from up close (the self-return signature the guards mask) have their own colour.
@@ -77,6 +77,39 @@ keeps the sticky E-STOP and adds the robot day around it:
   extremes (tilt, pelvis height, latency, no-safe plans, distance walked). The operator tags it (clean, touched,
   stumble, caught, aborted, setup issue) and adds a note.
 The terminal console and its keys work as before; the panel and the keys drive the same actions.
+
+**Acts and the GO gate (since 2026-10-28).** Every operator action is an *act*, whoever sends it: the panel page, the hub
+and Deploy Studio (through the hub) post `POST /act {act, id, source, operator, expect?, ...}` to the console's panel;
+the terminal keys, the remote and `--script` steps are acts too. E-STOP runs at once on the request thread and answers
+`{ok, key_sent, runner_alive, runner, confirmed, t_mono}` (`confirmed`: the runner's log shows its EMERGENCY STOP).
+Every other act needs a client `id` (a repeated id returns its first result, so a retry never acts twice), is refused
+when a field of `expect` (`session, runner, phase, goal_seq, attempts`) no longer matches, and is answered within 1 s:
+`{ok, id, result: done | refused | queued, reason}`. Each one is a line in `console_events.jsonl` (source, operator,
+arguments, result, reason); `/state.acts` shows the last 20. Goals: `goal {ahead, left}` (the panel) or
+`goal_odom {x, y, seq, check_id}` (the hub's Send goal, converted to the node's odometry frame after its start check)
+count only once the node's status echoes their seq (within 0.5 s; otherwise "goal not confirmed by the node").
+GO (`g`) is refused, with every reason, unless: the runner is in CONTROL and not in E-STOP, 2 s have passed since
+CONTROL, no rehearsal runs beside the robot, the node is ready and not walking, LIO is not lost, a goal was read back in
+this cycle (after the latest of CONTROL, the last attempt's end and the last Clear map; the node still has it) and the
+10 s Clear-map scan is over. All of it is checked before the runner is switched to the student's stream. A robot
+console's launch goal (`--goal`, anchored by the node at Arm) never counts: send the goal. A sim console counts its
+launch goal for the first GO only (scripted rehearsals and `--mission` keep working); `--require-sent-goal` makes a sim
+behave like the robot (practice). `/state.go_locks` lists the reasons (empty iff GO would be accepted);
+`go_locks_panel` adds the operator lease: while Deploy Studio holds it (`lease {holder, until}` from the hub), GO from
+the phone panel is refused (E-STOP, Stand and Takeover always work). Each attempt row keeps what was in force at GO:
+goal seq and odometry position, the start check and its `check_id`, the rehearsal set, the odometry mode and health;
+`session.json` keeps the operator and the start confirmations (`--confirm JSON`).
+
+**The node's live view (since 2026-10-28).** `{"cmd": "view", "cloud_after": n, "mem_after": n, "max_points": 4000}`
+on the node's control port (base + 6) answers at once, in strict JSON (no NaN): the state (`qpos` 36, `joint_names`,
+`state_age_s`, the last 0.5 s of poses), the goal, the active plan's frames 0.4 s and 0.9 s from the current tick and its
+path, the route, odometry health (`odom {mode, lio_age_s, doubt, lost, watchdog}`; also in the node's status), the
+lidar mount, the last lidar frame (int16 cm relative to its origin, one class per point: 0 fused, 1 removed by the self
+filter, 2 dropped by the rear blind; decimated per class) and the full 241 x 241 memory grid (uint8 support / ceiling /
+near layers; cell (i, j) centred at lo + (i, j)·res; a new `seq` at most once per second and only on a change, `epoch`
++1 on Clear map). Cloud and memory are null unless newer than the cursors. The perception thread builds these parts
+only while someone polls (the hub's 5 Hz poller), so the 50 Hz loop pays nothing otherwise. The recorder also keeps
+the LIO bridge's registered cloud (`rec/zmq_cloud`) when it runs.
 
 **Scan, goal, rehearse, deploy (the hub's main card).** One map, robot-centred at its start pose and facing up:
 1. *Scan now* (and every robot session start, unless the scan its goal was picked on is under 15 min old) runs

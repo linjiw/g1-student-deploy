@@ -110,7 +110,14 @@ def test_ladder_walks_through_a_robot_day():
     ctx["cleared_t"] = 95.0  # 5 s of scan left
     assert now(ctx) == "map"
     ctx["t"] = 106.0
-    assert now(ctx) == "go"  # the launch goal counts for the first attempt
+    assert now(ctx) == "goal"  # a robot's launch goal never counts (anchored at Arm, in a frame nobody checked)
+    assert now(dict(ctx, mode="sim")) == "go"  # a sim console's does, for the first attempt
+    ctx["goal_t"] = 104.0
+    assert now(ctx) == "go"
+    ctx["go_locks"] = ["the student node is still starting"]
+    assert "still starting" in next(s for s in W.ladder(dict(ctx, checks=[])) if s["key"] == "go")["detail"]
+    del ctx["go_locks"]
+    assert now(dict(ctx, goal_ok=False)) == "goal"  # the console's gate decides when it says
     ctx["attempts"] = [{"n": 1, "result": None, "t_end": None, "tag": None}]
     assert now(ctx) == "walk"
     ctx["attempts"] = [{"n": 1, "result": "arrived", "t_end": 120.0, "tag": None}]
@@ -204,26 +211,29 @@ def test_hub_lists_sessions_with_attempts(tmp_path, monkeypatch):
 
 
 # ----------------------------------------------------------------------------------------------- panel routes
-def test_panel_serves_state_map_and_tags():
+def test_panel_serves_state_map_and_acts():
+    """The panel's routes (the act machinery itself: tests/test_console_acts.py). /state is strict JSON."""
     from g1deploy.panel import start_panel
 
-    log = A.Attempts(None, "deploy")
-    log.start(1.0, {"phase": "WAIT"})
-    sess = SimpleNamespace(panel_state=lambda: {"ok": 1}, node_map=lambda: {"ok": True, "rows": []}, attempts=log,
-                           inbox=__import__("queue").Queue(), estop=lambda src: None)
+    acts = []
+    sess = SimpleNamespace(panel_state=lambda: {"ok": 1, "tilt_rad": float("nan")},
+                           node_map=lambda: {"ok": True, "rows": []},
+                           submit=lambda msg: (acts.append(msg), (200, {"ok": True, "result": "done"}))[1])
     server, token = start_panel(sess, 0, token="tok")
     port = server.server_address[1]
     try:
         base = f"http://127.0.0.1:{port}"
         assert json.loads(urllib.request.urlopen(f"{base}/map?t=tok").read())["ok"] is True
+        state = urllib.request.urlopen(f"{base}/state?t=tok").read().decode()
+        assert "NaN" not in state and json.loads(state)["tilt_rad"] is None
         page = urllib.request.urlopen(f"{base}/?t=tok").read().decode()
         assert "G1 Lab Console" in page and "__TOKEN__" not in page
         with pytest.raises(urllib.error.HTTPError):
             urllib.request.urlopen(f"{base}/state?t=wrong")
-        req = urllib.request.Request(f"{base}/act?t=tok", data=json.dumps({"act": "tag", "n": 1, "tag": "clean"}).encode(),
+        req = urllib.request.Request(f"{base}/act?t=tok", data=json.dumps({"act": "tag", "id": "a", "n": 1}).encode(),
                                      method="POST")
-        assert json.loads(urllib.request.urlopen(req).read())["ok"] and log.rows[0]["tag"] == "clean"
-        bad = urllib.request.Request(f"{base}/act?t=tok", data=json.dumps({"act": "tag", "n": "x"}).encode(), method="POST")
+        assert json.loads(urllib.request.urlopen(req).read())["result"] == "done" and acts[0]["id"] == "a"
+        bad = urllib.request.Request(f"{base}/act?t=tok", data=b"[1, 2]", method="POST")
         with pytest.raises(urllib.error.HTTPError):
             urllib.request.urlopen(bad)
     finally:

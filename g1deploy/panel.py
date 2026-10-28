@@ -5,10 +5,14 @@ log with the operator's tags (g1deploy/workspace.py, g1deploy/attempts.py).
 `g1 robot|sim --panel PORT` serves it from the console process on 127.0.0.1:PORT only. On the deploy PC, Tailscale
 runs in userspace mode and hands tailnet connections to 127.0.0.1, so the page is reachable from the operator's own
 tailnet devices (http://<tailscale ip>:PORT/?t=TOKEN) and from nowhere else: not the lab Wi-Fi, not the robot LAN.
-Every request needs the session's random token.
+Every request needs the token (the console passes the deploy PC's one panel token, g1deploy/service_token.py).
 
-E-STOP goes straight to the runner from the request thread (Session.estop: the runner's global `o`, damping in any
-input mode); every other button is queued for the console's main loop, exactly like a key press.
+POST /act {act, id, source, operator, expect?, ...args} (CONTRACT §4.1; the panel page, the lab hub and Studio's gateway
+through the hub): E-STOP goes straight to the runner from the request thread (Session.estop: the runner's global `o`,
+damping in any input mode) and answers {ok, key_sent, runner_alive, runner, confirmed, t_mono}. Every other act is
+queued for the console's main loop, exactly like a key press, and the reply waits up to 1 s for its result:
+{ok, id, result: done | refused | queued, reason}. An invalid act (unknown, no id, bad arguments) is answered 400.
+Every response is strict JSON (no NaN).
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-KEYS = {"s", "g", "h", "t", "c"}
+from g1deploy.workspace import dumps
 
 
 def start_panel(sess, port, host="127.0.0.1", token=None):
@@ -57,9 +61,9 @@ def start_panel(sess, port, host="127.0.0.1", token=None):
                 page = PAGE.replace("__TOKEN__", token).replace("__HUB_PORT__", os.environ.get("G1_HUB_PORT", ""))
                 self._send(200, page, "text/html; charset=utf-8")
             elif path == "/state":
-                self._send(200, json.dumps(sess.panel_state(), default=float))
+                self._send(200, dumps(sess.panel_state()))
             elif path == "/map":
-                self._send(200, json.dumps(sess.node_map(), default=float))
+                self._send(200, dumps(sess.node_map()))
             else:
                 self._send(404, "{}")
 
@@ -72,28 +76,11 @@ def start_panel(sess, port, host="127.0.0.1", token=None):
             except (ValueError, json.JSONDecodeError):
                 self._send(400, '{"ok": false}')
                 return
-            act = msg.get("act")
-            if act == "estop":
-                sess.estop("panel E-STOP")  # now, from this thread: never behind the main loop
-            elif act in KEYS:
-                sess.inbox.put(("key", act, "panel"))
-            elif act == "goal":
-                sess.inbox.put(("goal", (float(msg["ahead"]), float(msg["left"])), "panel"))
-            elif act == "quit":
-                sess.inbox.put(("quit", None, "panel"))
-            elif act == "arm":
-                sess.inbox.put(("arm", None, "panel"))
-            elif act == "tag":
-                try:
-                    ok = sess.attempts.tag(int(msg.get("n", 0)), msg.get("tag"), msg.get("note"))
-                except (TypeError, ValueError):
-                    ok = False
-                self._send(200 if ok else 400, json.dumps({"ok": ok}))
+            if not isinstance(msg, dict):
+                self._send(400, '{"ok": false, "reason": "a JSON object"}')
                 return
-            else:
-                self._send(400, '{"ok": false}')
-                return
-            self._send(200, '{"ok": true}')
+            code, reply = sess.submit(msg)
+            self._send(code, dumps(reply))
 
     server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True

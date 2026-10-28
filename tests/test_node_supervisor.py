@@ -184,3 +184,54 @@ def test_lio_lost_in_fused_odometry_stands_the_robot(node):
         del node.fused
         node.lio_lost_handled = False
     assert "lio_lost" in ev and "stand" in ev and "estop" not in ev
+
+
+def test_view_on_the_control_socket_while_walking(node):
+    """CONTRACT §2 end to end: a 5 Hz-ish view poller on the node's control socket while it pre-scans and walks. Every
+    reply is strict JSON; the cloud and memory parts come by seq; status carries the odometry health."""
+    import socket
+
+    import zmq
+
+    from g1deploy.node import ControlServer
+
+    with socket.socket() as s_:
+        s_.bind(("127.0.0.1", 0))
+        port = s_.getsockname()[1]
+    st, cl = FakeState(), FakeCloud()
+    node.map_ready_tick = -1  # an earlier test's Clear map scan
+    views, cur = [], {"cloud": 0, "mem": 0, "walking": 0}
+    req = zmq.Context.instance().socket(zmq.REQ)
+    req.setsockopt(zmq.LINGER, 0)
+    req.setsockopt(zmq.RCVTIMEO, 2000)
+
+    def until(ev):
+        if not views:  # the run has started (stop_flag cleared): bring the control socket up
+            ControlServer(node, f"tcp://127.0.0.1:{port}")
+            req.connect(f"tcp://127.0.0.1:{port}")
+            views.append(None)
+        req.send_string(json.dumps({"cmd": "view", "cloud_after": cur["cloud"], "mem_after": cur["mem"]}))
+        v = json.loads(req.recv(), parse_constant=lambda c: (_ for _ in ()).throw(AssertionError(c)))
+        views.append(v)
+        if v.get("cloud"):
+            cur["cloud"] = v["cloud"]["seq"]
+        if v.get("memory"):
+            cur["mem"] = v["memory"]["seq"]
+        if v.get("phase") == "RUN" and v.get("plan"):
+            cur["walking"] += 1
+            if cur["walking"] == 8:  # walked with a plan for a while: arrive
+                st.xy = np.array([3.0, 0.0])
+        time.sleep(0.15)
+        return "arrived" in ev
+    try:
+        ev, _ = _run(node, st, cl, until, timeout=30.0)
+    finally:
+        req.close(0)
+    vs = [v for v in views[1:] if v and v.get("ok")]
+    assert "arrived" in ev and len(vs) > 10
+    assert any(v["plan"] and len(v["plan"]["frames"]) >= 1 for v in vs)
+    clouds, mems = [v["cloud"] for v in vs if v["cloud"]], [v["memory"] for v in vs if v["memory"]]
+    assert len(clouds) >= 3 and all(b["seq"] > a["seq"] for a, b in zip(clouds, clouds[1:]))
+    assert mems and mems[0]["n"] == [241, 241] and len({m["seq"] for m in mems}) == len(mems)
+    assert all(len(v["qpos"]) == 36 and v["odom"]["mode"] == "dds" and v["state_age_s"] < 0.5 for v in vs if v["qpos"])
+    assert any(len(v["pose_hist"]) == 10 for v in vs) and node.status["odom"]["mode"] == "dds"
