@@ -3349,6 +3349,10 @@ class Hub:
             add("operator.go", "operator", "GO locks", "block" if locks else "pass", "DERIVED",
                 "; ".join(map(str, locks)) or "GO would be accepted now", cs_at, 5, "arm")
         sets = [s for s in st.get("rehearsals") or [] if scan and s.get("scan") == scan and not s.get("legacy_pair")]
+        if goal is None:  # the goal in force: the one last sent through send_goal in this session, on this scan
+            gc = self.goal_ctx.get(slot) or {}
+            if gc.get("session") == sess_name and gc.get("scan") == scan and gc.get("goal_scene") is not None:
+                goal = list(gc["goal_scene"])
         lio = odom in ("fused", "zmq", "lio")
         robot_go = not practice
         s = running = None
@@ -3371,6 +3375,8 @@ class Hub:
             status = "unknown" if running else "block" if robot_go else "warn"
             add("scene.rehearsal", "scene", "Rehearsal set", status, "DERIVED", detail, None, None, "rehearsal",
                 fix=None if running else "rehearse this goal (three runs), or tick the override at GO (recorded)")
+            if status == "block":
+                out[-1]["overridable"] = "rehearsal_override"  # GO's own tick (go_gate), not a hard lock
         else:
             v, ok = s.get("verdict"), s.get("offset_ok")
             # GO on the robot needs a robust set or the operator's recorded override, whatever the odometry (go_gate);
@@ -3392,6 +3398,8 @@ class Hub:
                 detail += f"; {running['name']} (newer) is running"
             add("scene.rehearsal", "scene", "Rehearsal set", status, "DERIVED", detail, s.get("finished"), None,
                 "rehearsal", fix="rehearse again, or tick the override at GO (recorded)" if status == "block" else None)
+            if status == "block":
+                out[-1]["overridable"] = "rehearsal_override"  # GO's own tick (go_gate), not a hard lock
         conf = None
         if info:
             try:

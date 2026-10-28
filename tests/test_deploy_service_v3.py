@@ -614,6 +614,10 @@ def test_robot_go_needs_a_robust_set_whatever_the_odometry(tmp_path, profs):
         assert not any(a["act"] == "g" for a in con.acts)
         rd = {c["id"]: c for c in h.readiness("scan-a", "robot", [2.5, -0.3])["checks"]}["scene.rehearsal"]
         assert rd["status"] == "block" and "override" in rd["detail"]
+        assert rd["overridable"] == "rehearsal_override"  # GO's tick clears it, not a hard lock (verifier N1)
+        # without a goal from the page, readiness judges the goal in force (the one sent in this session)
+        nogoal = {c["id"]: c for c in h.readiness("scan-a", "robot")["checks"]}["scene.rehearsal"]
+        assert nogoal["status"] == "block" and "set-1" in nogoal["detail"]
         code, g = h.act("robot", {"act": "g", "id": "g2", "operator": "lw",
                                   "rehearsal_override": {"reason": "drift is leg odometry's; this walk is FAST-LIO"}})
         ov = con.acts[-1]["rehearsal"]["override"]
