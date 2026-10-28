@@ -82,7 +82,7 @@ DRIFT = {"motion": "lab-g1-leg"}
 OTHER_WAY_M = 0.5  # the drifted walk left the exact walk's path by more than this: it went another way
 SCAN_FRESH_S = 15 * 60  # a robot session reuses the scan its goal was picked on when it is younger than this
 REHEARSAL_COURSES = ("lab-door-real", "rp-door-rope", "rp-rope-behind", "lab-site-2m", "open-2m", "open-3m", "slalom",
-                     "pillar", "box-low")
+                     "pillar", "box-low", "gap-069", "gap-069-diag")
 # API v1
 CONFIRM_ROBOT = ("gantry", "estop", "remote", "rope")  # the robot start checklist (stored in the session)
 CONFIRM_LEGACY = ("gantry", "estop", "remote", "clear")  # the legacy page's
@@ -1182,15 +1182,23 @@ class Hub:
         """The site check's reasons that do not depend on the goal typed at scan time."""
         return [r for r in reasons or [] if not ("goal" in r or "route" in r)]
 
+    @classmethod
+    def scan_verdict(cls, x):
+        """A scan's verdict on its goal-independent reasons (the goal typed at scan time is a placeholder; the goal
+        check owns the goal's own reasons): (verdict, reasons)."""
+        reasons = cls.goal_free_reasons(x.get("reasons"))
+        verdict = x.get("verdict")
+        if verdict in ("GO", "CHECK", "NO-GO"):
+            verdict = "NO-GO" if any(r.startswith("start inside") for r in reasons) else "CHECK" if reasons else "GO"
+        return verdict, reasons
+
     def scans_v1(self, sets):
         out = []
         for x in self.list_scans(limit=40):
-            reasons = self.goal_free_reasons(x.get("reasons"))
-            verdict = x.get("verdict")
-            if verdict in ("GO", "CHECK", "NO-GO"):
-                verdict = "NO-GO" if any(r.startswith("start inside") for r in reasons) else "CHECK" if reasons else "GO"
+            verdict, reasons = self.scan_verdict(x)
             out.append({"name": x.get("name"), "time": x.get("time"), "verdict": verdict, "site_verdict": x.get("verdict"),
-                        "reasons": reasons, "walked_since": x.get("walked_since"),
+                        "reasons": reasons, "walked_since": bool(x.get("walked_since")),
+                        "walked_sessions": x.get("walked_since") or [],
                         "age_s": round(time.time() - x["mtime"], 1), "fresh": self.scan_fresh(x.get("name"))[0],
                         "practice": x.get("practice"), "goal_ahead_left": x.get("goal_ahead_left"),
                         "rehearsals": [s["name"] for s in sets if s.get("scan") == x.get("name")]})
@@ -1343,6 +1351,7 @@ class Hub:
                        "chains": pc.get("chains"), "disk_free_gb": disk},
                 "robot_link": self.robot_link_v1(), "profiles": self.profiles_v1(),
                 "default_profile": self.default_profile(), "default_odom": self.robot_profile().get("odom", "leg"),
+                "courses": [c for c in REHEARSAL_COURSES if (ROOT / "sim/courses" / c / "task.json").is_file()],
                 "live": {slot: self.live_v1(slot, live.get(slot)) for slot in ("robot", "sim")},
                 "scans": self.scans_v1(sets), "scan_job": job,
                 "sessions": self.sessions_v1(all_s), "rehearsals": sets,
@@ -1511,8 +1520,9 @@ class Hub:
                       for b in task.get("scene_boxes_world") or []]
             goal_course = task.get("goal_world_xy")
         s_from_m = frames.scene_from_memory(start_s)
-        out = {"name": name, "time": x.get("time"), "verdict": x.get("verdict"),
-               "reasons": self.goal_free_reasons(x.get("reasons")), "site_reasons": x.get("reasons"),
+        verdict, reasons = self.scan_verdict(x)
+        out = {"name": name, "time": x.get("time"), "verdict": verdict, "site_verdict": x.get("verdict"),
+               "reasons": reasons, "site_reasons": x.get("reasons"),
                "frames": x.get("frames"), "start_S": start_s, "scene_from_memory": s_from_m, "memory": mem,
                "memory_frame": "memory_S", "twin": twin, "twin_frame": "memory_S", "course_boxes": course,
                "course_frame": "scene", "memory_file": str(f), "goal_ahead_left": x.get("goal_ahead_left"),
@@ -1696,7 +1706,8 @@ class Hub:
                 return {"ok": False, "error": "the robot is walking: Stand or E-STOP first, end the session when it stands"}
             atts = s.get("attempts") or []
             after_attempt = bool(atts) and atts[-1].get("result") is not None
-            if runner not in ("not started", "E-STOP") and not (runner == "CONTROL" and after_attempt):
+            # a practice robot may end standing at any time (only a real runner drops the robot when it stops)
+            if runner not in ("not started", "E-STOP") and not cur.get("practice") and not (runner == "CONTROL" and after_attempt):
                 return {"ok": False, "error": "a session with the runner up ends before Arm, after an E-STOP, or standing "
                                               "after an attempt (robot in the gantry)"}
         try:
@@ -2202,6 +2213,9 @@ class Hub:
                 5, "goal")
             add("operator.go", "operator", "GO locks", "unknown", "DERIVED", "this console reports no GO locks", cs_at,
                 5, "arm")
+        elif (cs or {}).get("phase") in ("PRESCAN", "RUN"):  # walking: GO is locked because it already happened
+            add("scene.goal", "scene", "Goal delivered", "pass", "DERIVED", "walking to the confirmed goal", cs_at, 5, "goal")
+            add("operator.go", "operator", "GO locks", "pass", "DERIVED", "walking", cs_at, 5, "arm")
         else:
             gl = [x for x in locks if "goal" in str(x).lower()]
             add("scene.goal", "scene", "Goal delivered", "block" if gl else "pass", "DERIVED", "; ".join(gl) or
@@ -2215,11 +2229,16 @@ class Hub:
         else:
             s = sets[0]
             v, ok = s.get("verdict"), s.get("offset_ok")
-            status = ("unknown" if s.get("running") or v is None else "block" if v in ("fails", "fails with drift")
-                      else "pass" if v == "robust" and ok else "warn")
-            add("scene.rehearsal", "scene", "Rehearsal set", status, "DERIVED",
-                "running" if s.get("running") else f"{v or '-'}; start offset {'ok' if ok else 'failed' if ok is False else '-'}",
-                None, None, "rehearsal")
+            # The drift run carries the error lab-g1's LEG odometry measured. On leg odometry a goal that fails with it
+            # is blocked; on FAST-LIO (+ legs) the walk does not drift like that (1.9-6.9 cm RMS against FAST-LIO,
+            # 2026-10-28), so it is a warning to read, not a block.
+            lio = odom in ("fused", "zmq", "lio")
+            status = ("unknown" if s.get("running") or v is None else "block" if v == "fails" or (v == "fails with drift"
+                      and not lio) else "pass" if v == "robust" and ok else "warn")
+            detail = "running" if s.get("running") else f"{v or '-'}; start offset {'ok' if ok else 'failed' if ok is False else '-'}"
+            if v == "fails with drift" and lio and not s.get("running"):
+                detail += "; the drift run models leg odometry, and this walk uses FAST-LIO"
+            add("scene.rehearsal", "scene", "Rehearsal set", status, "DERIVED", detail, None, None, "rehearsal")
         conf = None
         if info:
             try:
