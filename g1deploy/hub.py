@@ -16,8 +16,10 @@ API v1 (strict JSON: non-finite numbers are null; state computed at 1 Hz in the 
   GET  /api/v1/state | /api/v1/readiness?scan=&slot= | /api/v1/sessions?offset=&limit=
   GET  /api/v1/scan/live | /api/v1/scan/<name>/scene | /api/v1/rehearsal/<run>/track
   GET  /api/v1/live/<slot>/view?cloud_after=&mem_after= | /api/v1/panel/<slot>/state | /api/v1/session/<name>/manifest
+  GET  /api/v1/session/<name> | /api/v1/session/<name>/receipt | /api/v1/session/<name>/recording
+  GET  /api/v1/rehearsal/match?scan=&x=&y=&profile=&odom= | /api/v1/act/<slot>/<id> | /api/v1/profile/<name>/route
   POST /api/v1/scan | /api/v1/practice/scan | /api/v1/start | /api/v1/stop | /api/v1/start_check | /api/v1/send_goal
-  POST /api/v1/rehearse | /api/v1/act | /api/v1/doctor
+  POST /api/v1/rehearse | /api/v1/act | /api/v1/doctor | /api/v1/session/<name>/tag
 Frames (g1deploy/frames.py): goals cross the API as goal_scene; the hub converts them to each console's odometry.
 
 Sessions land in the day directory, which is also linked into Deploy Studio's robot-sessions directory so its Replay
@@ -2581,6 +2583,15 @@ class Hub:
             passage = self.parse_passage(req.get("passage"))
         except (TypeError, ValueError, KeyError) as exc:
             return refuse(str(exc))
+        # a goal check made with a profile's route configuration (contract v3 F) holds for that profile's contents and
+        # until it expires: the gateway passes both when it has them
+        exp = req.get("check_expires_at")
+        if isinstance(exp, (int, float)) and not isinstance(exp, bool) and exp < time.time():
+            return refuse("the goal check expired: check the goal again")
+        if req.get("config_sha"):
+            live_sha = (self.receipt(Path(self.live(slot)["dir"]), self.live(slot))["profile"] or {}).get("sha")
+            if live_sha and req["config_sha"] != live_sha:
+                return refuse("the goal check used another profile configuration than this session's: check again")
         if self.walking(slot):
             return refuse("the robot is walking: send the goal when it stands")
         check, live_map = self._start_check(req.get("scan"), slot)

@@ -357,6 +357,16 @@ def test_robot_go_needs_a_complete_matching_set_or_an_override(tmp_path, profs):
         r = h.send_goal_v1({"slot": "robot", "scan": "scan-a", "goal_scene": [2.5, -0.3], "check_id": "gc-1",
                             "passage": GATE})
         assert r["ok"] and r["rehearsal"]["match"] is False and r["passage"]["a"] == GATE["a"]
+        # a goal check bound to another profile configuration, or expired, sends nothing
+        n = len(con.acts)
+        assert "another profile" in h.send_goal_v1({"slot": "robot", "scan": "scan-a", "goal_scene": [2.5, -0.3],
+                                                    "check_id": "gc-x", "config_sha": "0" * 64})["reason"]
+        assert "expired" in h.send_goal_v1({"slot": "robot", "scan": "scan-a", "goal_scene": [2.5, -0.3],
+                                            "check_id": "gc-y", "check_expires_at": time.time() - 1})["reason"]
+        assert len(con.acts) == n and h.send_goal_v1({"slot": "robot", "scan": "scan-a", "goal_scene": [2.5, -0.3],
+                                                      "check_id": "gc-1", "config_sha": pi["sha"]})["ok"]
+        r = h.send_goal_v1({"slot": "robot", "scan": "scan-a", "goal_scene": [2.5, -0.3], "check_id": "gc-1",
+                            "passage": GATE})
         con.state = dict(con.state, goal_seq=r["goal_odom"]["seq"])
         code, r = h.act("robot", {"act": "g", "id": "g2", "operator": "lw"})
         assert code == 409 and "no complete rehearsal set" in r["reason"]

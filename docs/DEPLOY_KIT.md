@@ -175,6 +175,45 @@ SCRATCH/lab-day-x --no-studio-link` (never 8769). Every reply is strict JSON (no
   attempt; a robot start refuses a stale scan instead of scanning again. `GET /api/v1/session/<name>/manifest`: the
   session's evidence (`g1deploy/evidence.py`, also written when a session ends).
 
+*Contract v3 (after the 2026-10-28 review).* A page must describe the session that actually runs, a rehearsal counts
+only for what it rehearsed, and a session reopens from its directory alone:
+- **Session receipt**: `live.<slot>.receipt` in the state and `GET /api/v1/session/<name>/receipt`: kind (robot,
+  practice, rehearsal), robot, operator, start, the profile and the SHA-256 of its file, the bundle's MANIFEST hash,
+  the rules plugin's hash, odometry (practice: the robot odometry it practises, `sim_odom` beside), the mount
+  calibration's hash, the scan and its memory hash, the start offset, the confirmations, the kit / private / runner
+  commits; from session.json (what the console ran), hub_start.json before the console has written it (`source`).
+  Acts, `stop`, `start_check` and `send_goal` carrying `session` or `expect.session` for another session are refused
+  (409) before they reach a console; every act reply names the session it went to.
+- **Rehearsal sets** (`state.rehearsals`, newest first by start time): an `identity` (scan + its memory hash, goal,
+  profile name + file hash, bundle and rules hashes, odometry, the three starts, the drift model), a `state` (running,
+  partial: stopped or interrupted, complete, failed: a run that did not start or ended without sim truth) and per run:
+  the node's result, `arrival` (the node ended ARRIVED **and** the simulator's truth ends within 0.5 m), the true final
+  distance, `passage`, the largest contact, a fall, `timing_valid` (node loop lag ≤ 0.35 s and fewer than 3 overruns,
+  from report.json) and `passed` (arrival, through the gate, no contact over 5 N, no fall). The verdict exists only for
+  a complete set. `POST /api/v1/rehearse` takes `passage {a, b}`: a gate segment in the scene (e.g. between two
+  towers' inner faces) the true path must cross; a detour that arrives is a failure. `GET /api/v1/rehearsal/match?
+  scan=&x=&y=&profile=&odom=` (or `&session=` / `&slot=` for a session's own receipt; `&offset=dx,dy,dyaw`,
+  `&pa=x,y&pb=x,y`): the newest complete set whose identity matches (goal within 0.08 m), the newest running one,
+  and every other set with its mismatched or missing fields. A set from before identities never matches (its scan's
+  memory hash is unknown).
+- **GO in robot mode** (the operators' decision): the hub relays a robot session's GO only with a complete set matching
+  the goal sent through `send_goal`, the session's profile contents, bundle, rules and odometry, or with the operator's
+  `rehearsal_override {operator, reason}`; either way the rehearsal in force (and the override) goes to the console
+  with GO and is stored with the attempt. Practice: advisory, recorded the same way.
+- `GET /api/v1/act/<slot>/<id>`: what became of an act whose reply was lost: the console's act record, else its last 20
+  acts, else its event log, beside the hub's own audit of the relay.
+- `GET /api/v1/session/<name>`: the receipt, ended or not, the attempts (labels with their history, check, start check,
+  rehearsal in force, goal in the scene, scan, passage gate and the result through it: on the simulator's truth in
+  practice, on odometry mapped by the start check on the robot), Studio's Replay id, the manifest in brief and the
+  recording health. `POST /api/v1/session/<name>/tag {n, tag, note, operator}`: a live session's console takes the
+  label; an ended session's `attempt_tags.jsonl` gets an append-only row, merged over the console's rows (the newest
+  wins) wherever the hub reads attempts.
+- `GET /api/v1/profile/<name>/route`: the route parameters the node uses with that profile (route margin, step-over,
+  unknown growth, the node's ceiling deferral, lookahead, guards; the profile's rules overrides on a rules bundle),
+  numbers and names only, with the profile file's hash, so a goal check can use the walk's own configuration.
+- `GET /api/v1/session/<name>/recording`: `evidence.recording_health` (expected vs active streams, rates, gaps, disk,
+  finalized), `{supported: false}` with a kit that has none.
+
 *Frames* (`g1deploy/frames.py`). Poses are [x, y, yaw]; "A_from_B" is B's origin in A. A scan's memory grid (and its
 twins) are in *memory_S*, where the robot stood at `start_S` (leg odometry carries the IMU yaw: 1.2–1.4 rad on several
 10-27 scans). The *scene* is the scan robot frame (`start_S` at the origin, x ahead; the course is in it):
