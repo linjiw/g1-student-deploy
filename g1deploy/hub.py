@@ -1250,6 +1250,18 @@ class Hub:
         m, deg = frames.offset_envelope(offset["pose"])
         return {"moved_m": round(m, 3), "turned_deg": round(deg, 1)}
 
+    def rehearsal_for(self, scan, goal_scene, near_m=0.2):
+        """The newest finished rehearsal set of `scan` for a goal within near_m of `goal_scene` (what the operator saw
+        before GO), as stored with the attempt: {name, verdict, offset_ok, apart_m, profile, runs} or None."""
+        if not scan or goal_scene is None:
+            return None
+        for st in self.rehearsal_sets(self.all_sessions()):
+            g = st.get("goal_scene")
+            if st.get("scan") == scan and g and not st.get("running") and st.get("verdict") and \
+                    math.hypot(g[0] - goal_scene[0], g[1] - goal_scene[1]) <= near_m:
+                return {k: st.get(k) for k in ("name", "verdict", "offset_ok", "apart_m", "profile", "runs")}
+        return None
+
     def offset_envelope(self, scan):
         """The start offsets the newest rehearsal set of `scan` whose offset run arrived covered: {moved_m, turned_deg,
         set} or None."""
@@ -1980,6 +1992,12 @@ class Hub:
                "operator": req.get("operator")}
         if req.get("expect") is not None:
             act["expect"] = req["expect"]
+        # the attempt row keeps what the operator saw: the scan, the goal in the scene, the start check, the rehearsal
+        scan = req.get("scan")
+        act.update(scan=scan, goal_scene=[round(float(v), 4) for v in goal],
+                   start_check={k: check.get(k) for k in ("ok", "moved_m", "turned_deg", "overlap", "at", "scene_from_odom",
+                                                           "within_offset_envelope")},
+                   rehearsal=self.rehearsal_for(scan, goal))
         code, reply = self.act(slot, act)
         ok = code == 200 and bool(reply.get("ok", True)) and reply.get("result") != "refused"
         self.record_check({"action": "send_goal", "check_id": check_id, "goal_scene": goal, "goal_odom": g_odom,
