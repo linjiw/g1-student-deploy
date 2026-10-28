@@ -579,3 +579,180 @@ def test_http_v3_routes(tmp_path, profs):
         assert reh["status"] == "block" and "no complete rehearsal set" in reh["detail"]  # set-1 was for p1, not deploy
     finally:
         server.shutdown()
+
+
+# ------------------------------------------------------------------------------------------------- the verifier's defects
+def live_session(h, con, name="robot-210000-p1", slot="robot", odom="fused", **info):
+    """A live session (robot, or practice in the sim slot) of profile p1 whose session.json names what runs."""
+    d = h.day / name
+    go_live(h, slot, d, con.port, profile="p1", odom=odom, **info)
+    pi = hub.profile_identity("p1")
+    (d / "session.json").write_text(json.dumps({"mode": "robot" if slot == "robot" else "sim", "odom": odom,
+                                                "profile": {"name": "p1", "sha256": pi["sha"]},
+                                                "bundle_manifest_sha256": pi["bundle"]["manifest_sha"],
+                                                "deploy_identity": {"rules_sha256": None}}))
+    if info.get("practice"):
+        (d / "practice.json").write_text(json.dumps({"scan": "scan-a", "start_offset": OFFSET, "odom": odom}))
+    return d
+
+
+def test_robot_go_needs_a_robust_set_whatever_the_odometry(tmp_path, profs):
+    """D3: a complete matching set that is not robust (here: fails with drift, on FAST-LIO + legs) needs the override;
+    practice records it and never refuses; readiness agrees."""
+    h = make_hub(tmp_path)
+    make_scan(h, "scan-a")
+    odom_from_scene = F.compose(P_C, F.inverse(OFFSET))
+    con = FakeConsole(live_map=coded_map(F.apply(odom_from_scene, scene()), P_C[:2], robot=P_C))
+    try:
+        live_session(h, con, odom="fused")
+        make_set(h, "set-1", 100.0, ident(h, odom="fused"), results=("arrived", "stopped", "arrived"))
+        r = h.send_goal_v1({"slot": "robot", "scan": "scan-a", "goal_scene": [2.5, -0.3], "check_id": "gc-1"})
+        assert r["ok"] and r["rehearsal"]["match"] and r["rehearsal"]["verdict"] == "fails with drift"
+        con.state = dict(con.state, goal_seq=r["goal_odom"]["seq"])
+        code, g = h.act("robot", {"act": "g", "id": "g1", "operator": "lw"})
+        assert code == 409 and g["rehearsal_required"] and "not robust: fails with drift" in g["reason"]
+        assert not any(a["act"] == "g" for a in con.acts)
+        rd = {c["id"]: c for c in h.readiness("scan-a", "robot", [2.5, -0.3])["checks"]}["scene.rehearsal"]
+        assert rd["status"] == "block" and "override" in rd["detail"]
+        code, g = h.act("robot", {"act": "g", "id": "g2", "operator": "lw",
+                                  "rehearsal_override": {"reason": "drift is leg odometry's; this walk is FAST-LIO"}})
+        ov = con.acts[-1]["rehearsal"]["override"]
+        assert code == 200 and ov["operator"] == "lw" and "not robust" in ov["without"]
+        assert con.acts[-1]["rehearsal"]["name"] == "set-1"
+        # a robust set for the goal: no override needed
+        make_set(h, "set-2", 200.0, ident(h, odom="fused"))
+        code, g = h.act("robot", {"act": "g", "id": "g3", "operator": "lw"})
+        assert code == 200 and con.acts[-1]["rehearsal"]["verdict"] == "robust"
+        h.refresh()  # readiness reads the 1 Hz state
+        rd = {c["id"]: c for c in h.readiness("scan-a", "robot", [2.5, -0.3])["checks"]}["scene.rehearsal"]
+        assert rd["status"] == "pass"
+    finally:
+        con.close()
+    # practice: a failing set is recorded with GO, never a refusal; readiness warns
+    h2 = make_hub(tmp_path / "p")
+    make_scan(h2, "scan-a")
+    con = FakeConsole(live_map=coded_map(F.apply(odom_from_scene, scene()), P_C[:2], robot=P_C))
+    try:
+        live_session(h2, con, name="practice-220000-p1", slot="sim", practice=True)
+        make_set(h2, "set-1", 100.0, ident(h2, odom="fused"), results=("stopped", "stopped", "stopped"))
+        r = h2.send_goal_v1({"slot": "sim", "scan": "scan-a", "goal_scene": [2.5, -0.3], "check_id": "gc-1"})
+        con.state = dict(con.state, goal_seq=r["goal_odom"]["seq"])
+        code, g = h2.act("sim", {"act": "g", "id": "g1", "operator": "lw"})
+        assert code == 200 and con.acts[-1]["rehearsal"]["verdict"] == "fails" and "override" not in con.acts[-1]["rehearsal"]
+        rd = {c["id"]: c for c in h2.readiness("scan-a", "sim", [2.5, -0.3])["checks"]}["scene.rehearsal"]
+        assert rd["status"] == "warn" and "practice" in rd["detail"]
+    finally:
+        con.close()
+
+
+def test_start_check_envelope_is_the_goals_set_in_force(tmp_path, profs):
+    """D4: within_offset_envelope comes from the set in force for this goal (scan, goal, profile, odometry), only when
+    its offset case passed; null otherwise, whatever other sets on the scan did."""
+    h = make_hub(tmp_path)
+    make_scan(h, "scan-a")
+    odom_from_scene = F.compose(P_C, F.inverse(OFFSET))
+    con = FakeConsole(live_map=coded_map(F.apply(odom_from_scene, scene()), P_C[:2], robot=P_C))
+    try:
+        live_session(h, con, odom="fused")
+        # another goal on the same scan whose offset case passed: not this goal's
+        make_set(h, "set-other-goal", 100.0, ident(h, goal=(2.0, 1.0), odom="fused"))
+        c = h.start_check_v1("scan-a", "robot", [2.5, -0.3])
+        assert c["ok"] and c["offset_envelope"] is None and c["within_offset_envelope"] is None
+        # this goal's set, its offset case failed: no envelope
+        make_set(h, "set-goal-offset-failed", 200.0, ident(h, odom="fused"), results=("arrived", "arrived", "stopped"))
+        c = h.start_check_v1("scan-a", "robot", [2.5, -0.3])
+        assert c["offset_envelope"] is None and c["within_offset_envelope"] is None
+        # a newer set for this goal whose offset case passed: inside it (the robot stands 20 deg / 0.2 m off)
+        make_set(h, "set-goal-ok", 300.0, ident(h, odom="fused"))
+        c = h.start_check_v1("scan-a", "robot", [2.5, -0.3])
+        assert c["within_offset_envelope"] is True and c["offset_envelope"]["set"] == "set-goal-ok"
+        assert h.start_check_v1("scan-a", "robot")["within_offset_envelope"] is None  # no goal yet
+        # the goal sent through send_goal is the start check's goal from then on
+        r = h.send_goal_v1({"slot": "robot", "scan": "scan-a", "goal_scene": [2.5, -0.3], "check_id": "gc-1"})
+        assert r["check"]["within_offset_envelope"] is True
+        assert h.start_check_v1("scan-a", "robot")["offset_envelope"]["set"] == "set-goal-ok"
+        far = F.compose(P_C, F.inverse(F.offset_pose(-28.0, 0.4)))
+        con.map = coded_map(F.apply(far, scene()), P_C[:2], robot=P_C)
+        assert h.start_check_v1("scan-a", "robot")["within_offset_envelope"] is False
+        # other odometry than the set's: not the set in force
+        h.slots["robot"]["info"]["odom"] = "leg"
+        sj = json.loads((h.day / "robot-210000-p1" / "session.json").read_text())
+        (h.day / "robot-210000-p1" / "session.json").write_text(json.dumps(dict(sj, odom="leg")))
+        assert h.start_check_v1("scan-a", "robot", [2.5, -0.3])["offset_envelope"] is None
+    finally:
+        con.close()
+
+
+def test_session_names_resolve_across_lab_days(tmp_path, profs):
+    """D1: a Review link from an earlier day opens its session; the newest day that has the name wins; an unknown name
+    is a clear 404."""
+    h = make_hub(tmp_path)
+    runs = h.day.parent
+    old = practice_session(SimpleNamespace(day=runs / "lab-day-20261027"), name="practice-090000-p1")
+    older = practice_session(SimpleNamespace(day=runs / "lab-day-20261026"), name="practice-090000-p1")
+    import os
+    os.utime(older.parent, (1e9, 1e9))
+    assert h.session_dir("practice-090000-p1") == old.resolve()
+    code, det = h.session_detail("practice-090000-p1")
+    assert code == 200 and det["day"] == "lab-day-20261027"
+    assert det["replay"]["studio_id"] == hub.studio_id(old.parent, old) and "lab-day-20261027" in det["replay"]["studio_id"]
+    assert det["attempts"][0]["passage"] == "crossed" and h.receipt_v1("practice-090000-p1")[0] == 200
+    code, r = h.tag_v1("practice-090000-p1", {"n": 1, "tag": "touched", "operator": "lw"})
+    assert code == 200 and (old / hub.TAGS_FILE).exists() and not (older / hub.TAGS_FILE).exists()
+    # today's session of the same name wins over the earlier days'
+    today = practice_session(h, name="practice-090000-p1")
+    assert h.session_dir("practice-090000-p1") == today.resolve()
+    for bad in ("nope", "../lab-day-20261027/practice-090000-p1", "scans", "", ".hidden"):
+        code, r = h.session_detail(bad)
+        assert code == 404 and r["ok"] is False
+    assert "lab-day-*" in h.session_detail("nope")[1]["error"]
+    assert h.manifest_v1("nope")[0] == 404 and h.recording_v1("nope")[0] == 404 and h.tag_v1("nope", {})[0] == 404
+
+
+def test_an_attempt_from_past_the_gate_has_no_passage_to_make(tmp_path, profs):
+    """D11: the same goal sent again from where the first walk ended: attempt 2 starts past the gate (n/a), not
+    "missed"; the first one went through it."""
+    h = make_hub(tmp_path)
+    d = practice_session(h)
+    rows = [json.loads(x) for x in (d / "attempts.jsonl").read_text().splitlines()]
+    rows.append(dict(rows[0], n=2, t_go=22.0, t_end=28.0, check_id="gc-10", tag=None))
+    (d / "attempts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    with open(d / "start_check.jsonl", "a") as f:
+        f.write(json.dumps({"action": "send_goal", "check_id": "gc-10", "ok": True, "goal_scene": [2.5, -0.3],
+                            "scan": "scan-a", "passage": GATE}) + "\n")
+    a1, a2 = h.session_detail(d.name)[1]["attempts"]
+    assert a1["passage"] == "crossed" and a1["passage_note"] is None
+    assert a2["passage"] == "n/a" and a2["passage_note"] == "started past the gate" and a2["passage_basis"] == "sim truth"
+    # the console's own row may carry the gate (its `passage`) without a send_goal record
+    rows[1] = dict(rows[1], check_id="gc-none", passage=GATE, goal_scene=[2.5, -0.3])
+    (d / "attempts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    a2 = h.session_detail(d.name)[1]["attempts"][1]
+    assert a2["passage_gate"]["a"] == GATE["a"] and a2["passage"] == "n/a"
+    assert F.passage_ahead([0, 0], [2.5, -0.3], GATE["a"], GATE["b"])
+    assert not F.passage_ahead([2.4, -0.3], [2.5, -0.3], GATE["a"], GATE["b"])
+    assert not F.passage_ahead([1.25, -0.3], [2.5, -0.3], GATE["a"], GATE["b"])  # on the gate's line
+
+
+def test_lowcmd_stays_required_when_the_console_ran_the_runner(tmp_path):
+    """D12: runner.log is optional; the console's own record (a done Arm, or a console started without --arm) says
+    the runner ran, and then lowcmd is required."""
+    def session(name, argv, acts, runner_log=False):
+        d = tmp_path / name
+        (d / "rec" / "lowstate").mkdir(parents=True)
+        np.savez(d / "rec" / "lowstate" / "000000.npz", t=np.linspace(0.0, 2.0, 5))
+        (d / "rec" / "meta.json").write_text(json.dumps({"format": "g1deploy.recording.v1"}))
+        (d / "session.json").write_text(json.dumps({"mode": "sim", "odom": "dds", "argv": argv}))
+        (d / "console_events.jsonl").write_text("".join(json.dumps(a) + "\n" for a in acts))
+        if runner_log:
+            (d / "runner.log").write_text("x")
+        return {i["id"]: i for i in evidence.manifest(d)["items"]}
+    arm = [{"id": "1", "act": "arm", "result": "done"}]
+    armed = session("practice-1", ["sim", "--arm"], arm)
+    assert evidence.runner_ran(tmp_path / "practice-1") and armed["lowcmd"]["status"] == "missing"
+    assert armed["lowcmd"]["required"] and armed["runner_log"]["status"] == "missing"
+    launched = session("practice-2", ["sim", "--script", "key:s"], [])  # no --arm: the runner starts at launch
+    assert launched["lowcmd"]["status"] == "missing" and launched["lowcmd"]["required"]
+    never = session("practice-3", ["sim", "--arm"], [{"id": "1", "act": "arm", "result": "refused"}])
+    assert never["lowcmd"]["status"] == "n/a" and not evidence.runner_ran(tmp_path / "practice-3")
+    assert evidence.runner_ran(tmp_path / "practice-4") is False
+    assert session("practice-5", ["sim", "--arm"], [], runner_log=True)["lowcmd"]["status"] == "missing"

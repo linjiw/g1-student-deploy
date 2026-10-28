@@ -57,7 +57,9 @@ record present / partial / missing / n/a, required or not, span, gaps, drops, re
 lidar_raw, node_status, node_events, plans, console_events, attempts (+ the LIO odometry and cloud with zmq / fused
 odometry, and lio in simulation; + the sim truth for a rehearsal; + node memory, start checks, scan, identity, the
 robot checklist and the rehearsal set with a robot attempt where they apply); optional: video, runner log, report. A
-record that does not apply to the session as it went (no Arm, no GO) is n/a and not required. `complete` only when
+record that does not apply to the session as it went (no Arm, no GO) is n/a and not required; whether the runner ran
+is the console's own record (a done Arm or Start SONIC act, or a console started without `--arm`), never the optional
+runner log. `complete` only when
 every required record is present (not partial), the recording is finalized and the console closed the session; a
 running session is `recording`. `python -m g1deploy.evidence DIR --health`.
 
@@ -220,18 +222,27 @@ identities) is the SHA-256 of the scan's memory.npz:
   distance, `passage`, the largest contact, a fall, `timing_valid` (node loop lag ≤ 0.35 s and fewer than 3 overruns,
   from report.json) and `passed` (arrival, through the gate, no contact over 5 N, no fall). The verdict exists only for
   a complete set (robust, other way, fails with drift, missed passage: the exact run arrived around the gate, fails). `POST /api/v1/rehearse` takes `passage {a, b}`: a gate segment in the scene (e.g. between two
-  towers' inner faces) the true path must cross; a detour that arrives is a failure. `GET /api/v1/rehearsal/match?
+  towers' inner faces) the true path must cross; a detour that arrives is a failure (a walk that starts past the gate:
+  its passage is `n/a`, "started past the gate"). `GET /api/v1/rehearsal/match?
   scan=&x=&y=&profile=&odom=` (or `&session=` / `&slot=` for a session's own receipt; `&offset=dx,dy,dyaw`,
   `&pa=x,y&pb=x,y`): the newest complete set whose identity matches (goal within 0.08 m), the newest running one,
   and every other set with its mismatched or missing fields. A set from before identities never matches (its scan's
   memory hash is unknown).
 - **GO in robot mode** (the operators' decision): the hub relays a robot session's GO only with a complete set matching
-  the goal sent through `send_goal`, the session's profile contents, bundle, rules and odometry, or with the operator's
-  `rehearsal_override {operator, reason}`; either way the rehearsal in force (and the override) goes to the console
-  with GO and is stored with the attempt. Practice: advisory, recorded the same way.
+  the goal sent through `send_goal`, the session's profile contents, bundle, rules and odometry **whose verdict is
+  robust**, or with the operator's `rehearsal_override {operator, reason}`: any other verdict (fails, fails with drift,
+  missed passage, other way) needs the override whatever the odometry (FAST-LIO only changes the words). Either way
+  the rehearsal in force (and the override) goes to the console with GO and is stored with the attempt; readiness
+  blocks the same way. Practice: advisory, recorded the same way, never refused.
+- **Start check and the rehearsed start offsets**: `POST /api/v1/start_check {scan, slot, goal_scene?}` (and
+  send_goal's own check) judges `within_offset_envelope` against the set in force for that goal (the goal given, else
+  the goal last sent in this session on this scan): only when that set's offset case passed; `null` without a goal,
+  without such a set, or when its offset case failed.
 - `GET /api/v1/act/<slot>/<id>`: what became of an act whose reply was lost: the console's act record, else its last 20
   acts, else its event log, beside the hub's own audit of the relay.
-- `GET /api/v1/session/<name>`: the receipt, ended or not, the attempts (labels with their history, check, start check,
+- `GET /api/v1/session/<name>` (any session endpoint: the name is looked up in the hub's day, then in the other
+  `lab-day-*` directories beside it, newest first, so a Review link from an earlier day opens; an unknown name is a
+  404 saying where it looked): the receipt, ended or not, the attempts (labels with their history, check, start check,
   rehearsal in force, goal in the scene, scan, passage gate and the result through it: on the simulator's truth in
   practice, on odometry mapped by the start check on the robot), Studio's Replay id, the manifest in brief and the
   recording health. `POST /api/v1/session/<name>/tag {n, tag, note, operator}`: a live session's console takes the

@@ -102,6 +102,23 @@ def _r(v, n=2):
 
 
 # ------------------------------------------------------------------------------------------------ the session
+def runner_ran(d, info=None) -> bool:
+    """Did the runner run in session `d`, by the console's own record: an Arm (or a Start SONIC) act it carried out
+    (console_events.jsonl), or a console started without --arm (it starts its runner at launch, right after writing
+    session.json). runner.log is an optional item: present, it confirms the runner ran; absent, it proves nothing."""
+    d = Path(d)
+    if (d / "runner.log").exists():
+        return True
+    info = _json(d / "session.json") if info is None else info
+    argv = (info or {}).get("argv")
+    if isinstance(argv, list) and argv and "--arm" not in argv:
+        return True
+    for row in _rows(d / "console_events.jsonl"):
+        if isinstance(row, dict) and row.get("act") in ("arm", "s") and row.get("result") == "done":
+            return True
+    return False
+
+
 def session_info(d) -> dict:
     """Mode, kind (robot | practice | rehearsal | sim), odometry and how far the session went, from its files."""
     d = Path(d)
@@ -116,10 +133,11 @@ def session_info(d) -> dict:
     kind = "rehearsal" if rehearsal else "practice" if practice else "robot" if mode == "robot" else "sim"
     odom = info.get("odom") or hub.get("odom")
     lio = odom in (ROBOT_LIO_ODOM if kind == "robot" else LIO_ODOM)
+    runner = runner_ran(d, info)
     return {"dir": d, "info": info, "hub": hub, "rehearsal": reh, "meta": meta, "mode": mode, "kind": kind,
             "practice": practice, "robot": mode == "robot", "odom": odom, "lio": lio,
-            "runner": (d / "runner.log").exists(), "node": (d / "node.log").exists(),
-            "armed": (d / "runner.log").exists() or (d / "node.log").exists(),
+            "runner": runner, "node": (d / "node.log").exists(),
+            "armed": runner or (d / "node.log").exists(),
             "console_pid": info.get("console_pid"), "closed": (d / "console_summary.json").exists()}
 
 

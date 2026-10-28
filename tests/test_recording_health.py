@@ -66,7 +66,10 @@ def session_dir(root, name="practice-120000-deploy", kind="practice", odom="dds"
     if armed:
         for f in ("runner.log", "node.log", "node_plans.json", "node_memory.npz"):
             (d / f).write_text("x")
-    (d / "console_events.jsonl").write_text(json.dumps({"id": "a1", "act": "s", "result": "done"}) + "\n")
+    # the console's own record: Arm and Start SONIC carried out (armed), else only a lease
+    acts = [{"id": "a0", "act": "arm", "result": "done"}, {"id": "a1", "act": "s", "result": "done"}] if armed else \
+        [{"id": "a0", "act": "lease", "result": "done"}]
+    (d / "console_events.jsonl").write_text("".join(json.dumps(a) + "\n" for a in acts))
     if kind != "sim":
         (d / "scene_scan.txt").write_text("scan-a\n")
         (root / "scans" / "scan-a").mkdir(parents=True, exist_ok=True)

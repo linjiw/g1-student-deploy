@@ -257,23 +257,23 @@ def test_start_check_and_send_goal_convert_into_odom(tmp_path):
         con.close()
 
 
-def test_start_check_inside_the_rehearsed_offsets(tmp_path):
+def test_start_check_envelope_needs_the_goals_own_set(tmp_path):
+    """The rehearsed start offsets come from the set in force for the goal (tests/test_deploy_service_v3.py); a set from
+    before identities, or a start check without a goal, has none."""
     h = make_hub(tmp_path)
     make_scan(h, "scan-a")
     for kind in ("exact", "drift", "offset"):
         rehearsal_run(h, f"rehearse-1000{RUNS.index(kind)}-{kind}", kind, "set-100000",
                       offset=OFFSET if kind == "offset" else None)
-    env = h.offset_envelope("scan-a")
-    assert env["moved_m"] == pytest.approx(0.2) and env["turned_deg"] == pytest.approx(20.0) and env["set"] == "set-100000"
+    assert h.offset_envelope("scan-a") is None and h.offset_envelope("scan-a", [2.5, -0.3]) is None
     odom_from_scene = F.compose(P_C, F.inverse(OFFSET))
     con = FakeConsole(live_map=coded_map(F.apply(odom_from_scene, scene()), P_C[:2], robot=P_C))
     try:
         go_live(h, "robot", h.day / "robot-110000-deploy", con.port)
         c = h.start_check_v1("scan-a", "robot")
-        assert c["ok"] and c["within_offset_envelope"] is True and c["offset_envelope"]["set"] == "set-100000"
-        far = F.compose(P_C, F.inverse(F.offset_pose(-28.0, 0.4)))
-        con.map = coded_map(F.apply(far, scene()), P_C[:2], robot=P_C)
-        assert h.start_check_v1("scan-a", "robot")["within_offset_envelope"] is False
+        assert c["ok"] and c["within_offset_envelope"] is None and c["offset_envelope"] is None
+        assert h.start_check_v1("scan-a", "robot", [2.5, -0.3])["within_offset_envelope"] is None
+        assert "two numbers" in h.start_check_v1("scan-a", "robot", ["x", 1])["error"]
     finally:
         con.close()
 

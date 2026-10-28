@@ -104,8 +104,8 @@ MATCH_GOAL_M = 0.08  # a rehearsal set counts for a goal this close to its own (
 OVERRUNS_SUSPECT = 3  # node loop overruns from which a real-time run's timing is suspect (with machine.LAG_SUSPECT_S)
 ODOM_CANON = {"lio": "zmq"}  # practice and rehearsals stand in for FAST-LIO (zmq) with the sim's LIO
 RUN_EMPTY = {"name": None, "state": "pending", "result_node": None, "arrival": None, "final_dist_m": None,
-             "passage": None, "contact_max_n": None, "touched": None, "fell": None, "timing_valid": None,
-             "timing_note": None, "duration_s": None, "passed": None, "error": None, "ran": None}
+             "passage": None, "passage_note": None, "contact_max_n": None, "touched": None, "fell": None,
+             "timing_valid": None, "timing_note": None, "duration_s": None, "passed": None, "error": None, "ran": None}
 _TRUTH = {}
 
 
@@ -1418,9 +1418,30 @@ class Hub:
             return None
 
     # ===================================================================================== API v1
+    def days(self):
+        """This hub's day, then every other lab-day-* directory beside it, newest first (by modification time)."""
+        try:
+            others = [p for p in self.day.parent.glob("lab-day-*") if p.is_dir() and p.resolve() != self.day]
+        except OSError:
+            others = []
+        return [self.day] + sorted(others, key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
+
     def session_dir(self, name):
-        d = (self.day / str(name)).resolve()
-        return d if d.parent == self.day and d.is_dir() else None
+        """A session directory by its name: in this hub's day, else in the newest other lab-day-* beside it that has it
+        (a Review link from an earlier day). None for an unknown name, or one that is not a plain session name."""
+        name = str(name or "")
+        if not name or name.startswith(".") or "/" in name or "\\" in name:
+            return None
+        for day in self.days():
+            d = day / name
+            if d.is_dir() and d.resolve().parent == day.resolve() and \
+                    ((d / "session.json").exists() or (d / "hub_start.json").exists()):
+                return d.resolve()
+        return None
+
+    def no_session(self, name):
+        return 404, {"ok": False, "error": f"no session {name!r} in {self.day.name} or the other lab-day-* directories "
+                                          f"beside it", "session": str(name)}
 
     def _summary(self, d: Path):
         """session_summary, cached until one of its files changes."""
@@ -1569,7 +1590,7 @@ class Hub:
         out["touched"] = bool(out["contact_max_n"] > CONTACT_N)
         out["fell"] = bool(rp.shape[1] > 2 and np.min(rp[:, 2]) < FALL_Z_M)
         if passage:
-            out["passage"] = "crossed" if frames.crosses(path, passage["a"], passage["b"]) else "missed"
+            out["passage"], out["passage_note"] = self.passage_of(path, passage, goal)
         out["arrival"] = bool(out["result_node"] == "arrived" and out["final_dist_m"] is not None
                               and out["final_dist_m"] <= TRUTH_ARRIVE_M)
         out["timing_valid"], out["timing_note"] = run_timing(d)
@@ -1832,7 +1853,8 @@ class Hub:
                    runs={k: (c["runs"][k] or {}).get("name") for k in RUN_KINDS},
                    per_run={k: {kk: (c["runs"][k] or {}).get(kk) for kk in ("arrival", "passage", "passed",
                                                                            "timing_valid", "final_dist_m")}
-                            for k in RUN_KINDS}, identity_sha=json_sha(c["identity"]))
+                            for k in RUN_KINDS}, identity_sha=json_sha(c["identity"]),
+                   envelope=dict(c["envelope"], set=c["name"]) if c.get("offset_ok") and c.get("envelope") else None)
         return out
 
     def rehearsal_for(self, scan, goal_scene, near_m=None):
@@ -1840,14 +1862,13 @@ class Hub:
         r = self.rehearsal_in_force(scan, goal_scene)
         return r if r.get("match") else None
 
-    def offset_envelope(self, scan):
-        """The start offsets the newest rehearsal set of `scan` whose offset run passed covered: {moved_m, turned_deg,
-        set} or None."""
-        all_s = self.all_sessions()
-        for st in self.rehearsal_sets(all_s):
-            if st.get("scan") == scan and st.get("offset_ok") and st.get("envelope"):
-                return dict(st["envelope"], set=st["name"])
-        return None
+    def offset_envelope(self, scan, goal_scene=None, slot=None, passage=None):
+        """The start offsets the rehearsal set in force for this goal covered (the set matching the scan, the goal, the
+        live session's profile and odometry; rehearsal_in_force), only when its offset case passed: {moved_m,
+        turned_deg, set} or None (no goal, no such set, or its offset case failed)."""
+        if not scan or goal_scene is None:
+            return None
+        return self.rehearsal_in_force(scan, goal_scene, slot, passage=passage).get("envelope")
 
     def profiles_v1(self):
         t, cached = self._profiles
@@ -2502,11 +2523,19 @@ class Hub:
         except Exception:
             return None
 
-    def start_check_v1(self, scan, slot="robot"):
-        out, _ = self._start_check(scan, slot)
+    def start_check_v1(self, scan, slot="robot", goal=None):
+        try:
+            goal = [float(v) for v in goal] if goal is not None else None
+            if goal is not None and (len(goal) != 2 or not all(math.isfinite(v) for v in goal)):
+                raise ValueError
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "goal_scene must be two numbers"}
+        out, _ = self._start_check(scan, slot, goal=goal)
         return out
 
-    def _start_check(self, scan, slot):
+    def _start_check(self, scan, slot, goal=None, passage=None):
+        """The start check of `slot`'s live session against `scan`. `goal` (scene): the goal it is for (else the goal last
+        sent through send_goal in this session, on this scan): the rehearsed start offsets are that goal's set's."""
         slot = slot or "robot"
         if slot not in self.slots:
             return {"ok": False, "error": "slot must be robot or sim"}, None
@@ -2519,8 +2548,13 @@ class Hub:
         live = self._live_map(slot)
         out = registration.start_check(grid, live)
         out.update(scan=scan, slot=slot, session=Path(cur["dir"]).name, at=time.time())
-        env = self.offset_envelope(scan)
-        out["offset_envelope"] = env
+        ctx = self.goal_ctx.get(slot) or {}
+        if goal is None and ctx.get("session") == out["session"] and ctx.get("scan") == scan:
+            goal = ctx.get("goal_scene")
+        if passage is None and goal is not None and ctx.get("goal_scene") == goal:
+            passage = ctx.get("passage")
+        env = self.offset_envelope(scan, goal, slot, passage=passage)
+        out["offset_envelope"], out["goal_scene"] = env, goal
         cs = (self.console_state.get(slot) or (None, None))[1] or {}
         out["closed_attempts"] = sum(1 for a in cs.get("attempts") or [] if a.get("result") is not None)
         # The envelope covers the first walk from the scan pose. After a walk the robot starts where it stopped: the
@@ -2620,7 +2654,7 @@ class Hub:
                 return refuse("the goal check used another profile configuration than this session's: check again")
         if self.walking(slot):
             return refuse("the robot is walking: send the goal when it stands")
-        check, live_map = self._start_check(req.get("scan"), slot)
+        check, live_map = self._start_check(req.get("scan"), slot, goal=goal, passage=passage)
         check["check_id"] = check_id
         if not check.get("ok"):
             return refuse((check.get("error") or "the start check failed") + ": no goal sent", check=check)
@@ -2738,7 +2772,9 @@ class Hub:
     def go_gate(self, slot, cur, msg):
         """GO and the rehearsal in force (the operators' decision of 2026-10-28): a robot session's GO needs a complete
         rehearsal set matching the goal sent through send_goal, the live session's profile (by contents), bundle,
-        rules and odometry, or the operator's explicit override (`rehearsal_override {operator, reason}` with the act),
+        rules and odometry, whose verdict is robust; any other verdict (fails, fails with drift, missed passage, other
+        way), whatever the odometry, or no such set, needs the operator's explicit override
+        (`rehearsal_override {operator, reason}` with the act),
         which then goes with the act so the console stores it with the attempt. Practice: advisory (recorded only).
         Returns {refuse, reason, rehearsal}."""
         d = Path(cur["dir"])
@@ -2755,6 +2791,8 @@ class Hub:
                 reh = self.rehearsal_in_force(ctx.get("scan"), ctx.get("goal_scene"), slot, passage=ctx.get("passage"))
                 if not reh.get("match"):
                     why = reh.get("reason") or "no complete rehearsal set matches this goal"
+                elif reh.get("verdict") != "robust":  # whatever the odometry: FAST-LIO changes the wording, not this
+                    why = f"the rehearsal set in force ({reh.get('name')}) is not robust: {reh.get('verdict')}"
         robot = slot == "robot" and not cur.get("practice")
         rec = dict(reh or {"match": False}, **({"reason": why} if why else {}))
         ov = msg.get("rehearsal_override")
@@ -2767,8 +2805,8 @@ class Hub:
                                "without": why}
             return {"refuse": False, "reason": None, "rehearsal": rec}
         if why and robot:
-            why = f"GO needs a complete rehearsal set for this goal: {why}. Rehearse it, or tick the override (stored with " \
-                  "the attempt)"
+            why = f"GO needs a robust complete rehearsal set for this goal: {why}. Rehearse it, or tick the override " \
+                  "(stored with the attempt)"
         return {"refuse": bool(robot and why), "reason": why, "rehearsal": rec}
 
     def panel_state_v1(self, slot):
@@ -2786,7 +2824,7 @@ class Hub:
     def manifest_v1(self, name):
         d = self.session_dir(name)
         if d is None:
-            return 404, {"ok": False, "error": "no such session"}
+            return self.no_session(name)
         return 200, evidence.write(d)
 
     # -- session receipts, detail, labels, recording, act lookup (contract v3 A, D, E, F, G) -----------------------
@@ -2878,7 +2916,7 @@ class Hub:
     def receipt_v1(self, name):
         d = self.session_dir(name)
         if d is None:
-            return 404, {"ok": False, "error": "no such session"}
+            return self.no_session(name)
         slot = self.slot_of(d)
         return 200, self.receipt(d, self.slots[slot]["info"] if slot else None)
 
@@ -2897,36 +2935,46 @@ class Hub:
         meta = _json_file(d / "rec" / "meta.json") or {}
         return bool(linked and meta.get("format") == "g1deploy.recording.v1")
 
+    @staticmethod
+    def passage_of(path, gate, goal):
+        """(crossed | missed | n/a, note) of a walk's path (scene) through a gate; n/a when it started past the gate (the
+        straight segment from its start to its goal does not cross the gate's line)."""
+        if goal is not None and len(path) and not frames.passage_ahead(path[0], goal, gate["a"], gate["b"]):
+            return "n/a", "started past the gate"
+        return ("crossed" if frames.crosses(path, gate["a"], gate["b"]) else "missed"), None
+
     def attempt_passage(self, d, row, gate, t0, practice):
-        """(passage, basis) of one attempt through a passage gate: crossed | missed on the simulator's truth (practice)
-        or the node's odometry mapped into the scene with the attempt's start check (robot: an estimate)."""
+        """(passage, basis, note) of one attempt through a passage gate: crossed | missed on the simulator's truth
+        (practice) or the node's odometry mapped into the scene with the attempt's start check (robot: an estimate);
+        n/a for an attempt that started past the gate (a repeated trial from where the last one ended)."""
         import numpy as np
 
         if not gate:
-            return None, None
+            return None, None, None
         if t0 is None or row.get("t_go") is None:
-            return None, None
+            return None, None, "no attempt timing"
         m0 = float(t0) + float(row["t_go"])
         m1 = float(t0) + float(row["t_end"]) if row.get("t_end") is not None else math.inf
+        goal = row.get("goal_scene")
         if practice and practice.get("scene_from_course") and (d / "sim.npz").exists():
             try:
                 with np.load(d / "sim.npz", allow_pickle=False) as z:
                     wall, xy = np.asarray(z["wall"], float), np.asarray(z["root_pos"], float)[:, :2]
                 sel = (wall >= m0) & (wall <= m1)
                 if sel.sum() >= 2:
-                    path = frames.apply(practice["scene_from_course"], xy[sel])
-                    return ("crossed" if frames.crosses(path, gate["a"], gate["b"]) else "missed"), "sim truth"
+                    result, note = self.passage_of(frames.apply(practice["scene_from_course"], xy[sel]), gate, goal)
+                    return result, "sim truth", note
             except (OSError, KeyError, ValueError):
                 pass
         s_from_o = (row.get("start_check") or {}).get("scene_from_odom")
         if not s_from_o:
-            return None, None
+            return None, None, "no path recorded for this attempt"
         pts = [r["status"]["xy"] for r in _jsonl(d / "rec" / "node_status.jsonl", must='"xy"')
                if isinstance(r.get("t"), (int, float)) and m0 <= r["t"] <= m1 and (r.get("status") or {}).get("xy")]
         if len(pts) < 2:
-            return None, None
-        path = frames.apply(s_from_o, np.asarray(pts, float))
-        return ("crossed" if frames.crosses(path, gate["a"], gate["b"]) else "missed"), "odometry estimate"
+            return None, None, "no path recorded for this attempt"
+        result, note = self.passage_of(frames.apply(s_from_o, np.asarray(pts, float)), gate, goal)
+        return result, "odometry estimate", note
 
     def attempts_detail(self, d):
         """The attempts of session `d` for Review (contract v3 E): the console's rows with labels merged (tag, note,
@@ -2952,9 +3000,12 @@ class Hub:
                 row.setdefault(k, None)
             row["goal_scene"] = row["goal_scene"] or sent.get("goal_scene")
             row["scan"] = row["scan"] or sent.get("scan") or scene_scan
-            gate = row.get("passage_gate") or sent.get("passage")
+            # the gate: the console's row keeps it (its `passage`, since 2026-10-28), else send_goal's record
+            gate = row.get("passage_gate") or (r.get("passage") if isinstance(r.get("passage"), dict) else None) \
+                or sent.get("passage")
             row["passage_gate"] = gate
-            row["passage"], row["passage_basis"] = self.attempt_passage(d, row, gate, sj.get("t0"), practice)
+            row["passage"], row["passage_basis"], row["passage_note"] = self.attempt_passage(d, row, gate, sj.get("t0"),
+                                                                                             practice)
             # Studio's Replay of a console session starts at its first lowstate sample (host monotonic, like t0)
             origin = self.replay_origin(d)
             row["replay_t_s"] = (round(float(sj["t0"]) + float(row["t_go"]) - origin, 2)
@@ -3015,14 +3066,14 @@ class Hub:
     def recording_v1(self, name):
         d = self.session_dir(name)
         if d is None:
-            return 404, {"ok": False, "error": "no such session"}
+            return self.no_session(name)
         return 200, dict(self.recording_of(d), session=d.name)
 
     def session_detail(self, name):
         """GET /api/v1/session/<name>: everything Review shows for one session, from the session directory alone."""
         d = self.session_dir(name)
         if d is None:
-            return 404, {"ok": False, "error": "no such session"}
+            return self.no_session(name)
         slot = self.slot_of(d)
         try:
             m = evidence.manifest(d)
@@ -3031,8 +3082,9 @@ class Hub:
         rec = self.receipt(d, self.slots[slot]["info"] if slot else None)
         reh = _json_file(d / "rehearsal.json")
         return 200, {"ok": True, "name": d.name, "receipt": rec, "ended": self.is_ended(d), "live_slot": slot,
+                     "day": d.parent.name,
                      "summary_ended": (d / "console_summary.json").exists(), "attempts": self.attempts_detail(d),
-                     "rehearsal_run": reh, "replay": {"studio_id": studio_id(self.day, d), "linked": self.studio_linked(d)},
+                     "rehearsal_run": reh, "replay": {"studio_id": studio_id(d.parent, d), "linked": self.studio_linked(d)},
                      # the whole manifest (items, state, reasons) with its summary: Review shows every item
                      "manifest": self.manifest_full(m), "recording": self.recording_of(d),
                      "report": (d / "report.md").exists(), "tags": list(A.TAGS)}
@@ -3042,7 +3094,7 @@ class Hub:
         console takes it (its tag act, as the panel's); an ended one's attempt_tags.jsonl gets a row (append-only)."""
         d = self.session_dir(name)
         if d is None:
-            return 404, {"ok": False, "error": "no such session"}
+            return self.no_session(name)
         n, tag, note = req.get("n"), req.get("tag"), req.get("note")
         operator = str(req.get("operator") or "").strip()[:60]
         if not operator:
@@ -3271,7 +3323,8 @@ class Hub:
                 ("an attempt ended since: check again; " if stale else "") + (
                     f"moved {c.get('moved_m')} m, turned {c.get('turned_deg')} deg, overlap {c.get('overlap')}"
                     + ("" if within else " (outside the rehearsed start offsets)" if within is False else
-                       " (no start-offset rehearsal of this scan)") if c.get("ok") else c.get("error") or "no match"),
+                       " (no passed start-offset case in the rehearsal set for this goal)") if c.get("ok") else
+                    c.get("error") or "no match"),
                 c.get("at"), 300, "node",
                 anchor={"kind": "pose", "frame": "scene", "pose": robot_scene} if robot_scene else None)
         else:
@@ -3320,12 +3373,15 @@ class Hub:
                 fix=None if running else "rehearse this goal (three runs), or tick the override at GO (recorded)")
         else:
             v, ok = s.get("verdict"), s.get("offset_ok")
-            # The drift run carries the error lab-g1's LEG odometry measured. On leg odometry a goal that fails with it
-            # is blocked; on FAST-LIO (+ legs) the walk does not drift like that (1.9-6.9 cm RMS against FAST-LIO,
-            # 2026-10-28), so it is a warning to read, not a block.
-            status = ("block" if v in ("fails", "missed passage") or (v == "fails with drift" and not lio) else
-                      "pass" if v == "robust" and ok and s.get("timing_valid") is not False else "warn")
+            # GO on the robot needs a robust set or the operator's recorded override, whatever the odometry (go_gate);
+            # practice is advisory. FAST-LIO only changes the words for "fails with drift" (the drift run models the leg
+            # odometry lab-g1 measured; FAST-LIO + legs drifted 1.9-6.9 cm RMS against FAST-LIO, 2026-10-28).
+            status = ("pass" if v == "robust" and ok and s.get("timing_valid") is not False else
+                      "warn" if v == "robust" or not robot_go else "block")
             detail = f"{s['name']}: {v}; start offset {'ok' if ok else 'failed' if ok is False else '-'}"
+            if v != "robust":
+                detail += ("; GO needs the operator's override (recorded with the attempt)" if robot_go else
+                           "; practice: GO is not held for it")
             if s.get("passage"):
                 detail += "; scored on the passage gate"
             if s.get("timing_valid") is False:
@@ -3335,7 +3391,7 @@ class Hub:
             if running:
                 detail += f"; {running['name']} (newer) is running"
             add("scene.rehearsal", "scene", "Rehearsal set", status, "DERIVED", detail, s.get("finished"), None,
-                "rehearsal")
+                "rehearsal", fix="rehearse again, or tick the override at GO (recorded)" if status == "block" else None)
         conf = None
         if info:
             try:
@@ -3548,7 +3604,8 @@ def serve(hub: Hub, port: int, host="127.0.0.1"):
                 return
             handlers = {"scan": hub.scan_v1, "practice/scan": hub.practice_scan, "start": hub.start_v1,
                         "stop": lambda m: hub.stop_v1(m.get("slot")), "rehearse": hub.rehearse_set,
-                        "start_check": lambda m: hub.start_check_v1(m.get("scan"), m.get("slot") or "robot"),
+                        "start_check": lambda m: hub.start_check_v1(m.get("scan"), m.get("slot") or "robot",
+                                                                    m.get("goal_scene")),
                         "send_goal": hub.send_goal_v1, "doctor": lambda m: hub.run_doctor()}
             if path not in handlers:
                 self._json(404, {"ok": False, "error": "unknown endpoint"})

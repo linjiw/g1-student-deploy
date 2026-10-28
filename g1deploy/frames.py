@@ -115,6 +115,19 @@ def crosses(path, a, b):
     return bool(np.any((s1 * s2 <= 0) & (s1 != s2) & (s3 * s4 <= 0) & (s3 != s4)))
 
 
+def passage_ahead(start, goal, a, b):
+    """Is the gate a-b between `start` and `goal`: does the straight segment start-goal cross the gate's line? A walk
+    that starts on the gate's line or past it (a repeated trial from where the last one ended) has no passage to
+    make."""
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    d = b - a
+
+    def side(p):
+        p = np.asarray(p, dtype=float) - a
+        return np.sign(d[0] * p[1] - d[1] * p[0])
+    return bool(side(start) * side(goal) < 0)
+
+
 def yaw_of_quat(q_wxyz):
     w, x, y, z = (float(v) for v in q_wxyz)
     return math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
