@@ -21,9 +21,11 @@ GPU_UTIL = 60  # % GPU utilisation (median of a short sample) above this = busy;
 # another real-time chain: two on one DDS domain cross-talk (and on the robot, two runners)
 # the console only as `sim` / `robot` (not `g1 lab`, the hub, nor `g1 doctor` and the other wrappers)
 CHAIN = (r"sim/realtime/robot_sim\.py", r"g1deploy/node\.py", r"g1_deploy_onnx_ref", r"g1deploy/console\.py (sim|robot)\b")
-# heavy offline jobs of this kit that compete with a real-time run; G1_HEAVY_JOBS adds regexes (comma-separated)
+# heavy offline jobs that compete with a real-time run: this kit's, and Deploy Studio's CPU workers (policy rollouts and
+# simulated Navigate walks: MuJoCo + ONNX + planner on CPU threads); G1_HEAVY_JOBS adds regexes (comma-separated)
 HEAVY = (r"tools/replay_plans\.py", r"tools/bench_planner\.py", r"tools/profile_\w+\.py", r"tools/render_session\.py",
-         r"tools/debug_plan\.py", r"tools/lio_replay\.py")
+         r"tools/debug_plan\.py", r"tools/lio_replay\.py",
+         r"studio/policy_worker\.py", r"studio/flow_policy_worker\.py", r"studio/nav_worker\.py")
 
 
 def heavy_patterns():

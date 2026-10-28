@@ -100,6 +100,11 @@ body.embed #laddercard { display:none }
 body.embed .goalrow { margin-top:6px }
 #next .tags { margin-top:6px } #next .tags button { min-height:40px; padding:8px 13px }
 .okline { font-size:13px; color:var(--muted); cursor:pointer; padding:6px 0 0 }
+#toast { position:sticky; top:84px; z-index:15; font-weight:650; border-width:2px }
+#toast.bad { border-color:var(--bad); color:var(--bad); background:var(--card) }
+#toast.warn { border-color:var(--warn); color:var(--warn); background:var(--card) }
+#toast.ok { border-color:var(--ok); color:var(--ok); background:var(--card) }
+#lease { border-color:var(--warn); color:var(--warn); font-weight:650 }
 .muted { color:var(--muted) }
 </style></head><body>
 <button id="estop" onclick="send({act:'estop'})" aria-label="Emergency stop">E-STOP</button>
@@ -110,9 +115,12 @@ body.embed .goalrow { margin-top:6px }
   <span class="chip">policy <b id="profile">-</b></span>
   <span class="chip">identity <b id="ident">-</b></span>
   <span class="chip" id="setup">-</span>
+  <span class="chip" id="lease" style="display:none"></span>
   <span id="conn">connecting...</span>
   <a id="hub" href="#" style="display:none; margin-left:auto">Lab hub</a>
 </div>
+
+<div class="card" id="toast" style="display:none" onclick="this.style.display='none'"></div>
 
 <div class="card"><div class="strip">
   <div><div class="k">runner</div><div class="v" id="runner">-</div></div>
@@ -192,10 +200,31 @@ const CONFIRM = {
   c: "Clear the map? Only while standing, with nobody and nothing close to the robot. The node maps again from here; GO waits 10 s.",
   quit: "End the session? This stops the runner: robot in the gantry or sitting."
 };
+// every act carries a fresh id (a retry of the same id never acts twice) and comes back with a result and a reason
+let actN = 0;
+function newId() { return 'panel-' + Date.now().toString(36) + '-' + (++actN) + '-' + Math.random().toString(36).slice(2, 8); }
+const ACT_NAME = {s:'Start SONIC', g:'GO', h:'Stand', t:'Takeover', c:'Clear map', arm:'Arm', quit:'End session', goal:'Goal', tag:'Tag'};
+function toast(text, cls) {
+  const t = $('toast'); t.textContent = text; t.className = 'card ' + (cls || ''); t.style.display = '';
+  clearTimeout(toast.h); toast.h = setTimeout(() => { t.style.display = 'none'; }, cls === 'bad' ? 12000 : 5000);
+}
 async function send(m) {
-  try { const r = await fetch('/act?t=' + T, {method:'POST', body:JSON.stringify(m)});
-        if (!r.ok) alert('console refused: ' + r.status); return r.ok; }
-  catch (e) { alert('console unreachable: ' + e); return false; }
+  const body = Object.assign({id: newId(), source: 'panel'}, m);
+  try {
+    const r = await fetch('/act?t=' + T, {method:'POST', body:JSON.stringify(body)});
+    let j = null; try { j = await r.json(); } catch (e) { j = null; }
+    if (m.act === 'estop') {
+      if (j && j.key_sent) toast('E-STOP sent to the runner' + (j.confirmed ? ' · runner confirmed' : ' · watch the robot'), 'bad');
+      else toast('E-STOP: ' + ((j && j.reason) || 'console answered ' + r.status) + ' · use the physical E-stop', 'bad');
+      return !!(j && j.ok);
+    }
+    if (!j) { toast('console answered ' + r.status, 'bad'); return false; }
+    const name = ACT_NAME[m.act] || m.act;
+    if (j.result === 'refused') { toast(name + ' refused: ' + j.reason, 'bad'); return false; }
+    if (j.result === 'queued') toast(name + ' queued: the console has not handled it yet', 'warn');
+    else if (m.act !== 'tag') toast(name + (j.reason ? ': ' + j.reason : ' done'), 'ok');
+    return true;
+  } catch (e) { toast('console unreachable: ' + e + ' · use the physical E-stop or the remote', 'bad'); return false; }
 }
 function doAct(k) {
   if (CONFIRM[k] && !confirm(CONFIRM[k])) return;
@@ -250,7 +279,9 @@ function renderNext(s) {
   }
 }
 let skipMap = false;
-function goReady(s) { return s.runner === 'CONTROL' && s.node_ready && !(s.go_settle_left_s > 0); }
+// the console's own gate (go_locks_panel: empty iff GO from this panel would be accepted, the Studio lease included)
+function goLocks(s) { return s.go_locks_panel || s.go_locks || []; }
+function goReady(s) { return goLocks(s).length === 0; }
 
 function meter(label, v, max, warnAt, badAt, unit, d, marks) {
   const has = v !== null && v !== undefined && !Number.isNaN(+v);
@@ -326,7 +357,11 @@ function render(s) {
   $('rule').textContent = (s.node && s.node.plans != null ? s.node.plans : '-') + ' · ' + ((s.node && s.node.rule) || '-');
   const ready = goReady(s);
   $('b-go').disabled = !ready;
-  $('gohint').textContent = ready ? 'g · student walks' : (s.runner !== 'CONTROL' ? 'Start SONIC first' : !s.node_ready ? 'planner warming up' : 'SONIC settling');
+  $('gohint').textContent = ready ? 'g · student walks' : goLocks(s)[0];
+  $('b-go').title = goLocks(s).join('\n');
+  const ls = s.lease;
+  $('lease').style.display = ls ? '' : 'none';
+  if (ls) $('lease').textContent = 'Studio has the controls (' + ls.holder + '): GO from Studio';
   $('b-arm').disabled = s.runner !== 'not started';
   if (skipMap) { const m = s.ladder.find(x => x.key === 'map'); if (m && m.state === 'now') { m.state = 'done';
       const nx = s.ladder.find(x => x.state === 'todo'); if (nx) nx.state = 'now'; } }

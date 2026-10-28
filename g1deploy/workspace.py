@@ -10,6 +10,7 @@ refusals (GO before CONTROL, before the planner is warm, in E-STOP).
 
 from __future__ import annotations
 
+import json
 import math
 
 from g1deploy.machine import LAG_SUSPECT_S
@@ -23,6 +24,28 @@ CLEAR_MAP_SCAN_S = 10.0  # node.CLEAR_MAP_SCAN_S: a walk waits for this much fre
 
 MAP_CODES = {" ": "unknown", ".": "ground", "1": "low < 0.3 m", "2": "obstacle < 1.0 m", "3": "tall >= 1.0 m",
              "^": "overhead over free floor", "s": "obstacle seen only from up close (self-return signature)"}
+
+
+def strict(obj):
+    """`obj` as plain JSON values with every non-finite float as None (numpy arrays and scalars become lists and
+    numbers). The kit's v1 endpoints (node `view`, panel `/state` and `/act`) answer strict JSON: a NaN in a pose or a
+    goal distance, likely exactly when odometry fails, must not break a browser's JSON.parse."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if obj is None or isinstance(obj, (bool, int, str)):
+        return obj
+    if isinstance(obj, dict):
+        return {str(k): strict(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [strict(v) for v in obj]
+    if hasattr(obj, "tolist"):  # a numpy array or scalar
+        return strict(obj.tolist())
+    return str(obj)
+
+
+def dumps(obj) -> str:
+    """Strict, compact JSON (strict())."""
+    return json.dumps(strict(obj), allow_nan=False, separators=(",", ":"))
 
 
 def code_grid(support, ceiling, lo, res, center_xy, half_m=4.0, res_m=0.1, near=None, lock=None):
@@ -207,7 +230,11 @@ def ladder(ctx):
         map_done = goal_done = go_done = True
     else:
         map_done = cleared is not None and (cycle is None or cleared >= cycle) and scan_left == 0
-        goal_done = goal_t is not None and (cycle is None or goal_t >= cycle or (last is None and goal_t == 0.0))
+        if "goal_ok" in ctx:  # the console's GO gate decides: a goal read back from the node in this cycle
+            goal_done = bool(ctx["goal_ok"])
+        else:  # a robot's launch goal (--goal) never counts: it was anchored at Arm, in a frame nobody checked
+            goal_done = goal_t is not None and (cycle is None or goal_t >= cycle
+                                                or (not robot and last is None and goal_t == 0.0))
         go_done = False
     steps = [
         ("systems", "Systems up", (not sys_bad and "rec" in procs) or not robot,
@@ -221,8 +248,11 @@ def ladder(ctx):
          "spotter to the side, rope held high; the node maps again and GO waits 10 s"
          + (f" ({scan_left:.0f} s of scan left)" if scan_left else "")),
         ("goal", "Goal set", goal_done,
-         "ahead / left in metres from the robot now (or tap the map); leave ~0.5 m spare: leg odometry under-counts"),
-        ("go", "GO", go_done or walking, "the student walks to the goal; E-STOP or Select on any doubt"),
+         "ahead / left in metres from the robot now (or tap the map), or Send goal from Studio after its start check; "
+         "a goal counts once the node has read it back, for this attempt only; leave ~0.5 m spare: leg odometry "
+         "under-counts"),
+        ("go", "GO", go_done or walking, "; ".join(ctx.get("go_locks") or [])
+         or "the student walks to the goal; E-STOP or Select on any doubt"),
         ("walk", "Walk ends", pending_tag, f"attempt {last['n']} walking" if walking else
          "arrived, stopped, E-STOP or takeover"),
         ("tag", "Tag the attempt", False, "clean / touched / stumble / caught / aborted / setup issue, plus a note"),

@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import queue
 import select
@@ -47,12 +48,13 @@ import termios
 import threading
 import time
 import tty
+from collections import deque
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from g1deploy import machine, profiles, workspace  # noqa: E402
+from g1deploy import machine, profiles, service_token, workspace  # noqa: E402
 from g1deploy.attempts import TAGS, Attempts  # noqa: E402
 
 LUCID = Path(os.environ.get("LUCID_DEPLOY_ROOT", Path.home() / "lucid-sonic/lucid-g1-deploy"))
@@ -84,6 +86,16 @@ def rehearsal_running():
 
 
 GO_SETTLE_S = 2.0  # GO waits this long after SONIC takes control (sim: the virtual gantry lets go 1.5 s after Start)
+CLEAR_MAP_SCAN_S = workspace.CLEAR_MAP_SCAN_S  # GO waits for this much fresh scan after Clear map (node.CLEAR_MAP_SCAN_S)
+# Acts (POST /act, keys, the remote, scripts): every one gets an id, a result and a line in console_events.jsonl
+ACTS = ("s", "g", "h", "t", "c", "r", "?", "goal", "goal_odom", "arm", "quit", "lease", "tag")  # and estop
+ACT_SOURCES = ("panel", "studio", "hub", "remote", "key", "script", "node")
+ACT_WAIT_S = 1.0  # an HTTP act waits this long for the main loop, then answers result "queued"
+ACT_ID_TTL_S = 600.0  # a repeated act id within this returns its first result (a retry never acts twice)
+GOAL_READBACK_S = 0.5  # a goal counts once the node's status echoes its seq within this
+CLEAR_READBACK_S = 1.5  # Clear map counts once the node reports map_cleared within this
+ESTOP_CONFIRM_S = 0.15  # an E-STOP reply looks this long for the runner's EMERGENCY STOP line (`confirmed`)
+ESTOP_LINES = ("EMERGENCY STOP", "Emergency Stop")
 SESSIONS = Path(os.environ.get("G1_SESSIONS", ROOT / "runs/console"))
 # ROS 2 side of the lidar adapter (robots without Unitree's lidar service: livox_ros_driver2 on this PC)
 ROS_SETUP = os.environ.get("G1_ROS_SETUP", "/opt/ros/humble/setup.bash")
@@ -179,7 +191,7 @@ class Proc:
         self.f = open(self.log_path, "w", buffering=1)
         self.p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, cwd=str(ROOT),
                                   stdin=subprocess.PIPE if stdin else subprocess.DEVNULL, start_new_session=True)
-        self.lines = []
+        self.lines, self.count, self.lines_lock = [], 0, threading.Lock()  # count: lines ever (lines keeps the last)
         threading.Thread(target=self._pump, daemon=True).start()
 
     def _pump(self):
@@ -187,14 +199,22 @@ class Proc:
             line = raw.decode(errors="replace").rstrip("\n")
             t = time.monotonic()
             self.f.write(f"{t:.3f} {line}\n")
-            self.lines.append((t, line))
+            with self.lines_lock:
+                self.lines.append((t, line))
+                self.count += 1
+                if len(self.lines) > 4000:
+                    del self.lines[:2000]
             if self.on_line is not None:
                 try:
                     self.on_line(line)
                 except Exception as exc:  # a bad line must not stop the pump (it also feeds the log)
                     self.f.write(f"{t:.3f} [console] on_line error: {exc!r}\n")
-            if len(self.lines) > 4000:
-                del self.lines[:2000]
+
+    def new_lines(self, seen):
+        """(lines after the first `seen` ever printed, the count now): trimming the buffer never hides or repeats one."""
+        with self.lines_lock:
+            k = min(self.count - seen, len(self.lines))
+            return (self.lines[len(self.lines) - k:] if k > 0 else []), self.count
 
     def key(self, s):
         with self.key_lock:
@@ -233,7 +253,7 @@ class Session:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.procs, self.events = {}, []
         self.runner_state = {"init": False, "control": False, "iface": "GAMEPAD", "stream": False, "estop": False}
-        self.node_status, self.node_events = {}, []
+        self.node_status = {}
         self.rec_stats, self.rec_read = {}, 0.0
         self.frames = open(self.dir / "console_frames.jsonl", "w", buffering=1)
         self.req = None
@@ -247,12 +267,27 @@ class Session:
         prof = getattr(args, "profile", None)
         self.attempts = Attempts(self.dir / "attempts.jsonl", prof["name"] if prof else None)
         self.temps, self.map_lock, self.map_cache = None, threading.Lock(), (0.0, None)
-        self.goal_rel, self.goal_t = (tuple(args.goal) if getattr(args, "goal", None) else None), 0.0
         self.cleared_t = self.control_t = None
         try:
             self.identity = profiles.identity(args).get("short")
         except Exception:
             self.identity = None
+        self.init_acts(args)
+
+    def init_acts(self, args):
+        """The act and GO-gate state (CONTRACT §4.1). Times are session time (monotonic - t0), like control_t.
+        The goal in force: goal_t = when the node read it back (None: no confirmed goal), goal_seq its seq, goal_xy the
+        node's goal then. The launch goal (--goal, anchored by the node at its start) is in force with goal_seq None;
+        it never counts on a robot console; a sim console counts it for the first cycle (start_goal_counts) unless
+        --require-sent-goal (practice sessions: GO behaves as on the robot)."""
+        self.goal_rel = tuple(args.goal) if getattr(args, "goal", None) else None
+        self.goal_t, self.goal_seq, self.goal_xy, self.goal_ctx, self.seqs = None, None, None, {}, set()
+        self.start_goal_counts = args.mode == "sim" and not getattr(args, "require_sent_goal", False)
+        self.act_lock, self.log_lock = threading.Lock(), threading.Lock()
+        self.acts_by_id, self.acts_recent, self.pending, self.n_acts = {}, deque(maxlen=20), [], 0
+        self.lease, self.quit_requested, self.estop_logged = None, False, False
+        self.node_seen, self.node_events = 0, []
+        self.events_log = open(self.dir / "console_events.jsonl", "a", buffering=1)
 
     # -- processes ----------------------------------------------------------------------------------
     def start(self):
@@ -266,7 +301,8 @@ class Session:
             P = self.ports
             moved = [] if P["stream"] == PORT_BASE else [  # an isolated rehearsal: the recorder follows its ports
                 "--zmq", f"pose=pose=tcp://127.0.0.1:{P['stream']}", "--zmq", f"debug=g1_debug=tcp://127.0.0.1:{P['debug']}",
-                "--zmq", f"odom=odom=tcp://127.0.0.1:{P['odom']}", "--status", f"tcp://127.0.0.1:{P['control']}"]
+                "--zmq", f"odom=odom=tcp://127.0.0.1:{P['odom']}", "--zmq", f"cloud=cloud=tcp://127.0.0.1:{P['odom']}",
+                "--status", f"tcp://127.0.0.1:{P['control']}"]
             self.procs["rec"] = Proc("rec", [py, "-u", "g1deploy/recorder.py", "--iface", iface, "--out",
                                              str(self.dir / "rec")] + ([] if a.record_lidar else ["--no-lidar"]) + moved,
                                      self.dir / "recorder.log", self.env)
@@ -300,7 +336,11 @@ class Session:
                     replay=a.replay, odom=a.odom, lidar=None if sim else a.lidar, body=a.body, guards=a.guards,
                     goal_lookahead=a.goal_lookahead, rear_blind_deg=a.rear_blind_deg,
                     rules_overrides=getattr(a, "rules_overrides", None),
-                    rear_blind_range_m=a.rear_blind_range_m)
+                    rear_blind_range_m=a.rear_blind_range_m,
+                    # the operator's start confirmations (the hub's checklist: gantry, E-stops, remote, rope, ...)
+                    confirm=getattr(a, "confirm", None),
+                    go_gate={"start_goal_counts": self.start_goal_counts, "settle_s": GO_SETTLE_S,
+                             "clear_map_scan_s": CLEAR_MAP_SCAN_S, "goal_readback_s": GOAL_READBACK_S})
         (self.dir / "session.json").write_text(json.dumps(meta, indent=1) + "\n")
         self.launch = (iface, onnx, motions, planner, py, sim)
         if getattr(a, "arm", False):  # the runner waits for the panel's Arm: recorder, lidar, remote, panel run first
@@ -417,21 +457,31 @@ class Session:
                     st["stream"] = True
                 elif "STREAMING MODE: DISABLED" in line or "FORCE DISABLED" in line:
                     st["stream"] = False
-                elif "EMERGENCY STOP" in line or "Emergency Stop" in line:
-                    st["estop"] = True
+                elif any(s_ in line for s_ in ESTOP_LINES):
+                    st["estop"] = self.estop_logged = True
         n = self.procs.get("node")
         if n and not self.args.replay:
-            seen = len(self.node_events)
-            evs = [json.loads(l) for _, l in n.lines if l.startswith("{\"event\"")]
-            for e in evs[seen:]:
+            lines, self.node_seen = n.new_lines(self.node_seen)
+            for _, line in lines:
+                if not line.startswith("{\"event\""):
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                self.node_events = (self.node_events + [e])[-500:]
                 if e["event"] not in ("stall_risk", "dq_clipped"):
                     self.event("node: " + e["event"] + ("" if "reason" not in e else f" ({e['reason']})"))
+                if e["event"] == "map_cleared":
+                    self.cleared_t = float(e.get("t", time.monotonic())) - self.t0
                 if e["event"] == "estop" and not self.runner_state["estop"]:
                     # the node's supervisor asked for a stop (tilt / stale state): damping now, no operator needed
                     self.procs["runner"].key("o")
                     self.runner_state["estop"] = True
                     self.event("AUTO E-STOP: runner damping (node supervisor)")
-            self.node_events = evs
+                    self.log_act({"id": self.new_id("node"), "act": "estop", "source": "node", "operator": None,
+                                  "args": {"reason": e.get("reason")}, "t_mono": time.monotonic(), "wall": time.time()},
+                                 "done", f"node supervisor: {e.get('reason')}")
         if self.req is not None:
             try:
                 self.req.send_string(json.dumps({"cmd": "status"}), self.zmq.NOBLOCK)
@@ -444,6 +494,7 @@ class Session:
                     self.req.connect(self.ctl)
             except self.zmq.ZMQError:
                 pass
+        self.check_pending()
         self.attempts.update(time.monotonic() - self.t0, self.node_status, estop=self.runner_state["estop"])
         if "rec" in self.procs and time.monotonic() - self.rec_read > 1.0:
             self.rec_read = time.monotonic()
@@ -478,13 +529,166 @@ class Session:
         except Exception:
             return False
 
-    # -- operator actions ---------------------------------------------------------------------------------
-    def act(self, key):
+    # -- acts: every operator action, from every source (CONTRACT §4.1) --------------------------------------
+    def new_id(self, prefix):
+        with self.act_lock:
+            self.n_acts += 1
+            return f"{prefix}-{os.getpid()}-{self.n_acts}"
+
+    def make_act(self, act, source, operator=None, act_id=None, expect=None, **args):
+        return {"id": str(act_id) if act_id is not None else self.new_id(source), "act": act, "source": source,
+                "operator": operator if operator is not None else getattr(self.args, "operator", None),
+                "expect": expect or None, "args": args, "t_mono": time.monotonic(), "wall": time.time(),
+                "result": None, "reason": None, "done": threading.Event()}
+
+    def log_act(self, rec, result, reason):
+        """One line per act in console_events.jsonl (whatever its source) and the last 20 in /state.acts."""
+        row = {"t_mono": round(rec["t_mono"], 3), "wall": round(rec["wall"], 3), "id": rec["id"],
+               "source": rec["source"], "operator": rec.get("operator"), "act": rec["act"], "args": rec.get("args") or {},
+               "result": result, "reason": reason, "t_done": round(time.monotonic(), 3)}
+        with self.log_lock:
+            try:
+                self.events_log.write(workspace.dumps(row) + "\n")
+            except (OSError, ValueError):  # the log is closed at shutdown: the act itself stands
+                pass
+            self.acts_recent.append({k: row[k] for k in ("id", "act", "source", "operator", "result", "reason", "t_mono")})
+
+    def finish(self, rec, result, reason=None):
+        rec["result"], rec["reason"] = result, reason
+        self.log_act(rec, result, reason)
+        if result == "refused":
+            self.event(f"{rec['source']} [{rec['act']}] refused: {reason}")
+        rec["done"].set()
+        return rec
+
+    @staticmethod
+    def act_reply(rec, **extra):
+        res = rec["result"] or "queued"
+        return {"ok": res != "refused", "id": rec["id"], "act": rec["act"], "result": res,
+                "reason": rec["reason"] if rec["result"] else "the console's main loop has not handled it yet", **extra}
+
+    @staticmethod
+    def validate_act(msg):
+        """What is wrong with an HTTP act before it is queued (None: fine)."""
+        act = msg.get("act")
+        if act not in ACTS:
+            return f"unknown act {act!r}"
+        if msg.get("id") in (None, ""):
+            return "id is required (a client uuid; a retry with the same id never acts twice)"
+        if msg.get("source", "panel") not in ACT_SOURCES:
+            return f"source must be one of {', '.join(ACT_SOURCES)}"
+        if msg.get("expect") is not None and not isinstance(msg["expect"], dict):
+            return "expect must be an object"
+
+        def num(*keys):
+            for k in keys:
+                v = msg.get(k)
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                    return f"{act} needs a finite number {k}"
+        if act == "goal":
+            return num("ahead", "left")
+        if act == "goal_odom":
+            return num("x", "y") or (None if msg.get("seq") not in (None, "") and msg.get("check_id") not in (None, "")
+                                     else "goal_odom needs seq and check_id")
+        if act == "tag" and not isinstance(msg.get("n"), int):
+            return "tag needs the attempt number n"
+        if act == "lease" and msg.get("holder") and msg.get("until") is None and msg.get("ttl_s") is None:
+            return "lease needs until (unix seconds) or ttl_s"
+        return None
+
+    def submit(self, msg):
+        """POST /act from the panel's HTTP thread (the panel page, the hub, Studio's gateway through the hub). E-STOP
+        runs here and now; every other act is validated, a repeated id returns its first result, then it is queued for
+        the main loop and the reply waits up to ACT_WAIT_S for its result. Returns (HTTP code, reply)."""
+        if msg.get("act") == "estop":
+            src = msg.get("source") or "panel"
+            return 200, self.estop(f"{src} E-STOP", operator=msg.get("operator"), act_id=msg.get("id"),
+                                   kind=src if src in ACT_SOURCES else "panel")
+        bad = self.validate_act(msg)
+        if bad:
+            return 400, {"ok": False, "id": msg.get("id"), "act": msg.get("act"), "result": "refused", "reason": bad}
+        args = {k: v for k, v in msg.items() if k not in ("act", "id", "source", "operator", "expect")}
+        key = str(msg["id"])
+        with self.act_lock:
+            now = time.monotonic()
+            for k in [k for k, r in self.acts_by_id.items() if now - r["t_mono"] > ACT_ID_TTL_S]:
+                del self.acts_by_id[k]
+            rec = self.acts_by_id.get(key)
+            repeat = rec is not None
+            if not repeat:
+                rec = self.acts_by_id[key] = self.make_act(msg["act"], msg.get("source") or "panel", msg.get("operator"),
+                                                           key, msg.get("expect"), **args)
+        if not repeat:
+            self.inbox.put(("act", rec, rec["source"]))
+        rec["done"].wait(ACT_WAIT_S)
+        return 200, self.act_reply(rec, repeat=repeat)
+
+    def act(self, key, source="key", **args):
+        """A key (terminal, script, the remote) on the main loop, now; returns the act record (None for E-STOP)."""
+        if key == "o":
+            self.estop("operator key" if source == "key" else f"{source} o", kind=source)
+            if not self.args.replay:
+                self.node_cmd(cmd="quit")
+            return None
+        return self.run_act(self.make_act(key, source, **args))
+
+    def run_act(self, rec):
+        """Main loop: one act -> done | refused (with its reason) | pending (a goal or Clear map waits for the node to
+        confirm it; check_pending ends it). Every result goes to console_events.jsonl."""
+        why = self.expect_mismatch(rec.get("expect"))
+        if why:
+            return self.finish(rec, "refused", why)
+        handler = {"goal": self.act_goal, "goal_odom": self.act_goal_odom, "arm": self.act_arm, "quit": self.act_quit,
+                   "lease": self.act_lease, "tag": self.act_tag}.get(rec["act"], self.act_key)
+        try:
+            out = handler(rec)
+        except (KeyError, TypeError, ValueError) as exc:
+            out = ("refused", f"bad arguments: {type(exc).__name__}: {exc}")
+        if out is not None:
+            self.finish(rec, *out)
+        return rec
+
+    def expect_mismatch(self, expect):
+        """An act's `expect` against the console now (a stale page must not act on a state that has changed)."""
+        if not expect:
+            return None
+        now = {"session": self.dir.name, "runner": self.runner_label(), "phase": self.node_status.get("phase"),
+               "goal_seq": self.goal_seq, "attempts": len(self.attempts.rows)}
+        for k, v in expect.items():
+            if k not in now:
+                return f"unknown expect field {k!r} (session, runner, phase, goal_seq, attempts)"
+            if now[k] != v:
+                return f"the state changed: {k} is {now[k]!r} now, the page expected {v!r}; look again"
+        return None
+
+    def check_pending(self):
+        """Main loop (poll): end the acts that wait for the node (goal read-back, Clear map)."""
+        now = time.monotonic()
+        for p in list(self.pending):
+            rec, deadline, check, timeout_reason = p
+            out = check()
+            if out is None and now > deadline:
+                out = ("refused", timeout_reason)
+            if out is not None:
+                self.pending.remove(p)
+                self.finish(rec, *out)
+
+    def pending_goal(self):
+        return next((p[0] for p in self.pending if p[0]["act"] in ("goal", "goal_odom")), None)
+
+    # -- the keys ---------------------------------------------------------------------------------------------
+    def act_key(self, rec):
+        key = rec["act"]
+        if key == "?":
+            for line in HELP.splitlines():
+                self.event(line.strip())
+            return "done", None
         if "runner" not in self.procs:
-            self.event(f"[{key}] ignored: the runner is not started (ARM first)")
-            return
+            return "refused", "the runner is not started (Arm first)"
         r, st = self.procs["runner"], self.runner_state
         if key == "s":
+            if st["estop"]:
+                return "refused", "the runner is in E-STOP: end the session"
             if self.args.mode == "sim" and self.args.remote_start:
                 (self.dir / "remote" / "start").touch()  # virtual remote Start (enables SONIC's planner)
                 self.event("operator: remote Start")
@@ -496,52 +700,17 @@ class Session:
             if self.args.mode == "sim":
                 threading.Timer(1.5, lambda: (self.dir / "release.flag").touch()).start()
                 self.event("sim: gantry releases in 1.5 s")
-        elif key == "g":
-            if not st["control"] or st["estop"]:
-                # the stream must never be on before SONIC controls the robot: SONIC would take control tracking
-                # plans anchored on the hanging robot (seen in simulation 2026-10-24: the robot ended crouched)
-                self.event("GO refused: Start SONIC first (runner not in CONTROL)" if not st["estop"]
-                           else "GO refused: runner is in E-STOP")
-                return
-            settle = self.go_settle_left()
-            if settle > 0:
-                # a GO right after Start SONIC walks off a stand SONIC has not settled (sim, 2026-10-27: GO 0.2 s
-                # after CONTROL, the virtual gantry let go mid-step and the robot fell)
-                self.event(f"GO refused: SONIC is settling the stand ({settle:.1f} s left)")
-                return
-            if self.args.mode == "robot" and rehearsal_running():
-                # a rehearsal beside the live robot shares the GPU and CPU: the robot walks only when it has ended
-                self.event("GO refused: a rehearsal is running on this PC (about a minute); GO when it has ended")
-                return
-            if st["iface"] != "ZMQ":
-                r.key("#")
-                time.sleep(0.2)
-            if not st["stream"]:
-                r.key("\n")  # ZMQ streaming on
-            if not self.args.replay and not self.node_ready():
-                self.event("GO refused: the student node is still starting (planner warm-up); wait for 'node: node_up'")
-                return
+            return "done", "SONIC start sent"
+        if key == "g":
+            return self.act_go(rec)
+        if key == "h":
             if self.args.replay:
-                if "node" not in self.procs:
-                    py = str(ROOT / ".venv/bin/python")
-                    self.procs["node"] = Proc("node", [py, "-u", "tools/stream_replay.py", self.args.replay,
-                                                       "--slow", str(self.args.replay_slow),
-                                                       "--bind", f"tcp://127.0.0.1:{self.ports['stream']}"],
-                                              self.dir / "node.log",
-                                              self.env)
-                    self.event("operator: GO (stream on, recorded reference plays)")
-                return
-            if self.node_cmd(cmd="go"):
-                self.event("operator: GO (stream on, student plans)")
-                self.attempts.start(time.monotonic() - self.t0, self.node_status, goal_rel=self.goal_rel)
-            else:
-                self.event("GO NOT DELIVERED: the node did not answer (stream is on, the student is not planning)")
-        elif key == "h":
-            if not self.args.replay:
-                self.node_cmd(cmd="stand")
-                self.event("operator: student stand")
-                self.attempts.close(time.monotonic() - self.t0, "operator stand", self.node_status)
-        elif key == "t":
+                return "refused", "replay: no student node to stand"
+            ok = self.node_cmd(cmd="stand")
+            self.event("operator: student stand" if ok else "STAND NOT DELIVERED: the node did not answer")
+            self.attempts.close(time.monotonic() - self.t0, "operator stand", self.node_status)
+            return ("done", "student stand") if ok else ("refused", "the node did not answer: Takeover or E-STOP")
+        if key == "t":
             r.key("@")  # SONIC's own planner (safety reset; streaming off)
             if self.args.replay and "node" in self.procs:
                 self.procs["node"].stop()
@@ -549,35 +718,305 @@ class Session:
                 self.node_cmd(cmd="stand")
             self.event("operator: TAKEOVER -> SONIC planner")
             self.attempts.close(time.monotonic() - self.t0, "takeover", self.node_status)
-        elif key == "o":
-            self.estop("operator key")
-            if not self.args.replay:
-                self.node_cmd(cmd="quit")
-        elif key == "c":
-            if not self.args.replay:
-                if self.node_cmd(cmd="clear_map"):
-                    self.cleared_t = time.monotonic() - self.t0
-                self.event("operator: CLEAR MAP (the node maps again from here; walks wait 10 s)")
-        elif key == "r" and self.args.mode == "sim":
+            return "done", "takeover: SONIC's planner, standing"
+        if key == "c":
+            return self.act_clear(rec)
+        if key == "r" and self.args.mode == "sim":
             (self.dir / "release.flag").touch()
             self.event("sim: gantry released")
-        elif key == "?":
-            for line in HELP.splitlines():
-                self.event(line.strip())
+            return "done", "gantry released"
+        return "refused", f"unknown key {key!r}"
 
-    def estop(self, source):
-        """Runner damping now: its global `o` works in every input interface (keyboard, gamepad, ZMQ stream).
-        Safe from any thread; the node is told to quit by the main loop."""
+    def act_go(self, rec):
+        """GO: refused with every reason the gate has (go_locks), checked BEFORE the runner is switched to the ZMQ
+        stream (a refused GO leaves the runner as it was). Opens an attempt with the goal, start check and rehearsal set
+        in force."""
+        locks = self.go_locks(rec["source"])
+        if locks:
+            return "refused", "; ".join(locks)
+        r, st = self.procs["runner"], self.runner_state
+        # the stream is never on before SONIC controls the robot (go_locks): SONIC would take control tracking plans
+        # anchored on the hanging robot (seen in simulation 2026-10-24: the robot ended crouched)
+        if st["iface"] != "ZMQ":
+            r.key("#")
+            time.sleep(0.2)
+        if not st["stream"]:
+            r.key("\n")  # ZMQ streaming on
+        if self.args.replay:
+            if "node" not in self.procs:
+                py = str(ROOT / ".venv/bin/python")
+                self.procs["node"] = Proc("node", [py, "-u", "tools/stream_replay.py", self.args.replay,
+                                                   "--slow", str(self.args.replay_slow),
+                                                   "--bind", f"tcp://127.0.0.1:{self.ports['stream']}"],
+                                          self.dir / "node.log", self.env)
+                self.event("operator: GO (stream on, recorded reference plays)")
+            return "done", "replay: the recorded reference plays"
+        if not self.node_cmd(cmd="go"):
+            self.event("GO NOT DELIVERED: the node did not answer (stream is on, the student is not planning)")
+            return "refused", "the node did not answer (the stream is on, the student is not planning): Stand or Takeover"
+        self.event("operator: GO (stream on, student plans)")
+        ctx, args = self.goal_ctx, rec["args"]
+        self.attempts.start(time.monotonic() - self.t0, self.node_status, goal_rel=self.goal_rel,
+                            goal_seq=self.goal_seq, goal_kind=ctx.get("kind", "launch"), goal_odom=ctx.get("odom"),
+                            check_id=args.get("check_id") or ctx.get("check_id"),
+                            start_check=args.get("start_check") or ctx.get("start_check"),
+                            rehearsal=args.get("rehearsal") or ctx.get("rehearsal"),
+                            odom=getattr(self.args, "odom", None), odom_state=self.node_status.get("odom"),
+                            operator=rec.get("operator"), source=rec["source"], act_id=rec["id"])
+        return "done", f"GO: attempt {len(self.attempts.rows)}"
+
+    def act_clear(self, rec):
+        """Clear map: done when the node reports map_cleared (then GO waits CLEAR_MAP_SCAN_S of fresh scan)."""
+        if self.args.replay:
+            return "refused", "replay: no planner"
+        if not self.node_ready():
+            return "refused", "the student node is not up yet (it starts on Arm)"
+        if self.node_status.get("phase") in ("PRESCAN", "RUN"):
+            return "refused", "stand first: the walk plans on this map"
+        t_sent = time.monotonic()
+        if not self.node_cmd(cmd="clear_map"):
+            return "refused", "the node did not answer"
+        self.event("operator: CLEAR MAP (the node maps again from here; walks wait 10 s)")
+
+        def check():
+            for e in reversed(self.node_events):
+                if float(e.get("t", 0.0)) < t_sent - 0.01:
+                    break
+                if e["event"] == "map_cleared":
+                    self.cleared_t = float(e["t"]) - self.t0
+                    return "done", f"map cleared; GO waits {CLEAR_MAP_SCAN_S:.0f} s of scan"
+                if e["event"] == "command_refused" and e.get("cmd") == "clear_map":
+                    return "refused", f"the node refused: {e.get('reason')}"
+            return None
+        self.pending.append((rec, time.monotonic() + CLEAR_READBACK_S, check, "the node did not confirm Clear map"))
+        return None
+
+    # -- goals --------------------------------------------------------------------------------------------------
+    def next_seq(self):
+        return max([s for s in self.seqs if isinstance(s, int) and not isinstance(s, bool)] + [0]) + 1
+
+    def send_goal(self, rec, seq, ctx, **cmd):
+        """Deliver a goal with `seq`; it counts (goal_t) only once the node's status echoes the seq within
+        GOAL_READBACK_S, else the act is refused "goal not confirmed by the node". Until then no goal counts."""
+        if self.args.replay:
+            return "refused", "replay: no planner"
+        if not self.node_ready():
+            return "refused", "the student node is still starting (planner warm-up)"
+        if seq in self.seqs:
+            return "refused", f"goal seq {seq!r} was already used in this session"
+        old = self.pending_goal()
+        if old is not None:
+            self.pending = [p for p in self.pending if p[0] is not old]
+            self.finish(old, "refused", f"superseded by act {rec['id']}")
+        self.seqs.add(seq)
+        self.goal_t = None  # nothing counts until the node has read this one back
+        if not self.node_cmd(cmd="goal", seq=seq, **cmd):
+            self.event("goal NOT DELIVERED: the node did not answer")
+            return "refused", "the node did not answer"
+
+        def check():
+            ns = self.node_status
+            if ns.get("goal_seq") != seq:
+                return None
+            self.goal_t, self.goal_seq, self.goal_xy = time.monotonic() - self.t0, seq, ns.get("goal")
+            self.goal_rel = tuple(ctx["rel"]) if ctx.get("rel") else None
+            self.goal_ctx = dict(ctx, seq=seq, t=round(self.goal_t, 2))
+            g = ns.get("goal") or [float("nan")] * 2
+            self.event(f"goal {seq} read back by the node: odom ({g[0]:.2f}, {g[1]:.2f})")
+            return "done", f"the node read back goal {seq}"
+        self.pending.append((rec, time.monotonic() + GOAL_READBACK_S, check, "goal not confirmed by the node"))
+        return None
+
+    def act_goal(self, rec):
+        """`goal {ahead, left}`: relative to the robot now (the panel's map tap, the terminal's n)."""
+        a, l_ = float(rec["args"]["ahead"]), float(rec["args"]["left"])
+        if not (math.isfinite(a) and math.isfinite(l_)):
+            return "refused", "non-finite goal"
+        self.event(f"{rec['source']}: new goal {a:.1f} m ahead {l_:+.1f} m left")
+        return self.send_goal(rec, self.next_seq(), {"kind": "rel", "rel": [a, l_], "source": rec["source"],
+                                                     "operator": rec.get("operator")}, ahead=a, left=l_)
+
+    def act_goal_odom(self, rec):
+        """`goal_odom {x, y, seq, check_id}`: a goal already converted to this node's odometry frame (the hub's
+        send_goal after its start check). Optional context stored with the next attempt: start_check (the check in
+        force), rehearsal (the rehearsal set: names + verdict), goal_scene, scan."""
+        args = rec["args"]
+        x, y = float(args["x"]), float(args["y"])
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return "refused", "non-finite goal"
+        if args.get("seq") in (None, "") or args.get("check_id") in (None, ""):
+            return "refused", "goal_odom needs seq and check_id"
+        ctx = {"kind": "odom", "odom": [x, y], "check_id": args["check_id"], "source": rec["source"],
+               "operator": rec.get("operator"), "start_check": args.get("start_check") or args.get("check"),
+               "rehearsal": args.get("rehearsal") or args.get("rehearsals"), "goal_scene": args.get("goal_scene"),
+               "scan": args.get("scan")}
+        self.event(f"{rec['source']}: goal odom ({x:.2f}, {y:.2f}), check {args['check_id']}")
+        return self.send_goal(rec, args["seq"], ctx, frame="odom", x=x, y=y)
+
+    def goal_lock(self):
+        """Why the goal in force does not count for a GO now (None: it does). A goal counts once the node read it
+        back, after the start of this cycle (cycle), while the node still has it; a robot's launch goal never."""
+        p = self.pending_goal()
+        if p is not None:
+            return "the node has not read back the goal just sent yet"
+        t, why = self.cycle()
+        ns = self.node_status
+        if self.goal_t is not None:
+            if t is not None and self.goal_t < t:
+                return f"no goal sent since {why}: send the goal again (one goal per attempt, after Clear map)"
+            if ns.get("goal_seq") != self.goal_seq or (
+                    self.goal_xy is not None and ns.get("goal") is not None and math.dist(ns["goal"], self.goal_xy) > 0.01):
+                return "the node's goal changed outside the console: send the goal again"
+            return None
+        if self.start_goal_counts and not self.seqs and not self.attempts.rows and self.cleared_t is None:
+            return None  # a sim console's launch goal, first cycle only
+        if self.args.mode == "robot" and not self.seqs:
+            return ("no goal sent: send it (Studio's Send goal after the start check, or the panel's Set goal); "
+                    "the launch goal never counts on the robot")
+        return f"no goal confirmed by the node since {why}: send a goal" if why else "no goal confirmed: send a goal"
+
+    def cycle(self):
+        """(session time this GO cycle began, what began it): max(CONTROL, the last attempt's end, the last Clear
+        map). A goal counts only when the node read it back after that."""
+        cands = [(self.control_t, "Start SONIC"), (self.cleared_t, "Clear map")]
+        ended = [r for r in self.attempts.rows if r.get("t_end") is not None]
+        if ended:
+            last = max(ended, key=lambda r: r["t_end"])
+            cands.append((last["t_end"], f"attempt {last['n']} ended"))
+        cands = [c for c in cands if c[0] is not None]
+        return max(cands, key=lambda c: c[0]) if cands else (None, None)
+
+    def scan_left(self):
+        if self.cleared_t is None:
+            return 0.0
+        return max(0.0, CLEAR_MAP_SCAN_S - (time.monotonic() - self.t0 - self.cleared_t))
+
+    # -- the GO gate --------------------------------------------------------------------------------------------
+    def go_locks(self, source=None):
+        """Why GO would be refused now, in the order to fix them (empty: it would be accepted). With
+        source "panel" the Studio lease counts too."""
+        st, a = self.runner_state, self.args
+        out = []
+        if "runner" not in self.procs:
+            out.append("the runner is not started (Arm first)")
+        elif st["estop"]:
+            out.append("the runner is in E-STOP: end the session")
+        elif not st["control"]:
+            out.append("Start SONIC first (the runner is not in CONTROL)")
+        elif self.go_settle_left() > 0:
+            # a GO right after Start SONIC walks off a stand SONIC has not settled (sim, 2026-10-27: GO 0.2 s after
+            # CONTROL, the virtual gantry let go mid-step and the robot fell)
+            out.append(f"SONIC is settling the stand ({self.go_settle_left():.1f} s left)")
+        if a.mode == "robot" and rehearsal_running():
+            # a rehearsal beside the live robot shares the GPU and CPU: the robot walks only when it has ended
+            out.append("a rehearsal is running on this PC (about a minute); GO when it has ended")
+        if not a.replay:
+            ns = self.node_status
+            if not self.node_ready():
+                out.append("the student node is still starting (planner warm-up)")
+            elif ns.get("phase") in ("PRESCAN", "RUN"):
+                out.append("the student is already walking")
+            if (ns.get("odom") or {}).get("lost"):
+                out.append(f"odometry lost ({ns['odom']['lost']}): no walk on legs alone; end the session")
+            why = self.goal_lock()
+            if why:
+                out.append(why)
+            left = self.scan_left()
+            if left > 0:
+                out.append(f"Clear map: the node is still scanning ({left:.0f} s left)")
+        if source == "panel":
+            out += self.lease_locks()
+        return out
+
+    def lease_active(self):
+        ls = self.lease
+        return ls if ls and ls.get("holder") and time.time() < ls["until"] else None
+
+    def lease_locks(self):
+        ls = self.lease_active()
+        return [f"Studio holds the operator lease ({ls['holder']}): GO from Studio, or release the lease there"] if ls else []
+
+    def act_lease(self, rec):
+        """`lease {holder, until | ttl_s}` from Studio's gateway (through the hub): while held, GO from the phone panel
+        is refused. until: unix seconds (a value below 1e9 is read as this PC's monotonic clock); holder null: released."""
+        if rec["source"] not in ("studio", "hub"):
+            return "refused", "the operator lease comes from Studio's gateway (through the hub)"
+        args = rec["args"]
+        if not args.get("holder"):
+            self.lease = None
+            return "done", "lease released"
+        until = float(args["until"]) if args.get("until") is not None else time.time() + float(args["ttl_s"])
+        if until < 1e9:
+            until = time.time() + (until - time.monotonic())
+        self.lease = {"holder": str(args["holder"]), "until": until, "lease_id": args.get("lease_id")}
+        return "done", f"lease held by {args['holder']} for {until - time.time():.1f} s"
+
+    # -- the rest -----------------------------------------------------------------------------------------------
+    def act_arm(self, rec):
+        if "runner" in self.procs:
+            return "done", "already armed"
+        self.event(f"{rec['source']}: ARM, starting the runner")
+        self.start_runner()
+        return "done", "runner starting (stand ramp about 25 s)"
+
+    def act_quit(self, rec):
+        self.event(f"{rec['source']}: end session")
+        self.quit_requested = True
+        return "done", "ending the session"
+
+    def act_tag(self, rec):
+        args = rec["args"]
+        ok = self.attempts.tag(int(args.get("n", 0)), args.get("tag"), args.get("note"))
+        return ("done", None) if ok else ("refused", "no such attempt, or an unknown tag")
+
+    def runner_label(self):
+        st = self.runner_state
+        return ("not started" if "runner" not in self.procs else "E-STOP" if st["estop"] else "CONTROL"
+                if st["control"] else "INIT done" if st["init"] else "booting")
+
+    def estop_confirmed(self, wait_s=0.0):
+        """The runner's log shows its EMERGENCY STOP (looked for up to wait_s)."""
         r = self.procs.get("runner")
-        if r is None or not r.alive():
+        end = time.monotonic() + wait_s
+        while r is not None:
+            if self.estop_logged:
+                return True
+            with r.lines_lock:
+                tail = r.lines[-80:]
+            if any(any(s_ in line for s_ in ESTOP_LINES) for _, line in tail):
+                return True
+            if time.monotonic() >= end:
+                break
+            time.sleep(0.01)
+        return False
+
+    def estop(self, source, operator=None, act_id=None, kind=None):
+        """Runner damping now: its global `o` works in every input interface (keyboard, gamepad, ZMQ stream). Safe from
+        any thread (the panel's HTTP thread, the remote watcher's pump); the node is told to quit by the main loop.
+        Returns the act reply {ok, id, result, reason, key_sent, runner_alive, runner, confirmed, t_mono}: ok = the
+        console took it; key_sent = a live runner got its `o`; confirmed = the runner's log shows EMERGENCY STOP
+        (looked for ESTOP_CONFIRM_S)."""
+        kind = kind or (source.split()[0] if source.split() and source.split()[0] in ACT_SOURCES else "key")
+        rec = self.make_act("estop", kind, operator, act_id, detail=source)
+        r = self.procs.get("runner")
+        alive = r is not None and r.alive()
+        if not alive:
             self.event(f"E-STOP ({source}): no runner running, nothing holds the motors")
-            return
-        r.key("o")
-        first = not self.runner_state["estop"]
-        self.runner_state["estop"] = True
-        self.event(f"E-STOP ({source}): runner damping")
-        if first and source != "operator key":
-            self.inbox.put(("node_quit", None, source))
+            reason = "no runner running: nothing this console started holds the motors"
+        else:
+            r.key("o")
+            first = not self.runner_state["estop"]
+            self.runner_state["estop"] = True
+            self.event(f"E-STOP ({source}): runner damping")
+            if first and kind != "key":
+                self.inbox.put(("node_quit", None, source))
+            reason = "runner damping"
+        confirmed = alive and self.estop_confirmed(ESTOP_CONFIRM_S)
+        reply = {"ok": True, "id": rec["id"], "act": "estop", "result": "done", "reason": reason, "key_sent": alive,
+                 "runner_alive": r is not None and r.alive(), "runner": self.runner_label(), "confirmed": confirmed,
+                 "t_mono": time.monotonic()}
+        self.log_act(rec, "done", reason + ("; runner confirmed" if confirmed else ""))
+        return reply
 
     def on_remote(self, line):
         """remote_watch.py output (pump thread): Select stops at once; D-up queues a takeover while streaming.
@@ -614,23 +1053,51 @@ class Session:
             else:
                 self.event(f"remote: {b}")
 
+    def driving(self):
+        """(what drives the robot, its source key, the runner's motion set): the panel's text and Studio's HUD."""
+        st = self.runner_state
+        if "runner" not in self.procs:
+            return "Unitree controller", "unitree", None
+        if st["iface"] == "ZMQ" and st["stream"]:
+            return ("recorded reference" if self.args.replay else "student stream"), (
+                "replay" if self.args.replay else "student"), None
+        if st["iface"] == "GAMEPAD" and st["control"]:
+            mset = RUNNER_SETS.get(st.get("set")) if st.get("set") else None
+            return "SONIC planner" + (f" ({mset} set)" if mset else ""), "sonic_planner", mset
+        return "SONIC reference", "sonic_reference", None
+
     def panel_state(self):
+        """The panel's /state (strict JSON through workspace.dumps), also what the hub and Studio read: the runner, the
+        node, the workspace, plus the act and GO-gate fields of CONTRACT §4.1 (go_locks is empty iff GO from Studio or
+        the hub would be accepted now; go_locks_panel adds the Studio lease for the phone panel's GO)."""
         st, ns = self.runner_state, self.node_status
-        runner = ("not started" if "runner" not in self.procs else "E-STOP" if st["estop"] else "CONTROL"
-                  if st["control"] else "INIT done" if st["init"] else "booting")
-        src = "Unitree controller" if "runner" not in self.procs else "student stream" if (
-            st["iface"] == "ZMQ" and st["stream"]) else (
-            "SONIC planner" if st["iface"] == "GAMEPAD" and st["control"] else "SONIC reference")
-        if src == "SONIC planner" and st.get("set"):
-            src += f" ({RUNNER_SETS[st['set']]} set)"
-        return {"t": time.monotonic() - self.t0, "mode": "ROBOT " + str(self.args.iface) if self.args.mode == "robot"
-                else "SIMULATION", "runner": runner, "driving": src, "phase": ns.get("phase"),
+        now = time.monotonic()
+        src, src_key, mset = self.driving()
+        locks = self.go_locks()
+        with self.log_lock:
+            acts = list(self.acts_recent)
+        lease = self.lease_active()
+        ctx = self.goal_ctx
+        return {"t": now - self.t0, "console_t_mono": now, "session": self.dir.name,
+                "mode": "ROBOT " + str(self.args.iface) if self.args.mode == "robot" else "SIMULATION",
+                "runner": self.runner_label(), "estop_confirmed": bool(self.estop_logged), "driving": src,
+                "driving_source": src_key, "motion_set": mset, "phase": ns.get("phase"),
                 "goal_dist_m": ns.get("goal_dist_m"), "latency_s": ns.get("latency_s"),
                 "pelvis_z_m": ns.get("pelvis_z_m"), "tilt_rad": ns.get("tilt_rad"), "cloud_age_s": ns.get("cloud_age_s"),
-                "xy": ns.get("xy"),
+                "xy": ns.get("xy"), "odom": ns.get("odom"),
+                "standing_s": None if self.control_t is None or st["estop"] else round(now - self.t0 - self.control_t, 1),
+                "go_locks": locks, "go_locks_panel": locks + self.lease_locks(),
+                "lease": None if lease is None else {"holder": lease["holder"], "until": lease["until"],
+                                                     "left_s": round(lease["until"] - time.time(), 1)},
+                "goal": {"seq": self.goal_seq, "ok": self.goal_lock() is None, "kind": ctx.get("kind", "launch"),
+                         "rel": list(self.goal_rel) if self.goal_rel else None, "odom": ctx.get("odom"),
+                         "node": ns.get("goal"), "check_id": ctx.get("check_id"), "source": ctx.get("source"),
+                         "confirmed_t": None if self.goal_t is None else round(self.goal_t, 2)},
+                "goal_seq": self.goal_seq, "clear_map_scan_left_s": round(self.scan_left(), 1), "acts": acts,
+                "operator": getattr(self.args, "operator", None),
                 "record": self.record_line().strip(), "events": [f"{t:6.1f}  {e}" for t, e in self.events[-12:]][::-1],
                 "dir": str(self.dir), "remote": dict(self.remote), "node_ready": self.node_ready(),
-                "procs": {k: p.alive() for k, p in self.procs.items()}, **self.workspace()}
+                "procs": {k: p.alive() for k, p in self.procs.items()}, **self.workspace(locks)}
 
     def workspace_ctx(self):
         t_map, m = self.map_cache
@@ -641,12 +1108,13 @@ class Session:
                 "temps": self.temps, "machine_busy": (getattr(self.args, "machine", None) or {}).get("busy") or [],
                 "near_body": workspace.near_body(m) if m is not None and time.monotonic() - t_map < 5.0 else None,
                 "attempts": self.attempts.public(), "cleared_t": self.cleared_t, "control_t": self.control_t,
-                "goal_rel": self.goal_rel, "goal_t": self.goal_t, "profile": prof}
+                "goal_rel": self.goal_rel, "goal_t": self.goal_t, "goal_ok": self.goal_lock() is None, "profile": prof}
 
-    def workspace(self):
+    def workspace(self, go_locks=None):
         """The panel's robot-day view: checks, ladder, attempts and what this session runs (g1deploy/workspace.py)."""
         ctx = self.workspace_ctx()
         ctx["checks"] = workspace.checks(ctx)
+        ctx["go_locks"] = self.go_locks() if go_locks is None else go_locks
         a, prof = self.args, ctx["profile"]
         ns = self.node_status
         return {"checks": ctx["checks"], "ladder": workspace.ladder(ctx), "attempts": ctx["attempts"],
@@ -656,6 +1124,7 @@ class Session:
                           "rules": Path(a.rules).name if getattr(a, "rules", None) else None, "guards": a.guards,
                           "lookahead_m": a.goal_lookahead, "rear_blind_deg": a.rear_blind_deg,
                           "rear_blind_range_m": a.rear_blind_range_m, "robot": getattr(a, "robot", None),
+                          "odom": getattr(a, "odom", None),
                           "task": Path(self.task).parent.name if getattr(self, "task", None) else None},
                 "node": {k: ns.get(k) for k in ("plans", "rule", "no_safe", "max_lag_s", "overruns", "tilt_estop",
                                                  "guards", "last_guard", "calm_hold", "stream_ahead", "standing")},
@@ -682,19 +1151,6 @@ class Session:
             if m.get("ok"):
                 self.map_cache = (time.monotonic(), m)
             return m
-
-    def new_goal(self, ahead, left):
-        if self.args.replay:
-            self.event("goal: no planner in replay mode")
-            return
-        if not self.node_ready():
-            self.event("goal refused: the student node is still starting (planner warm-up)")
-            return
-        if self.node_cmd(cmd="goal", ahead=ahead, left=left):
-            self.goal_rel, self.goal_t = (ahead, left), time.monotonic() - self.t0
-            self.event(f"operator: new goal {ahead:.1f} m ahead {left:+.1f} m left")
-        else:
-            self.event("goal NOT DELIVERED: the node did not answer")
 
     # -- screen ---------------------------------------------------------------------------------------------
     def record_line(self):
@@ -752,6 +1208,8 @@ class Session:
             if name in self.procs:
                 self.procs[name].stop(signal.SIGTERM if name in ("sim", "lio") else signal.SIGINT)
         self.frames.close()
+        with self.log_lock:
+            self.events_log.close()
 
 
 # ------------------------------------------------------------------------------------------------- main
@@ -786,7 +1244,11 @@ def run_console(args):
     if args.panel:
         from g1deploy.panel import start_panel
 
-        _, token = start_panel(sess, args.panel, token=os.environ.get("G1_PANEL_TOKEN") or None)
+        try:  # the deploy PC's one panel token (G1_PANEL_TOKEN, else ~/.config/g1-deploy/panel_token): a restarted
+            token = service_token.panel_token()  # hub and Studio's gateway reach this console with it
+        except OSError:
+            token = None  # a random one; panel_url.txt has it
+        _, token = start_panel(sess, args.panel, token=token)
         sess.panel_url = f"http://127.0.0.1:{args.panel}/?t={token}"
         (sess.dir / "panel_url.txt").write_text(sess.panel_url + "\n")
         sess.event(f"panel: port {args.panel} (tailnet / this PC only), token in panel_url.txt")
@@ -794,7 +1256,7 @@ def run_console(args):
     old = termios.tcgetattr(sys.stdin) if interactive else None
     if interactive:
         tty.setcbreak(sys.stdin.fileno())
-    step_t, last_draw, result = time.monotonic(), 0.0, 0
+    step_t, last_draw, result, script_goal = time.monotonic(), 0.0, 0, None
     try:
         while True:
             sess.poll()
@@ -810,26 +1272,19 @@ def run_console(args):
                     and not getattr(sess, "_runner_gone", False)):
                 sess.event("runner exited")
                 sess._runner_gone = True
-            panel_quit = False
             while True:
                 try:
                     kind, val, src = sess.inbox.get_nowait()
                 except queue.Empty:
                     break
-                if kind == "key":
+                if kind == "act":  # POST /act (panel page, hub, Studio): its HTTP thread waits for the result
+                    sess.run_act(val)
+                elif kind == "key":  # the remote watcher (D-up = takeover, D-down/left/right = stand)
                     sess.event(f"{src}: [{val}]")
-                    sess.act(val)
-                elif kind == "goal":
-                    sess.new_goal(*val)
+                    sess.act(val, source="remote" if str(src).startswith("remote") else "key", detail=src)
                 elif kind == "node_quit" and not args.replay and "node" in sess.procs:
                     sess.node_cmd(cmd="quit")
-                elif kind == "quit":
-                    sess.event(f"{src}: end session")
-                    panel_quit = True
-                elif kind == "arm":
-                    sess.event(f"{src}: ARM, starting the runner")
-                    sess.start_runner()
-            if panel_quit:
+            if sess.quit_requested:
                 break
             if steps:
                 kind, _, val = steps[0].partition(":")
@@ -837,12 +1292,15 @@ def run_console(args):
                 if kind == "sleep":
                     done = now - step_t >= float(val)
                 elif kind == "key":
-                    sess.act(val)
+                    sess.act(val, source="script")
                     done = True
-                elif kind == "goal":
-                    a_, l_ = map(float, val.split(":"))
-                    sess.new_goal(a_, l_)
-                    done = True
+                elif kind == "goal":  # done once the node has read it back (or it was refused)
+                    if script_goal is None:
+                        a_, l_ = map(float, val.split(":"))
+                        script_goal = sess.act("goal", source="script", ahead=a_, left=l_)
+                    done = script_goal["done"].is_set()
+                    if done:
+                        script_goal = None
                 elif kind == "wait":
                     ns, st = sess.node_status, sess.runner_state
                     done = {"init": st["init"], "control": st["control"], "stream": st["stream"],
@@ -875,13 +1333,13 @@ def run_console(args):
                     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
                     try:
                         a_, l_ = map(float, input("\nnew goal 'ahead left' (m): ").split())
-                        sess.new_goal(a_, l_)
+                        sess.act("goal", ahead=a_, left=l_)
                     except ValueError:
                         sess.event("goal: expected two numbers")
                     tty.setcbreak(sys.stdin.fileno())
                 elif ch == "\x1b":
                     sess.act("o")
-                else:
+                elif ch in "sghtcor?":
                     sess.act(ch)
             elif not interactive:
                 time.sleep(0.05)
@@ -1009,6 +1467,9 @@ def parse_args(argv):
         p.add_argument("--rules", default=None, help="the bundle's deploy rules plugin (a .py file; needed by bundles "
                                                      "whose student config is not the deployed format)")
         p.add_argument("--operator", default=os.environ.get("G1_OPERATOR"), help="who runs the session (metadata)")
+        p.add_argument("--confirm", type=json.loads, default=None, metavar="JSON",
+                       help="the operator's start confirmations, stored in session.json (the hub's checklist, e.g. "
+                            "'{\"gantry\": true, \"estop\": true, \"remote\": true, \"rope\": true}')")
         p.add_argument("--note", default=None, help="free text stored with the session (course, conditions, ...)")
         if mode == "sim":
             p.add_argument("--layout", default="open-3m", help=f"a course under {COURSES} or a layout under {PANELS}")
@@ -1021,6 +1482,9 @@ def parse_args(argv):
                                 "fused: the stand-in + leg odometry in one filter (node --odom fused)")
             p.add_argument("--lio-noise", default=None, help="LIO stand-in drift, e.g. '{\"xy_rw_m\": 0.02}', or an odometry error '{\"scale\": 0.9, \"rotate_deg\": -4}' (tools/sim_lio_bridge.py)")
             p.add_argument("--remote-start", action="store_true", help="press Start on the virtual remote for [s]")
+            p.add_argument("--require-sent-goal", action="store_true",
+                           help="GO needs a goal sent and read back in this cycle, as on the robot (practice sessions); "
+                                "by default a sim console counts its launch goal for the first GO")
             p.add_argument("--viewer", action="store_true", help="open the MuJoCo 3D window (needs a display)")
             p.add_argument("--runner-csv", dest="runner_csv", action="store_true", default=False,
                            help="also write the runner's per-tick CSVs (on by default on the robot)")

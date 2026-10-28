@@ -481,6 +481,91 @@ class PlannerPool:
                 w["proc"].kill()
 
 
+# ---------------------------------------------------------------------------------------------- live view
+VIEW_MAX_POINTS = 4000  # cloud points per view (the request's max_points sets the budget of the next frames)
+VIEW_CLASS_CAP = {1: 0.15, 2: 0.15}  # share kept for self-filtered / rear-blind points; the rest is the fused points
+VIEW_IDLE_S = 5.0  # no `view` request for this long: the perception thread stops building view parts
+VIEW_MEM_PERIOD_S = 1.0  # the memory part is rebuilt at most this often, and only when it changed
+VIEW_PLAN_AHEAD_S = (0.4, 0.9)  # the plan's future frames in a view, from the current tick
+VIEW_HIST_S, VIEW_HIST_DT = 0.5, 0.05  # pose history in a view: the last 0.5 s at 20 Hz
+CLOUD_CLASSES = ("fused", "self-filtered", "rear-blind dropped")
+
+
+def _pick(n, k):
+    """k of n indices, evenly spread (a MID-360 frame is ordered by firing time, so this is spread in space too)."""
+    return np.arange(n) if n <= k else np.linspace(0, n - 1, k).round().astype(np.int64)
+
+
+def cloud_arrays(classes, origin=None, max_points=VIEW_MAX_POINTS):
+    """{0: fused, 1: self-filtered, 2: rear-blind dropped} world points (N, 3) -> (int16 cm xyz relative to `origin`,
+    uint8 class per point, origin, points per class before decimation). Finite points only, clipped to +-327 m. Each
+    class is decimated on its own: classes 1 and 2 keep up to VIEW_CLASS_CAP of the budget, so a rope behind the robot
+    is never crowded out by the floor; class 0 gets the rest."""
+    pts = {c: np.asarray(classes.get(c, np.zeros((0, 3))), dtype=np.float64).reshape(-1, 3) for c in (0, 1, 2)}
+    pts = {c: p[np.isfinite(p).all(1)] for c, p in pts.items()}
+    total = [len(pts[c]) for c in (0, 1, 2)]
+    origin = None if origin is None else np.asarray(origin, dtype=np.float64).reshape(-1, 3)
+    if origin is None or not len(origin) or not np.isfinite(origin).all():
+        allp = np.concatenate([pts[0], pts[1], pts[2]])
+        origin = allp.mean(0) if len(allp) else np.zeros(3)
+    else:
+        origin = origin.mean(0)
+    max_points = max(0, int(max_points))
+    keep = {c: pts[c][_pick(len(pts[c]), int(VIEW_CLASS_CAP[c] * max_points))] for c in (1, 2)}
+    keep[0] = pts[0][_pick(len(pts[0]), max_points - len(keep[1]) - len(keep[2]))]
+    xyz = np.concatenate([keep[0], keep[1], keep[2]])
+    cls = np.concatenate([np.full(len(keep[c]), c, dtype=np.uint8) for c in (0, 1, 2)])
+    cm = np.clip(np.round((xyz - origin) * 100.0), -32767, 32767).astype("<i2")
+    return cm, cls, origin, total
+
+
+def cloud_part(seq, t_mono, cm, cls, origin, total):
+    """The view's `cloud` part from cloud_arrays()."""
+    import base64
+
+    return {"seq": int(seq), "t_mono": float(t_mono), "n": int(len(cm)), "origin": np.round(origin, 4).tolist(),
+            "points_b64": base64.b64encode(np.ascontiguousarray(cm).tobytes()).decode(),
+            "class_b64": base64.b64encode(np.ascontiguousarray(cls).tobytes()).decode(),
+            "total": [int(v) for v in total], "classes": list(CLOUD_CLASSES)}
+
+
+def pack_cloud(seq, t_mono, classes, origin=None, max_points=VIEW_MAX_POINTS):
+    """One lidar frame -> the view's `cloud` part (cloud_arrays, cloud_part)."""
+    return cloud_part(seq, t_mono, *cloud_arrays(classes, origin, max_points))
+
+
+def _u8_height(a):
+    """Heights -> uint8 codes: 255 = none (NaN), else round(min(h, 5.08) / 0.02) (0 = floor)."""
+    out = np.full(a.shape, 255, dtype=np.uint8)
+    ok = np.isfinite(a)
+    out[ok] = np.round(np.clip(a[ok], 0.0, 5.08) / 0.02).astype(np.uint8)
+    return out
+
+
+def memory_layers(memory, lock=None):
+    """The memory's view layers: uint8 support, ceiling (_u8_height) and near-only (0/1), each (nx, ny) C order with
+    the first index x, plus lo (the centre of cell [0][0]) and res. Copied under `lock` (the perception thread writes
+    the layers)."""
+    import contextlib
+
+    with lock if lock is not None else contextlib.nullcontext():
+        sup, ceil = np.array(memory.support, dtype=np.float64), np.array(memory.ceiling, dtype=np.float64)
+        nr = getattr(memory, "near_only", None)
+        near = np.asarray(nr() if callable(nr) else nr if nr is not None else np.zeros(sup.shape, bool), dtype=np.uint8)
+        lo, res = np.asarray(memory.lo, dtype=np.float64).copy(), float(memory.res)
+    return [np.ascontiguousarray(a) for a in (_u8_height(sup), _u8_height(ceil), near)], lo, res
+
+
+def memory_part(seq, epoch, layers, lo, res):
+    """The view's `memory` part: the full grid; cell (i, j) is centred at lo + (i, j) res."""
+    import base64
+
+    b64 = [base64.b64encode(a.tobytes()).decode() for a in layers]
+    return {"seq": int(seq), "epoch": int(epoch), "lo": np.round(lo, 6).tolist(), "res": res,
+            "n": [int(layers[0].shape[0]), int(layers[0].shape[1])], "order": "C, first index x",
+            "support_b64": b64[0], "ceiling_b64": b64[1], "near_b64": b64[2]}
+
+
 # ---------------------------------------------------------------------------------------------- control
 CLEAR_MAP_SCAN_S = 10.0  # after clear_map: standing frames fused before a walk may start
 
@@ -499,7 +584,12 @@ class ControlServer:
       {"cmd": "quit"}                         -> stand, then exit
       {"cmd": "map"}                          -> the memory around the robot as the planner sees it, for the operator
                                                  panel (StudentNode.map_snapshot; answered here, never queued)
-    Used by the operator console (g1deploy/console.py) in simulation and on the robot."""
+      {"cmd": "view", "cloud_after": n, "mem_after": n, "max_points": 4000}
+                                              -> the live view (StudentNode.view_reply: state, pose history, plan
+                                                 frames, odometry health, the last lidar frame by class, the full
+                                                 memory grid; strict JSON; answered here from prebuilt parts)
+    Used by the operator console (g1deploy/console.py) in simulation and on the robot, and by the lab hub's live view
+    poller (view only)."""
 
     def __init__(self, node, bind):
         import zmq
@@ -526,6 +616,12 @@ class ControlServer:
                 except Exception as exc:  # a picture for the operator: never takes the node down
                     out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
                 self.sock.send_string(json.dumps(out, default=float))
+            elif msg.get("cmd") == "view":
+                try:
+                    text = self.node.view_reply(msg)
+                except Exception as exc:  # the live view never takes the node down
+                    text = json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+                self.sock.send_string(text)
             else:
                 self.node.commands.append(msg)
                 self.sock.send_string(json.dumps({"ok": True, "queued": msg.get("cmd")}))
@@ -537,6 +633,11 @@ class StudentNode:
     rules, rules_state = None, None  # a bundle's deploy rules plugin (set in __init__) and its state across replans
     last_landing_tick = 0
     offsets = ()  # track_offset rows (a list from reset_run_state on)
+    # live view (view_reply): what the main loop and the perception thread leave for the control thread
+    plan_seq, memory_epoch, cloud_seq = 0, -1, 0  # active plan changes; make_memory calls (clear_map: +1); frames
+    view_polled, view_max_points = -1e9, VIEW_MAX_POINTS
+    view_cloud = view_mem = view_state = None  # prebuilt cloud / memory parts; (t, qpos36, state age) of the last tick
+    pose_hist = ()  # ((t_mono, x, y, yaw), ...): the last VIEW_HIST_S at 1 / VIEW_HIST_DT
 
     def __init__(self, args):
         self.args = args
@@ -604,6 +705,7 @@ class StudentNode:
             sensor["clear_free"] = True
         self.memory = CloudMemory(xy, rng=np.random.default_rng(self.args.seed), **sensor)
         self.memory.latency = 0.0  # real latency is already in the data; fuse on arrival
+        self.memory_epoch += 1  # the live view's memory.epoch: a new grid (clear_map), lo moves with the robot
         from g1deploy.perception.unitree_lidar import CloudFromSensorFrame, Mount
 
         mount = Mount.load(self.args.mount_calib) if self.args.mount_calib else Mount.nominal()
@@ -631,19 +733,160 @@ class StudentNode:
                     path=path, phase=st.get("phase"), rear_blind_deg=float(self.args.rear_blind_deg or 0.0),
                     rear_blind_range_m=float(self.args.rear_blind_range_m or 0.0), stats=dict(getattr(mem, "stats", {})))
 
+    # -- live view (the hub's 5 Hz poller; ControlServer `view`) --------------------------------------------
+    def view_wanted(self, now=None):
+        """A view was asked for in the last VIEW_IDLE_S: the perception thread builds the view parts (zero cost
+        otherwise)."""
+        return (time.monotonic() if now is None else now) - self.view_polled < VIEW_IDLE_S
+
+    def view_frame(self, t_mono, classes, origin):
+        """Perception thread: the last lidar frame's view part, by class and decimated (prebuilt JSON)."""
+        self.cloud_seq += 1
+        cm, cls, org, total = cloud_arrays(classes, origin, self.view_max_points)
+        part = cloud_part(self.cloud_seq, t_mono, cm, cls, org, total)
+        self.view_cloud = {"seq": self.cloud_seq, "n": part["n"], "json": W.dumps(part),
+                           "arrays": (t_mono, cm, cls, org, total)}
+
+    def view_memory(self, now):
+        """Perception thread: the memory part, rebuilt at most every VIEW_MEM_PERIOD_S; a new seq only when the
+        layers (or the grid: clear_map) changed."""
+        mem = getattr(self, "memory", None)
+        if mem is None or now - getattr(self, "view_mem_t", -1e9) < VIEW_MEM_PERIOD_S:
+            return
+        self.view_mem_t = now
+        layers, lo, res = memory_layers(mem, self.mem_lock)
+        epoch = max(self.memory_epoch, 0)
+        key = b"".join(a.tobytes() for a in layers) + lo.tobytes()
+        old = self.view_mem
+        if old is not None and old["key"] == key and old["epoch"] == epoch:
+            return
+        seq = (old["seq"] if old is not None else 0) + 1
+        self.view_mem = {"seq": seq, "epoch": epoch, "key": key, "json": W.dumps(memory_part(seq, epoch, layers, lo, res))}
+
+    def view_plan(self):
+        """The active plan from the current tick on (its rows start at its anchor tick): the frames VIEW_PLAN_AHEAD_S
+        ahead that exist in it, and its pelvis path (every 5th row)."""
+        act = self.active
+        if act is None or not isinstance(act[0], dict) or act[0].get("qpos") is None:
+            return None
+        q = np.asarray(act[0]["qpos"], dtype=np.float64)
+        j0 = self.tick - int(act[1]) - 1  # the row playing now
+        frames, ts = [], []
+        for dt in VIEW_PLAN_AHEAD_S:
+            j = j0 + int(round(dt / DT))
+            if 0 <= j < len(q):
+                frames.append(q[j])
+                ts.append(dt)
+        return {"seq": int(self.plan_seq), "anchor_tick": int(act[1]), "tick": int(self.tick), "frames": frames,
+                "frames_t": ts, "path": np.round(q[max(j0, 0)::5, :2], 3)}
+
+    def view_route(self, max_points=200):
+        path = getattr(getattr(self, "route", None), "path", None)
+        if path is None:
+            return None
+        p = np.asarray(path, dtype=np.float64).reshape(len(path), -1)[:, :2]
+        return np.round(p[::max(1, int(math.ceil(len(p) / max_points)))], 3)
+
+    def view_mount(self):
+        """The lidar mount in the torso frame (the calibrated one when --mount-calib)."""
+        m = getattr(getattr(self, "from_sensor", None), "mount", None)
+        if m is None:
+            m = getattr(self, "_view_mount", None)
+            if m is None:
+                from g1deploy.perception.unitree_lidar import Mount
+
+                mc = getattr(self.args, "mount_calib", None)
+                m = self._view_mount = Mount.load(mc) if mc else Mount.nominal()
+        return {"pos_torso": np.asarray(m.pos_torso, dtype=np.float64), "rot_torso": np.asarray(m.rot_torso, dtype=np.float64)}
+
+    def odom_state(self, now=None, age_odo=None):
+        """Odometry health, per mode (status `odom` and the live view): fused = the leg + LIO filter's doubt (a jump,
+        a speed mismatch, refused for 0.5 s), LIO lost and why, the LIO pose age; zmq = the LIO odometry age and the
+        leg-odometry watchdog; leg and dds have no LIO (nulls)."""
+        now = time.monotonic() if now is None else now
+        out = {"mode": getattr(self.args, "odom", None) or "dds", "lio_age_s": None, "doubt": False, "lost": None,
+               "watchdog": None}
+        fz = getattr(self, "fused", None)
+        if fz is not None:
+            f = fz.filter
+            t_msg, bad = getattr(fz, "t_msg", None), getattr(f, "bad_since", None)
+            out["lio_age_s"] = None if t_msg is None else round(now - t_msg, 3)
+            out["doubt"] = bool(getattr(f, "discontinuity", None) or fz.speed_alarm
+                                or (bad is not None and now - bad >= 0.5))
+            out["refused_s"] = None if bad is None else round(now - bad, 2)
+            if fz.lost is not None:  # in the precedence FusedOdom.loop marks it with
+                out["lost"] = ("LIO jump" if getattr(f, "discontinuity", None) else "LIO and leg speeds disagree"
+                               if fz.speed_alarm else "LIO refused by the leg / IMU filter"
+                               if getattr(f, "lio_lost", None) is not None else "LIO silent")
+            out["watchdog"] = "speed alarm" if fz.speed_alarm else "ok"
+        elif out["mode"] == "zmq":
+            out["lio_age_s"] = None if age_odo is None else round(float(age_odo), 3)
+            wd = getattr(self, "watchdog", None)
+            if wd is None:
+                out["watchdog"] = "off"
+            elif wd.bad_since is not None:
+                out["doubt"] = True
+                out["watchdog"] = f"LIO and leg speeds disagree for {now - wd.bad_since:.1f} s"
+            else:
+                out["watchdog"] = "ok"
+        return out
+
+    def view_reply(self, msg):
+        """ControlServer `view`: the live view as strict JSON (CONTRACT §2), assembled from references the main loop
+        and the perception thread leave (view_state, pose_hist, status, active, view_cloud, view_mem): this thread
+        shares the GIL with the 50 Hz loop and only joins prebuilt parts. cloud / memory are null when their seq is
+        not newer than cloud_after / mem_after."""
+        now = time.monotonic()
+        try:
+            cloud_after, mem_after = int(msg.get("cloud_after", -1)), int(msg.get("mem_after", -1))
+            max_points = int(msg.get("max_points", VIEW_MAX_POINTS))
+        except (TypeError, ValueError):
+            return json.dumps({"ok": False, "error": "cloud_after, mem_after and max_points are integers"})
+        self.view_polled, self.view_max_points = now, int(np.clip(max_points, 0, 20000))
+        st, vs, a = self.status, self.view_state, self.args
+        out = {"ok": True, "t_mono": now, "phase": st.get("phase"), "frame": "odom", "tick": int(self.tick),
+               "joint_names": list(C.MJ_JOINTS), "mount": self.view_mount(),
+               "qpos": None if vs is None else vs[1], "state_age_s": None if vs is None else vs[2] + (now - vs[0]),
+               "pose_hist": self.pose_hist, "goal": st.get("goal"), "goal_seq": st.get("goal_seq"),
+               "goal_dist_m": st.get("goal_dist_m"), "standing": st.get("standing"), "tilt_rad": st.get("tilt_rad"),
+               "latency_s": st.get("latency_s"), "plan": self.view_plan(), "route": self.view_route(),
+               "odom": st.get("odom") or self.odom_state(now),
+               "rear_blind_deg": float(getattr(a, "rear_blind_deg", 0.0) or 0.0),
+               "rear_blind_range_m": float(getattr(a, "rear_blind_range_m", 0.0) or 0.0)}
+        vc, vm = self.view_cloud, self.view_mem
+        cloud = "null"
+        if vc is not None and vc["seq"] > cloud_after:
+            if vc["n"] <= max_points:
+                cloud = vc["json"]
+            else:  # fewer points than the frame was built with: an even subset (the next frames use the new budget)
+                t_mono, cm, cls, org, total = vc["arrays"]
+                k = _pick(len(cm), max(0, max_points))
+                cloud = W.dumps(cloud_part(vc["seq"], t_mono, cm[k], cls[k], org, total))
+        mem = vm["json"] if vm is not None and vm["seq"] > mem_after else "null"
+        return W.dumps(out)[:-1] + ',"cloud":' + cloud + ',"memory":' + mem + "}"
+
     def perception_loop(self, cloud, state, t0, stop):
         """Clouds -> memory, and the route refresh (A* on the memory grid, up to ~0.2 s) - both off the 50 Hz loop."""
         while not self.stop_flag.is_set() and not stop.is_set():
             got = cloud.poll()
             snap = state.snapshot()
+            wanted, frame = self.view_wanted(), None  # a live view is polled: keep the last frame by class for it
+            fs = getattr(self, "from_sensor", None)
+            if fs is not None:
+                fs.keep_dropped = wanted
             if got and snap is not None:
                 for c in got:
                     if c.get("raw"):  # sensor-frame frame from the robot's DDS topic: deskew + register ourselves
-                        pts, org = self.from_sensor(c["points"], c["t_s"], c["wall"], state.qpos_at)
+                        fs = self.from_sensor
+                        pts, org = fs(c["points"], c["t_s"], c["wall"], state.qpos_at)
                         with self.mem_lock:
                             self.memory.add_cloud(0.0, pts, org, None)
+                        if wanted:
+                            d = getattr(fs, "last_dropped", None) or (np.zeros((0, 3)), np.zeros((0, 3)))
+                            frame = (c["wall"], {0: pts, 1: d[0], 2: d[1]}, getattr(fs, "last_origin", None))
                         continue
                     pts, org = c["points"], c["origins"] if c["origins"] is not None else c["origin"]
+                    removed = np.zeros((0, 3))
                     if c["dt"] is not None and len(pts):
                         # self filter per firing-time slice with the joint state of that instant (MID-360 points
                         # carry their own time; one pose per 0.1 s frame leaks swinging hands into the memory)
@@ -654,6 +897,7 @@ class StudentNode:
                             if q is not None:
                                 keep[sel] = self.memory.body_filter.mask(
                                     pts[sel], q, origins=np.broadcast_to(org, (len(pts), 3))[sel])
+                        removed = pts[~keep]
                         pts = pts[keep]
                         org = np.broadcast_to(org, (len(keep), 3))[keep]
                         qf = None
@@ -661,8 +905,14 @@ class StudentNode:
                         qf = snap["qpos"]
                     with self.mem_lock:
                         self.memory.add_cloud(0.0, pts, org, qf)
+                    if wanted:
+                        frame = (c["wall"], {0: pts, 1: removed}, org)
                 with self.mem_lock:
                     self.memory.step(time.monotonic() - t0)
+            if wanted:
+                if frame is not None:
+                    self.view_frame(*frame)
+                self.view_memory(time.monotonic())
             if snap is not None and self.phase in ("PRESCAN", "RUN"):
                 xy, t = np.asarray(snap["qpos"][:2], dtype=float), time.monotonic() - t0
                 if not hasattr(self, "route"):
@@ -828,6 +1078,7 @@ class StudentNode:
                 self.log[-1]["switch"] = self.switch_offsets(plan, anchor_tick, now_tick, lat)
             self.last_landing_tick = now_tick
             self.active = (plan, anchor_tick, anchor_q, anchor_dq)
+            self.plan_seq += 1
             self.last_streamed_anchor = max(anchor_tick, self.last_streamed_anchor)
             self.last_streamed_req = max(req_tick, self.last_streamed_req)
             if self.streamer is not None:
@@ -944,6 +1195,7 @@ class StudentNode:
                 "joint_velocity": np.vstack([np.zeros((1, 29)), np.diff(frames[:, 7:], axis=0) / DT])}
         self.jobs = {}  # results of in-flight plans are discarded from now on
         self.active = (plan, now_tick, q, np.zeros(29))
+        self.plan_seq += 1
         self.last_streamed_anchor = now_tick + 10**6
         if self.streamer is not None:
             self.stream_end = self.streamer.send_plan(plan, now_tick, q, np.zeros(29), now_tick, self.limits)[1]
@@ -1106,8 +1358,14 @@ class StudentNode:
             if self.commands_quit:
                 return "quit"
             w_, x_, y_, z_ = q[3:7]
+            yaw_ = float(math.atan2(2 * (w_ * z_ + x_ * y_), 1 - 2 * (y_ * y_ + z_ * z_)))
+            now_ = time.monotonic()  # the live view's state (view_reply reads these references, never the loop's)
+            self.view_state = (now_, q, max(snap["age_low"], snap["age_odo"]))
+            if not self.pose_hist or now_ - self.pose_hist[-1][0] >= VIEW_HIST_DT - 0.002:
+                self.pose_hist = (*self.pose_hist[1 - int(round(VIEW_HIST_S / VIEW_HIST_DT)):],
+                                  (round(now_, 4), float(q[0]), float(q[1]), yaw_))
             self.status = dict(phase=self.phase, tick=self.tick, goal=self.goal.tolist(), goal_seq=self.goal_seq,
-                               yaw_rad=float(math.atan2(2 * (w_ * z_ + x_ * y_), 1 - 2 * (y_ * y_ + z_ * z_))),
+                               yaw_rad=yaw_, odom=self.odom_state(now_, snap["age_odo"]),
                                guards=self.args.guards, guard_counts=dict(self.guard_counts), last_guard=self.last_guard,
                                self_mask_plans=self.self_mask_plans, self_mask_max_cells=self.self_mask_max,
                                calm_hold=getattr(self, "calm_latch", None) is not None and self.calm_latch.active,
