@@ -1440,8 +1440,8 @@ class Hub:
         return None
 
     def no_session(self, name):
-        return 404, {"ok": False, "error": f"no session {name!r} in {self.day.name} or the other lab-day-* directories "
-                                          f"beside it", "session": str(name)}
+        return 404, {"ok": False, "code": "no_such_session", "session": str(name),
+                     "error": f"no session {name!r} in {self.day.name} or the other lab-day-* directories beside it"}
 
     def _summary(self, d: Path):
         """session_summary, cached until one of its files changes."""
