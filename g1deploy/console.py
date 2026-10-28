@@ -825,6 +825,10 @@ class Session:
                             check_id=args.get("check_id") or ctx.get("check_id"),
                             start_check=args.get("start_check") or ctx.get("start_check"),
                             rehearsal=args.get("rehearsal") or ctx.get("rehearsal"),
+                            # the operator's explicit "walk without a matching rehearsal" (robot GO), the goal in the
+                            # scan's scene and the gate it must pass: kept with the attempt for review and evidence
+                            rehearsal_override=args.get("rehearsal_override"), goal_scene=ctx.get("goal_scene"),
+                            scan=ctx.get("scan"), passage=args.get("passage") or ctx.get("passage"),
                             odom=getattr(self.args, "odom", None), odom_state=self.node_status.get("odom"),
                             operator=rec.get("operator"), source=rec["source"], act_id=rec["id"])
         return "done", f"GO: attempt {len(self.attempts.rows)}"
@@ -913,7 +917,7 @@ class Session:
         ctx = {"kind": "odom", "odom": [x, y], "check_id": args["check_id"], "source": rec["source"],
                "operator": rec.get("operator"), "start_check": args.get("start_check") or args.get("check"),
                "rehearsal": args.get("rehearsal") or args.get("rehearsals"), "goal_scene": args.get("goal_scene"),
-               "scan": args.get("scan")}
+               "scan": args.get("scan"), "passage": args.get("passage")}
         self.event(f"{rec['source']}: goal odom ({x:.2f}, {y:.2f}), check {args['check_id']}")
         return self.send_goal(rec, args["seq"], ctx, frame="odom", x=x, y=y)
 
