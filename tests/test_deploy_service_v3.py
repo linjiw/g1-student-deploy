@@ -129,7 +129,12 @@ def test_session_receipt_from_session_json_and_before_it(tmp_path, profs):
     assert rc["mount_calib_sha"] == hub.json_sha(mc) and rc["confirmations"]["estop"] and rc["missing"] == []
     assert rc["scan"] == {"name": "scan-a", "memory_sha": hub.file_sha(h.scans_dir / "scan-a" / "memory.npz")}
     st = h.refresh()
-    assert st["live"]["robot"]["receipt"]["session"] == d.name and "receipt" in st["capabilities"]
+    assert st["live"]["robot"]["receipt"]["session"] == d.name and "session_receipt" in st["capabilities"]
+    for cap in ("rehearsal_identity", "rehearsal_match", "passage", "act_status", "session_detail", "session_tag",
+                "profile_route"):
+        assert cap in st["capabilities"]
+    sha = hub.file_sha(h.scans_dir / "scan-a" / "memory.npz")
+    assert st["scans"][0]["memory_sha"] == sha and h.scan_scene("scan-a")["memory_sha"] == sha
     assert h.receipt_v1(d.name)[1]["profile"]["sha"] == "f" * 64 and h.receipt_v1("nope")[0] == 404
     # a practice session's receipt names the robot odometry it practises, and its start offset
     p = h.day / "practice-110000-p1"
@@ -205,7 +210,7 @@ def test_passage_scores_a_detour_as_a_failure(tmp_path, profs):
     ex = st["runs"]["exact"]
     assert ex["arrival"] and ex["passage"] == "missed" and not ex["passed"]  # arrived, but around the gap
     assert st["runs"]["drift"]["passage"] == "crossed" and st["runs"]["offset"]["passage"] == "crossed"
-    assert st["verdict"] == "fails" and st["all_passed"] is False
+    assert st["verdict"] == "missed passage" and st["all_passed"] is False
     code, tr = h.track("rehearse-s1-exact")
     assert code == 200 and tr["passage"] == "missed" and tr["arrived"]
 
@@ -328,6 +333,8 @@ def test_acts_and_requests_bound_to_their_session(tmp_path, monkeypatch):
         go_live(h, "sim", h.day / "practice-130000-deploy", con.port, practice=True)
         code, r = h.act("sim", {"act": "c", "id": "x1", "expect": {"session": "robot-old"}})
         assert code == 409 and r["result"] == "refused" and "robot-old" in r["reason"] and not con.acts
+        code, r = h.act("sim", {"act": "estop", "source": "studio", "expect": {"session": "robot-old"}})
+        assert code == 200 and con.acts[-1]["act"] == "estop"  # a stop always goes through
         code, r = h.act("sim", {"act": "c", "id": "x2", "session": "practice-130000-deploy"})
         assert code == 200 and r["session"] == "practice-130000-deploy" and con.acts[-1]["id"] == "x2"
         r = h.send_goal_v1({"slot": "sim", "scan": "scan-a", "goal_scene": [1, 0], "check_id": "c",
@@ -508,11 +515,14 @@ def test_recording_health_when_the_kit_has_it(tmp_path, monkeypatch):
     d.mkdir(parents=True)
     (d / "session.json").write_text(json.dumps({"mode": "robot"}))
     monkeypatch.delattr(evidence, "recording_health", raising=False)
-    assert h.recording_v1(d.name)[1]["supported"] is False
+    assert h.recording_v1(d.name)[1]["supported"] is False and "recording_health" not in hub.evidence_capabilities()
     monkeypatch.setattr(evidence, "recording_health", lambda p: {"streams": [], "finalized": True, "dir": str(p)},
                         raising=False)
     code, r = h.recording_v1(d.name)
     assert code == 200 and r["supported"] and r["finalized"] and r["session"] == d.name
+    assert "recording_health" in hub.evidence_capabilities()
+    monkeypatch.setattr(evidence, "manifest", lambda p: {"version": 2, "items": [], "complete": True})
+    assert "manifest_v2" in hub.evidence_capabilities()
     assert h.session_detail(d.name)[1]["recording"]["finalized"] is True
     monkeypatch.setattr(evidence, "recording_health", lambda p: 1 / 0, raising=False)
     assert "ZeroDivisionError" in h.recording_v1(d.name)[1]["error"] and h.recording_v1("nope")[0] == 404

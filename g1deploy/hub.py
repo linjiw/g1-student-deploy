@@ -91,6 +91,7 @@ REHEARSAL_COURSES = ("lab-door-real", "rp-door-rope", "rp-rope-behind", "lab-sit
 CONFIRM_ROBOT = ("gantry", "estop", "remote", "rope")  # the robot start checklist (stored in the session)
 CONFIRM_LEGACY = ("gantry", "estop", "remote", "clear")  # the legacy page's
 RUN_KINDS = ("exact", "drift", "offset")  # a rehearsal set, in order
+STOP_ACTS = ("estop", "h", "t", "o")  # never refused by the hub for a session mismatch
 # The start check is inside a set's offset envelope with this slack: the registration itself was off by up to
 # ~0.1 m / 4 deg on the sparse gap-069 room (0.30 m / -19 deg measured for a true 0.20 m / -20 deg, 2026-10-28)
 ENVELOPE_SLACK_M, ENVELOPE_SLACK_DEG = 0.15, 6.0
@@ -165,8 +166,25 @@ CAPABILITIES = ["state", "readiness", "sessions", "scan", "scan_live", "scan_sce
                 # contract v3 (2026-10-28 review): session receipts, rehearsal sets with identity and state + match,
                 # act lookup, session detail and labels of ended sessions, a profile's route config, recording health,
                 # session-bound acts, GO in robot mode only with a matching complete rehearsal set or a recorded override
-                "receipt", "rehearsal_sets_v3", "rehearsal_match", "passage", "act_lookup", "session_detail",
-                "session_tag", "profile_route", "recording", "session_bound_acts", "go_rehearsal_gate"]
+                # (recording_health and manifest_v2 are added when this kit's evidence module provides them)
+                "session_receipt", "rehearsal_identity", "rehearsal_match", "passage", "act_status", "session_detail",
+                "session_tag", "profile_route", "session_bound_acts", "go_rehearsal_gate"]
+
+
+def evidence_capabilities():
+    """recording_health / manifest_v2 when g1deploy/evidence.py provides them (contract v3 G)."""
+    out = []
+    if callable(getattr(evidence, "recording_health", None)):
+        out.append("recording_health")
+    try:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as t:
+            if (evidence.manifest(t) or {}).get("version") == 2:
+                out.append("manifest_v2")
+    except Exception:
+        pass
+    return out
 STATUS_OF_LEVEL = {"ok": "pass", "warn": "warn", "bad": "block", "na": "unknown"}
 NOTICE = """<!doctype html><meta charset="utf-8"><title>G1 deploy service</title>
 <body style="font:16px system-ui;margin:2em;max-width:44em">
@@ -673,6 +691,7 @@ class Hub:
         self.run_cache = {}  # a rehearsal run's files (mtimes), goal and gate -> its run_report
         self._set_records = (None, {})  # rehearsal_sets.jsonl (mtime, rows by name)
         self.goal_ctx = {}  # slot -> the goal last sent through send_goal (session, scan, goal_scene, seq, passage)
+        self._evidence_caps = None
         self.panel_tokens = {}  # session dir -> the token in its panel_url.txt (adopted consoles)
         self.console_state = {}  # slot -> (hub monotonic, the console's full /state)
         self.console_seen = {}  # slot -> console monotonic of its last /state (or the hub's at receive)
@@ -1486,6 +1505,7 @@ class Hub:
                         "walked_sessions": x.get("walked_since") or [],
                         "age_s": round(time.time() - x["mtime"], 1), "fresh": self.scan_fresh(x.get("name"))[0],
                         "practice": x.get("practice"), "goal_ahead_left": x.get("goal_ahead_left"),
+                        "memory_sha": file_sha(self.scans_dir / str(x.get("name")) / "memory.npz"),
                         "rehearsals": [s["name"] for s in sets if s.get("scan") == x.get("name")]})
         return out
 
@@ -1621,9 +1641,11 @@ class Hub:
             apart = round(float(np.max(np.min(np.linalg.norm(pd[:, None] - pe[None], axis=2), axis=1))), 2)
         passed = {k: r.get("passed") for k, r in runs.items()}
         verdict = None
-        if state == "complete":
+        if state == "complete":  # "missed passage": the exact run arrived, but not through the required gate
+            ex = runs["exact"]
             verdict = (("robust" if apart is None or apart <= OTHER_WAY_M else "other way") if passed["exact"] and
-                       passed["drift"] else "fails with drift" if passed["exact"] else "fails")
+                       passed["drift"] else "fails with drift" if passed["exact"] else
+                       "missed passage" if ex.get("arrival") and ex.get("passage") == "missed" else "fails")
         tv = [r.get("timing_valid") for r in runs.values() if r["state"] == "done"]
         offset_ok = passed["offset"] if runs["offset"]["state"] == "done" else None
         started = src.get("t") or m0.get("started")
@@ -1894,7 +1916,10 @@ class Hub:
         phone = f"http://{TAILNET_HOST}:{live['robot']['panel_port']}/" if robot_live else None
         job = dict(self.scan_job)
         job.pop("then", None)
-        return {"api": 1, "capabilities": CAPABILITIES + (["confirm"] if console_supports("--confirm") else []),
+        if self._evidence_caps is None:
+            self._evidence_caps = evidence_capabilities()
+        return {"api": 1, "capabilities": CAPABILITIES + self._evidence_caps
+                + (["confirm"] if console_supports("--confirm") else []),
                 "version": self.version(), "day": str(self.day), "t": time.time(), "t_mono": time.monotonic(),
                 "pc": {"load": pc.get("load"), "cpus": pc.get("cpus"), "gpu": pc.get("gpu"), "busy": pc.get("busy"),
                        "chains": pc.get("chains"), "disk_free_gb": disk},
@@ -2076,7 +2101,8 @@ class Hub:
                "memory_frame": "memory_S", "twin": twin, "twin_frame": "memory_S", "course_boxes": course,
                "course_frame": "scene", "memory_file": str(f), "goal_ahead_left": x.get("goal_ahead_left"),
                "goal_scene_at_scan": frames.apply(s_from_m, goal_xy).tolist() if goal_xy else goal_course,
-               "practice": x.get("practice"), "fresh": self.scan_fresh(name)[0], "age_s": self.scan_age(name)}
+               "practice": x.get("practice"), "fresh": self.scan_fresh(name)[0], "age_s": self.scan_age(name),
+               "memory_sha": file_sha(f)}
         self.scene_cache[name] = out
         return out
 
@@ -2635,7 +2661,8 @@ class Hub:
         msg = {k: v for k, v in dict(msg).items() if k != "slot"}
         msg.setdefault("source", "studio")
         cur = self.live(slot) if slot in self.slots else None
-        why = self.session_mismatch(slot, msg) if cur is not None else None
+        # a stop (E-STOP, Stand, Takeover) always reaches the live console, whatever session its page believed in
+        why = self.session_mismatch(slot, msg) if cur is not None and msg.get("act") not in STOP_ACTS else None
         gate = None
         if cur is not None and why is None and msg.get("act") == "g" and not cur.get("rehearsal"):
             gate = self.go_gate(slot, cur, msg)
@@ -3267,7 +3294,7 @@ class Hub:
             # The drift run carries the error lab-g1's LEG odometry measured. On leg odometry a goal that fails with it
             # is blocked; on FAST-LIO (+ legs) the walk does not drift like that (1.9-6.9 cm RMS against FAST-LIO,
             # 2026-10-28), so it is a warning to read, not a block.
-            status = ("block" if v == "fails" or (v == "fails with drift" and not lio) else
+            status = ("block" if v in ("fails", "missed passage") or (v == "fails with drift" and not lio) else
                       "pass" if v == "robust" and ok and s.get("timing_valid") is not False else "warn")
             detail = f"{s['name']}: {v}; start offset {'ok' if ok else 'failed' if ok is False else '-'}"
             if s.get("passage"):

@@ -176,7 +176,11 @@ SCRATCH/lab-day-x --no-studio-link` (never 8769). Every reply is strict JSON (no
   session's evidence (`g1deploy/evidence.py`, also written when a session ends).
 
 *Contract v3 (after the 2026-10-28 review).* A page must describe the session that actually runs, a rehearsal counts
-only for what it rehearsed, and a session reopens from its directory alone:
+only for what it rehearsed, and a session reopens from its directory alone. `state.capabilities` names what a hub has
+(`session_receipt`, `rehearsal_identity`, `rehearsal_match`, `passage`, `act_status`, `session_detail`, `session_tag`,
+`profile_route`, `session_bound_acts`, `go_rehearsal_gate`, and `recording_health` / `manifest_v2` when the evidence
+module provides them); an older hub answers 404 "unknown endpoint". `memory_sha` (scan rows, scan scene, receipts,
+identities) is the SHA-256 of the scan's memory.npz:
 - **Session receipt**: `live.<slot>.receipt` in the state and `GET /api/v1/session/<name>/receipt`: kind (robot,
   practice, rehearsal), robot, operator, start, the profile and the SHA-256 of its file, the bundle's MANIFEST hash,
   the rules plugin's hash, odometry (practice: the robot odometry it practises, `sim_odom` beside), the mount
@@ -190,7 +194,7 @@ only for what it rehearsed, and a session reopens from its directory alone:
   the node's result, `arrival` (the node ended ARRIVED **and** the simulator's truth ends within 0.5 m), the true final
   distance, `passage`, the largest contact, a fall, `timing_valid` (node loop lag ≤ 0.35 s and fewer than 3 overruns,
   from report.json) and `passed` (arrival, through the gate, no contact over 5 N, no fall). The verdict exists only for
-  a complete set. `POST /api/v1/rehearse` takes `passage {a, b}`: a gate segment in the scene (e.g. between two
+  a complete set (robust, other way, fails with drift, missed passage: the exact run arrived around the gate, fails). `POST /api/v1/rehearse` takes `passage {a, b}`: a gate segment in the scene (e.g. between two
   towers' inner faces) the true path must cross; a detour that arrives is a failure. `GET /api/v1/rehearsal/match?
   scan=&x=&y=&profile=&odom=` (or `&session=` / `&slot=` for a session's own receipt; `&offset=dx,dy,dyaw`,
   `&pa=x,y&pb=x,y`): the newest complete set whose identity matches (goal within 0.08 m), the newest running one,
