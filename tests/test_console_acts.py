@@ -270,7 +270,8 @@ def test_http_acts_expect_ids_and_replies(tmp_path):
                "expect": {"runner": "CONTROL", "session": tmp_path.name, "attempts": 0}}
         code, r = s.submit(msg)
         assert code == 200 and r == {"ok": True, "id": "u1", "act": "goal", "result": "done",
-                                     "reason": f"the node read back goal {s.goal_seq}", "repeat": False}
+                                     "reason": f"the node read back goal {s.goal_seq}", "repeat": False,
+                                     "session": tmp_path.name}
         code, r2 = s.submit(dict(msg))  # a retry: its first result, never a second goal
         assert r2["result"] == "done" and r2["repeat"] and len(s.node_cmd.sent("goal")) == 1
         code, r3 = s.submit({"act": "g", "id": "u2", "source": "studio", "expect": {"goal_seq": s.goal_seq + 1}})
@@ -392,3 +393,71 @@ def test_recorder_keeps_the_lio_cloud_and_studio_workers_are_heavy():
     for cmd in ("/x/.venv/bin/python -u /home/u/g1-deploy-studio/studio/nav_worker.py --request r.json",
                 "/x/python -u /home/u/g1-deploy-studio/studio/flow_policy_worker.py", "/x/python -u studio/policy_worker.py"):
         assert any(re.search(p, cmd) for p in machine.heavy_patterns()), cmd
+
+
+# ---------------------------------------------------------------------------------------------------- act receipts
+def test_act_receipts_answer_for_every_act(tmp_path):
+    """CONTRACT v3 D: GET /act_result answers from the act record, written before any reply."""
+    s = arm(session(tmp_path))
+    code, r = s.submit({"act": "h", "id": "q1", "source": "studio", "operator": "ana"})  # no main loop: queued
+    assert r["result"] == "queued" and r["session"] == tmp_path.name
+    rows = [json.loads(line) for line in (tmp_path / "console_events.jsonl").read_text().splitlines()]
+    assert rows[-1]["id"] == "q1" and rows[-1]["result"] == "queued" and rows[-1]["t_done"] is None  # on disk first
+    q = s.act_result("q1")
+    assert q["known"] and q["result"] == "queued" and q["act"] == "h" and q["session"] == tmp_path.name
+    assert q["source"] == "studio" and q["operator"] == "ana" and q["t_done"] is None
+    s.run_act(s.inbox.get_nowait()[1])  # the main loop catches up
+    q = s.act_result("q1")
+    assert q["result"] == "done" and q["t_done"] >= q["t_mono"] and [a["id"] for a in s.panel_state()["acts"]] == ["q1"]
+    s.node_cmd.read_back = False  # a goal the node has not read back yet: pending, then refused
+    rec = s.run_act(s.make_act("goal_odom", "studio", act_id="g7", x=2.0, y=0.5, seq=s.next_seq(), check_id="c1"))
+    assert s.act_result("g7")["result"] == "pending" and rec["result"] is None
+    time.sleep(console.GOAL_READBACK_S + 0.05)
+    s.check_pending()
+    assert s.act_result("g7")["result"] == "refused" and "not confirmed" in s.act_result("g7")["reason"]
+    stop = s.estop("studio E-STOP", kind="studio")  # E-STOP without an id: findable by the id its reply carries
+    assert s.act_result(stop["id"])["result"] == "done" and stop["session"] == tmp_path.name
+    key = s.act("t", source="remote", detail="remote D-up")
+    assert s.act_result(key["id"])["result"] == "done" and s.act_result(key["id"])["source"] == "remote"
+    nope = s.act_result("never-sent")
+    assert not nope["known"] and nope["result"] is None and nope["session"] == tmp_path.name and nope["reason"]
+    for k in range(console.ACT_RECEIPTS + 50):  # bounded: the last ACT_RECEIPTS (>= 200) acts
+        s.run_act(s.make_act("?", "script", act_id=f"n{k}"))
+    assert not s.act_result("q1")["known"] and s.act_result("n50")["known"] and len(s.receipts) == console.ACT_RECEIPTS
+
+
+def test_a_reply_lost_in_transit_leaves_a_findable_record(tmp_path):
+    import http.client
+    import socket
+    import urllib.request
+
+    from g1deploy.panel import start_panel
+
+    s = arm(session(tmp_path))
+    stop = main_loop(s)
+    server, token = start_panel(s, 0, token="tok")
+    port = server.server_address[1]
+    try:
+        body = json.dumps({"act": "h", "id": "lost-1", "source": "studio", "operator": "ana"}).encode()
+        sock = socket.create_connection(("127.0.0.1", port))  # the relay sends the act, then drops the connection
+        sock.sendall(b"POST /act?t=tok HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                     + f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+        sock.close()
+        t_end = time.monotonic() + 3
+        while time.monotonic() < t_end and not s.act_result("lost-1")["known"]:
+            time.sleep(0.02)
+        q = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/act_result?t=tok&id=lost-1").read())
+        assert q["known"] and q["id"] == "lost-1" and q["act"] == "h" and q["session"] == tmp_path.name
+        t_end = time.monotonic() + 3
+        while q["result"] != "done" and time.monotonic() < t_end:
+            time.sleep(0.05)
+            q = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/act_result?t=tok&id=lost-1").read())
+        assert q["result"] == "done" and s.node_cmd.sent("stand")  # it acted once; the receipt says so
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        conn.request("GET", "/act_result?t=tok")
+        assert conn.getresponse().status == 400
+        conn.request("GET", "/act_result?t=wrong&id=lost-1")
+        assert conn.getresponse().status == 403
+    finally:
+        stop.set()
+        server.shutdown()

@@ -19,10 +19,11 @@ TAG_HELP = {"clean": "walked as meant, nothing touched", "touched": "brushed or 
 
 
 class Attempts:
-    def __init__(self, path: Path | None, profile: str | None = None):
-        self.path, self.profile = path, profile
+    def __init__(self, path: Path | None, profile: str | None = None, on_error=None):
+        self.path, self.profile, self.on_error = path, profile, on_error
         self.rows: list[dict] = []
         self.open: dict | None = None
+        self.save_errors, self.save_error = 0, None  # a full disk: the rows stay in memory (the panel shows them)
 
     # -- life cycle --------------------------------------------------------------------------------------
     def start(self, t: float, status: dict, goal_rel=None, **context):
@@ -96,14 +97,28 @@ class Attempts:
         return True
 
     # -- output ----------------------------------------------------------------------------------------
-    def save(self):
+    def save(self) -> bool:
+        """attempts.jsonl rewritten (tmp + rename). A write that fails (disk full) is counted and reported through
+        on_error, never raised: it runs on the console's main loop, beside E-STOP and the GO gate."""
         if self.path is None:
-            return
+            return True
         tmp = self.path.with_suffix(".tmp")
         from g1deploy.workspace import dumps  # strict JSON: the hub serves these rows to Studio as they are
 
-        tmp.write_text("".join(dumps(r) + "\n" for r in self.public()))
-        tmp.replace(self.path)
+        try:
+            tmp.write_text("".join(dumps(r) + "\n" for r in self.public()))
+            tmp.replace(self.path)
+            return True
+        except OSError as exc:
+            self.save_errors += 1
+            self.save_error = f"{type(exc).__name__}: {exc}"
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if self.on_error is not None:
+                self.on_error(exc)
+            return False
 
     def public(self) -> list[dict]:
         return [{k: v for k, v in r.items() if k not in ("start_phase", "left_start")} for r in self.rows]

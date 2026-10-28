@@ -11,7 +11,11 @@ POST /act {act, id, source, operator, expect?, ...args} (CONTRACT §4.1; the pan
 through the hub): E-STOP goes straight to the runner from the request thread (Session.estop: the runner's global `o`,
 damping in any input mode) and answers {ok, key_sent, runner_alive, runner, confirmed, t_mono}. Every other act is
 queued for the console's main loop, exactly like a key press, and the reply waits up to 1 s for its result:
-{ok, id, result: done | refused | queued, reason}. An invalid act (unknown, no id, bad arguments) is answered 400.
+{ok, id, result: done | refused | queued, reason, session}. An invalid act (unknown, no id, bad arguments) is answered
+400. Every act (any source) is findable by its id from the moment the console receives it, before any reply:
+GET /act_result?t=&id= -> {known, id, act, result: done | refused | queued | pending, reason, t_mono, t_done, source,
+operator, session} (the last 500 acts of the session; console_events.jsonl keeps them all, and an act answered "queued"
+has its line there before the reply leaves). It never acts: a relay whose reply was lost asks it instead of retrying.
 Every response is strict JSON (no NaN).
 """
 
@@ -64,6 +68,12 @@ def start_panel(sess, port, host="127.0.0.1", token=None):
                 self._send(200, dumps(sess.panel_state()))
             elif path == "/map":
                 self._send(200, dumps(sess.node_map()))
+            elif path == "/act_result":  # what became of an act whose reply was lost (CONTRACT v3 D); never acts
+                act_id = parse_qs(urlparse(self.path).query).get("id", [""])[0]
+                if not act_id:
+                    self._send(400, dumps({"ok": False, "known": False, "reason": "id is required"}))
+                else:
+                    self._send(200, dumps(sess.act_result(act_id)))
             else:
                 self._send(404, "{}")
 
