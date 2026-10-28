@@ -931,6 +931,8 @@ class Hub:
             cmd += ["--operator", str(req["operator"])[:60]]
         if req.get("confirm_json") and console_supports("--confirm"):  # the console stores it in session.json
             cmd += ["--confirm", json.dumps(req["confirm_json"], sort_keys=True)]
+        if mode == "sim" and req.get("practice") and console_supports("--require-sent-goal"):
+            cmd += ["--require-sent-goal"]  # practice: GO needs a goal sent and confirmed, as on the robot
         return cmd, out
 
     def start(self, req, v1=False):
@@ -1047,7 +1049,8 @@ class Hub:
                 return {"ok": False, "check": check, "error": (check.get("error") or "no start check") +
                         "; or set the goal relative to the robot now in the robot panel"}
             a, l = check["goal_now"]
-        code, data, _ = self.panel_proxy("POST", "/act", body=json.dumps({"act": "goal", "ahead": a, "left": l}).encode())
+        code, data, _ = self.panel_proxy("POST", "/act", body=json.dumps(
+            {"act": "goal", "ahead": a, "left": l, "id": uuid.uuid4().hex, "source": "hub"}).encode())
         return {"ok": code == 200, "sent": [a, l], "check": check, "error": None if code == 200 else data.decode()[:200]}
 
     def run_doctor(self):
