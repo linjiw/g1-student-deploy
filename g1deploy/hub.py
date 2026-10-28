@@ -240,7 +240,9 @@ class Hub:
         except OSError:
             carrier = False
         livox = subprocess.run(["pgrep", "-f", "^[^ ]*livox_ros_driver2_node"], capture_output=True).returncode == 0
-        return {"iface": iface, "carrier": carrier, "livox_driver": livox, "robot": self.args.robot}
+        lio = subprocess.run(["pgrep", "-f", "^[^ ]*python[^ ]* -u [^ ]*adapters/dds_lio_bridge.py"],
+                             capture_output=True).returncode == 0  # `g1 lio start`: FAST-LIO + its bridge on :5561
+        return {"iface": iface, "carrier": carrier, "livox_driver": livox, "lio_bridge": lio, "robot": self.args.robot}
 
     def running(self):
         """Both slots: the session's info, running or the last one ended, with its panel's state."""
@@ -590,6 +592,10 @@ class Hub:
             cmd += ["--robot", req.get("robot") or self.args.robot]
             goal = req.get("goal") or [1.5, 0.0]
             cmd += ["--goal", *(str(float(v)) for v in goal)]
+            if req.get("odom"):  # leg (the robot profile's default) | zmq (FAST-LIO) | fused (FAST-LIO + legs, LIO lost -> stand)
+                if req["odom"] not in ("leg", "zmq", "fused"):
+                    raise ValueError("odometry must be leg, zmq or fused")
+                cmd += ["--odom", req["odom"]]
         if mode == "sim":  # isolated ports, low priority: it may run beside a live robot session
             cmd = ["nice", "-n", "10"] + cmd + ["--port-base", str(REHEARSAL_PORT_BASE)]
         if mode == "sim" and req.get("script"):
@@ -626,8 +632,12 @@ class Hub:
             missing = [k for k in need if not (req.get("confirm") or {}).get(k)]
             if missing:
                 return {"ok": False, "error": "confirm the robot checklist first: " + ", ".join(missing)}
-            if not self.robot_link()["carrier"]:
+            link = self.robot_link()
+            if not link["carrier"]:
                 return {"ok": False, "error": f"no link on {self.args.iface}: robot off or cable out"}
+            if req.get("odom") in ("zmq", "fused") and not link["lio_bridge"]:
+                return {"ok": False, "error": "no FAST-LIO bridge runs: `g1 lio start` and `g1 lio check` with the robot "
+                                              "standing first, or pick leg odometry"}
             fresh = None
             if req.get("scene_scan"):
                 f = self.scans_dir / str(req["scene_scan"]) / "scan.json"

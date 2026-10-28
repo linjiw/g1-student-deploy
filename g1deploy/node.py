@@ -165,6 +165,74 @@ class OdomInput:
         self.state.set_odometry(f["pos"], f["quat_wxyz"], f["lin_w"], f["ang_w"])
 
 
+class FusedOdom:
+    """`--odom fused`: the LIO bridge's `odom` and leg odometry + IMU yaw in one EKF (g1deploy/odom_fusion.py), at
+    200 Hz -> DdsState.set_odometry. LIO corrects (one pose per 0.1 s: the bridge's 50 Hz poses are not independent);
+    legs predict and calibrate. LIO refused for 0.2 s stops the walk (`lio_doubt`); `lost` is the time LIO started
+    being refused for good (0.5 s) or went silent: the node then walks no further on legs alone, not even after a GO. Pose: the filter's x, y, yaw; height and roll / pitch from
+    the latest LIO pose."""
+
+    def __init__(self, state: "DdsState", connect="tcp://localhost:5561"):
+        import zmq
+
+        from g1deploy.leg_odometry import LegOdometry
+        from g1deploy.odom_fusion import LegLioFilter
+
+        self.state, self.leg, self.filter = state, LegOdometry(), LegLioFilter()
+        self.sock = zmq.Context.instance().socket(zmq.SUB)
+        self.sock.setsockopt(zmq.CONFLATE, 1)
+        self.sock.setsockopt(zmq.SUBSCRIBE, b"odom")
+        self.sock.connect(connect)
+        self.lio, self.t_update, self.t_msg, self.lost = None, -1.0, None, None
+        self.stop = threading.Event()
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    @staticmethod
+    def _yaw(q):
+        return math.atan2(2 * (q[0] * q[3] + q[1] * q[2]), 1 - 2 * (q[2] ** 2 + q[3] ** 2))
+
+    def loop(self):
+        import zmq
+
+        prev, last_p, last_t = None, None, None
+        while not self.stop.is_set():
+            time.sleep(0.005)
+            try:
+                _, f = unpack(self.sock.recv(zmq.NOBLOCK), topic=b"odom")
+                self.lio, self.t_msg = (np.asarray(f["pos"], float), np.asarray(f["quat_wxyz"], float)), time.monotonic()
+            except zmq.Again:
+                pass
+            with self.state.lock:
+                low = self.state.low
+            if low is None or self.lio is None:
+                continue
+            q, _, imu, gyro = low
+            p = self.leg.reset((0.0, 0.0), imu, q) if self.leg.p is None else self.leg.update(imu, q)
+            yaw_imu, now = self._yaw(imu), time.monotonic()
+            if self.filter.x is None:
+                self.filter.init(self.lio[0][:2], self._yaw(self.lio[1]))
+            elif prev is not None:
+                d = p[:2] - prev[0]
+                c, s = math.cos(-prev[1]), math.sin(-prev[1])
+                self.filter.predict([c * d[0] - s * d[1], s * d[0] + c * d[1]],
+                                    (yaw_imu - prev[1] + math.pi) % (2 * math.pi) - math.pi, dt=now - prev[2])
+            prev = (p[:2].copy(), yaw_imu, now)
+            if self.t_msg > self.t_update and now - self.t_update >= 0.1:  # a new LIO pose, at most every 0.1 s
+                self.t_update = now
+                self.filter.update_lio(self.lio[0][:2], self._yaw(self.lio[1]), now)
+            if self.lost is None and (self.filter.lio_lost is not None or now - self.t_msg > self.filter.lost_after):
+                self.lost = self.filter.lio_lost if self.filter.lio_lost is not None else self.t_msg  # rejected, or silent
+            x, y, yaw = self.filter.pose
+            pos = np.array([x, y, self.lio[0][2]])
+            h = 0.5 * (yaw - self._yaw(self.lio[1]))
+            w1, z1 = math.cos(h), math.sin(h)  # the filter's yaw on LIO's roll / pitch
+            w2, x2, y2, z2 = self.lio[1]
+            quat = np.array([w1 * w2 - z1 * z2, w1 * x2 - z1 * y2, w1 * y2 + z1 * x2, w1 * z2 + z1 * w2])
+            v = np.zeros(3) if last_p is None else (pos - last_p) / max(now - last_t, 1e-3)
+            last_p, last_t = pos, now
+            self.state.set_odometry(pos, quat, v, np.asarray(gyro, dtype=float))
+
+
 class LegOdomSource:
     """`--odom leg`: pelvis pose from joints + pelvis IMU at 200 Hz (g1deploy/leg_odometry.py), no LIO needed.
     The odometry frame starts at the first sample: origin under the pelvis, yaw from the IMU.
@@ -987,6 +1055,20 @@ class StudentNode:
             if snap["age_low"] > 0.5 or snap["age_odo"] > 0.5:
                 emit("estop", reason="state stale", age_low=snap["age_low"], age_odo=snap["age_odo"])
                 return "stale_state"
+            fz = getattr(self, "fused", None)
+            doubt = fz is not None and fz.filter.bad_since is not None and time.monotonic() - fz.filter.bad_since >= 0.2
+            if doubt and self.phase == "RUN":  # LIO refused for 0.2 s: stop now (a tight gap has no room for 0.2 m)
+                emit("lio_doubt", since=fz.filter.bad_since, tick=self.tick)
+                self.phase = "STOPPED"
+                self.stand(self.tick, "LIO doubtful: refused by the leg / IMU filter for 0.2 s")
+            if fz is not None and fz.lost is not None:  # once lost, no walk (not even a new GO) on legs alone
+                if not getattr(self, "lio_lost_handled", False):
+                    self.lio_lost_handled = True
+                    emit("lio_lost", since=fz.lost, tick=self.tick, s=round(float(fz.filter.x[3]), 3),
+                         beta_deg=round(math.degrees(fz.filter.x[4]), 2))
+                if self.phase == "RUN":
+                    self.phase = "STOPPED"
+                    self.stand(self.tick, "LIO lost: rejected by the leg / IMU filter, or silent")
             wd = getattr(self, "watchdog", None)
             if wd is not None and self.phase == "RUN" and self.leg_check.odo.p is not None:
                 why = wd.update(time.monotonic(), q[:2], self.leg_check.odo.p[:2])
@@ -1093,8 +1175,9 @@ def parse(argv=None):
     ap.add_argument("--goal", type=float, nargs=2, required=True, help="goal xy in the odometry frame")
     ap.add_argument("--iface", default="lo")
     ap.add_argument("--domain", type=int, default=0)
-    ap.add_argument("--odom", choices=("dds", "zmq", "leg"), default="dds",
-                    help="dds: rt/odostate (simulator ground truth); zmq: LIO bridge topic `odom`; "
+    ap.add_argument("--odom", choices=("dds", "zmq", "leg", "fused"), default="dds",
+                    help="dds: rt/odostate (simulator ground truth); zmq: LIO bridge topic `odom`; fused: that LIO "
+                         "and leg odometry in one filter (FusedOdom: LIO lost -> stand); "
                          "leg: leg odometry from rt/lowstate only (fallback; ~12%% drift in MuJoCo)")
     ap.add_argument("--goal-frame", choices=("odom", "start"), default="odom",
                     help="start: --goal is (ahead, left) metres from the robot's start pose")
@@ -1167,6 +1250,9 @@ def main(argv=None):
     state = DdsState(args.iface, args.domain, args.odom)
     if args.odom == "leg":
         LegOdomSource(state)
+    elif args.odom == "fused":
+        node.fused = FusedOdom(state, args.odom_connect)
+        emit("odom_fused", lost_after_s=node.fused.filter.lost_after, gate_chi2=node.fused.filter.gate)
     elif args.odom == "zmq" and not args.no_odom_watchdog:  # FAST-LIO, cross-checked by the legs
         node.leg_check, node.watchdog = LegOdomSource(state, publish=False), OdomWatchdog()
         emit("odom_watchdog", max_speed_m_s=node.watchdog.max_speed, max_dv_m_s=node.watchdog.max_dv, hold_s=node.watchdog.hold)

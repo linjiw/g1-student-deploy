@@ -280,7 +280,7 @@ class Session:
                                              "--remote-dir", str(self.dir / "remote")] + (["--viewer"] if a.viewer else []),
                                      self.dir / "sim.log", self.env)
             self.event("sim: MuJoCo G1 on DDS (lo), " + Path(self.task).parent.name)
-            if a.odom == "lio":  # stands in for Point-LIO + adapters/ros2_lio_bridge.py: odom + registered cloud :5561
+            if a.odom in ("lio", "fused"):  # stands in for Point-LIO + adapters/ros2_lio_bridge.py: odom + registered cloud :5561
                 self.procs["lio"] = Proc("lio", [py, "-u", "tools/sim_lio_bridge.py", "--iface", "lo",
                                                  "--bind", f"tcp://*:{self.ports['odom']}"]
                                          + (["--noise", a.lio_noise] if a.lio_noise else []),
@@ -292,7 +292,7 @@ class Session:
             self.procs["remote"] = Proc("remote", [py, "-u", "g1deploy/remote_watch.py", "--iface", iface],
                                         self.dir / "remote_watch.log", self.env, on_line=self.on_remote)
             self.event("remote watcher: Select = E-STOP and D-up = takeover, also while the student streams")
-        if not sim and a.odom == "zmq" and subprocess.run(["pgrep", "-f", "^[^ ]*python[^ ]* -u [^ ]*adapters/dds_lio_bridge.py"],
+        if not sim and a.odom in ("zmq", "fused") and subprocess.run(["pgrep", "-f", "^[^ ]*python[^ ]* -u [^ ]*adapters/dds_lio_bridge.py"],
                                                           capture_output=True).returncode:
             self.event("odom zmq: NO LIO bridge on :5561, the node will wait for odometry (`g1 lio start`, standing)")
         meta = session_meta(a, iface)
@@ -336,8 +336,8 @@ class Session:
                     "--odom-connect", f"tcp://localhost:{self.ports['odom']}"]
         if not sim:
             node_cmd += ["--odom", a.odom] + (["--mount-calib", a.mount_calib] if a.mount_calib else [])
-        elif a.odom in ("leg", "lio"):
-            node_cmd += ["--odom", "leg" if a.odom == "leg" else "zmq"]
+        elif a.odom in ("leg", "lio", "fused"):
+            node_cmd += ["--odom", {"leg": "leg", "lio": "zmq", "fused": "fused"}[a.odom]]
         if a.goal_lookahead:
             node_cmd += ["--goal-lookahead", str(a.goal_lookahead)]
         if a.candidates:
@@ -1016,8 +1016,9 @@ def parse_args(argv):
             p.add_argument("--mission", default=None, help="'A,L;A,L': after the launch goal, walk to each "
                                                            "(relative to the robot then); builds --script. "
                                                            "'course' = the course's own mission")
-            p.add_argument("--odom", choices=("dds", "leg", "lio"), default="dds",
-                           help="dds: simulator truth; leg: leg odometry (robot day 1); lio: LIO stand-in on :5561")
+            p.add_argument("--odom", choices=("dds", "leg", "lio", "fused"), default="dds",
+                           help="dds: simulator truth; leg: leg odometry (robot day 1); lio: LIO stand-in on :5561; "
+                                "fused: the stand-in + leg odometry in one filter (node --odom fused)")
             p.add_argument("--lio-noise", default=None, help="LIO stand-in drift, e.g. '{\"xy_rw_m\": 0.02}', or an odometry error '{\"scale\": 0.9, \"rotate_deg\": -4}' (tools/sim_lio_bridge.py)")
             p.add_argument("--remote-start", action="store_true", help="press Start on the virtual remote for [s]")
             p.add_argument("--viewer", action="store_true", help="open the MuJoCo 3D window (needs a display)")
@@ -1027,7 +1028,8 @@ def parse_args(argv):
             p.add_argument("--robot", default=None, help="robots/<NAME>.json: this robot's iface, lidar, body, "
                                                          "mount calibration and odometry defaults")
             p.add_argument("--iface", default=None)
-            p.add_argument("--odom", choices=("leg", "zmq"), default=None, help="leg (default) | zmq (LIO bridge)")
+            p.add_argument("--odom", choices=("leg", "zmq", "fused"), default=None,
+                           help="leg (default) | zmq (LIO bridge) | fused (LIO bridge + leg odometry, g1deploy/odom_fusion.py)")
             p.add_argument("--lidar", choices=("dds", "livox"), default=None,
                            help="dds: Unitree's rt/utlidar service; livox: livox_ros_driver2 on this PC + adapter")
             p.add_argument("--mount-calib", default=None)

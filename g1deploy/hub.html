@@ -193,6 +193,9 @@ ol.plan { margin:0; padding-left:20px; font-size:14px } ol.plan li { margin:4px 
             <label class="check"><input type="checkbox" id="c-remote"><span><b>Rope and spotter</b>: rope above ~1.6 m; spotter to the side, at least 1 m back</span></label>
             <label class="check"><input type="checkbox" id="c-clear"><span><b>Clear</b>: nobody within reach; the goal plus ~0.5 m free</span></label>
           </div>
+          <label class="small">Odometry <select id="odom">
+            <option value="">leg (robot default)</option><option value="fused">FAST-LIO + legs (LIO lost: the robot stands)</option>
+            <option value="zmq">FAST-LIO only</option></select> <span class="small muted" id="liohint"></span></label>
           <input id="note" type="text" placeholder="note (optional): e.g. door attempt 1, rope held by Sam" style="width:100%; margin:8px 0">
         </div>
         <div class="row">
@@ -383,7 +386,8 @@ async function deploy() {
   if (!confirm('Start the robot session with ' + label(prof(profile)) + ', goal ' + goalText(goal) + '?\n' +
       (fresh ? 'It uses the scan ' + scanSel + '.' : 'A fresh read-only scan runs first (about 15 s).') +
       '\nThe runner starts only when you press Arm in the robot panel.')) return;
-  const r = await api('/api/start', {mode:'robot', profile, goal, confirm:checklist(), scene_scan:scanSel, note:$('note').value || undefined});
+  const r = await api('/api/start', {mode:'robot', profile, goal, confirm:checklist(), scene_scan:scanSel, note:$('note').value || undefined,
+    odom: $('odom').value || undefined});
   if (!r.ok) alert(r.error); refresh();
 }
 // the robot now vs where it stood for the scan (hub.start_check): goals are sent as the same spot in the scene
@@ -576,6 +580,8 @@ function renderDeploy(s, robotLive, walking, rehearsing, ready, rehearsed) {
     $('deploynote').innerHTML = (rehearsed ? 'Rehearsed in the twin. ' + pairNote + ' ' : '<span style="color:var(--warn)">Not rehearsed to this goal yet (step 3).</span> ') +
       'The runner starts only when you press <b>Arm</b> in the robot panel.';
   }
+  if (s.robot_link) $('liohint').textContent = s.robot_link.lio_bridge ? 'FAST-LIO bridge running' :
+    'no FAST-LIO bridge (g1 lio start, g1 lio check)';
   $('deploybtn').disabled = !!block; $('deploywhy').textContent = block;
   $('deploywhy').className = 'why' + (block.startsWith('Tick') ? ' strong' : '');
   setStep('st4', block ? (robotLive ? '' : 'off') : 'now');

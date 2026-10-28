@@ -394,3 +394,16 @@ def test_rehearsal_pair_exact_then_drift_and_its_verdict(tmp_path, monkeypatch):
                             contact_n=np.zeros(50))
     pairs = h.rehearsal_pairs([hub.session_summary(d, h.day) for d in dirs])
     assert pairs[dirs[0].name]["verdict"] == "other way" and pairs[dirs[0].name]["apart_m"] > 0.9
+
+
+def test_robot_start_odometry_choice(tmp_path, monkeypatch):
+    monkeypatch.setattr(hub, "STUDIO_DATA", tmp_path / "no-studio")
+    h = _hub(tmp_path)
+    cmd, _ = h.command({"mode": "robot", "profile": "deploy", "goal": [2.0, 0.0], "odom": "fused"})
+    assert cmd[cmd.index("--odom") + 1] == "fused"
+    with pytest.raises(ValueError):
+        h.command({"mode": "robot", "profile": "deploy", "odom": "dds"})
+    monkeypatch.setattr(h, "robot_link", lambda: {"carrier": True, "lio_bridge": False})
+    ok = {"gantry": True, "estop": True, "remote": True, "clear": True}
+    r = h.start({"mode": "robot", "profile": "deploy", "odom": "fused", "confirm": ok})
+    assert not r["ok"] and "g1 lio start" in r["error"]

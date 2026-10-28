@@ -170,3 +170,16 @@ def test_clear_map_only_while_standing(node):
     ev, _ = _run(node, st, cl, until)
     assert "command_refused" in ev and "map_cleared" in ev
     assert node.memory is not seen["memory"] and node.map_ready_tick > node.tick - int(10.0 / 0.02) - 5
+
+
+def test_lio_lost_in_fused_odometry_stands_the_robot(node):
+    """`--odom fused`: once the filter calls LIO lost (rejected or silent), the walk stops and no GO walks on legs."""
+    st, cl = FakeState(), FakeCloud()
+    node.fused = SimpleNamespace(lost=None, filter=SimpleNamespace(x=np.array([0.0, 0.0, 0.0, 1.05, 0.01]), bad_since=None))
+    threading.Timer(4.0, lambda: setattr(node.fused, "lost", time.monotonic())).start()
+    try:
+        ev, _ = _run(node, st, cl, lambda e: "lio_lost" in e and "stand" in e)
+    finally:
+        del node.fused
+        node.lio_lost_handled = False
+    assert "lio_lost" in ev and "stand" in ev and "estop" not in ev

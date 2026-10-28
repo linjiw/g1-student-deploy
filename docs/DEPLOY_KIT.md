@@ -257,6 +257,21 @@ at start): the robot stands (`odom_disagree`) when LIO says it moves faster than
 more than 0.4 m/s, for 0.5 s (leg odometry under-counts 5–40 %; speeds only, the frames need no alignment).
 `--no-odom-watchdog` turns it off.
 
+**`--odom fused` (FAST-LIO + legs, since 2026-10-28).**
+- What runs: the node runs `g1deploy/odom_fusion.py`'s filter at 200 Hz.
+  - Leg-odometry steps and the IMU's yaw predict.
+  - The bridge's poses correct (one per 0.1 s). They are refused when they imply more than 1.5 m/s, or fail the filter's χ² gate.
+  - The filter learns the leg correction while LIO is good.
+- Two levels of response:
+  - LIO refused for 0.2 s (`lio_doubt`): the walk stops.
+  - LIO refused for 0.5 s or silent (`lio_lost`): no further walk, not even after a new GO. The robot never walks on legs alone.
+  - Why two levels: with a 0.5 m/s runaway injected, the robot touched a tower in a 0.69 m gap 1 s after the fault began, when only the 0.5 s level existed.
+- Offline, on the three lab walks of 10-27:
+  - it follows FAST-LIO within 2–7 cm RMS, with no false alarm;
+  - it flags a 0.3 m jump within 0.1 s and a 0.5 m/s runaway within 0.3–0.7 s.
+- Starting it: `g1 robot --odom fused`, or the hub's *Odometry* choice. The hub refuses it until `g1 lio start` runs.
+- In sim: `g1 sim --odom fused` (the LIO stand-in), and `tools/drift_gate.py --levels "fused;fused+jump;..."` for injected LIO faults.
+
 FAST-LIO is the Click-and-Traverse `lidar_ws` build with `config/lio/fastlio_mid360_g1.yaml` (input: the adapter's
 10 Hz `/livox/lidar_10hz` + `/livox/imu`). Like every FAST-LIO run, it rewrites its own debug logs under that
 workspace's `src/FAST_LIO/Log/` (`mat_pre.txt` etc.; its ROOT_DIR is compiled in).
@@ -528,6 +543,8 @@ FAST-LIO watchdog (§7). Error injection for experiments: `G1_LEG_ODOM='{"contac
 ..}'` (sim only; the robot refuses scale / rotate_deg) and the sim LIO stand-in's `--lio-noise '{"scale": ..,
 "rotate_deg": ..}'` (an error on top of true odometry; the node registers the raw frames with it, so its map smears as
 on the robot).
+
+**Margin vs drift (drift gate, 2026-10-28).** The low-margin profile went through the gap with good odometry. Across all odometry levels, though, it touched a tower in 12 of 54 walks (up to 476 N), mostly under odometry error. The default margins never went through, never touched anything (0 of 24) and always arrived. With odometry worse than FAST-LIO, a low route margin trades detours for contacts: use it only with FAST-LIO (or fused) odometry, and slowly.
 
 **For gaps: walk on FAST-LIO** (`g1 lio start`, `g1 lio check`, `--odom zmq`; §7), after a standing check and a
 tape-measured walk.
