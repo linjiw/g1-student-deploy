@@ -85,4 +85,4 @@ def test_hub_sends_the_scan_goal_as_the_same_spot(tmp_path, monkeypatch):
     assert r["ok"] and abs(sent[0]["ahead"] - g[0]) < 0.08 and abs(sent[0]["left"] - g[1]) < 0.08
     assert json.loads((h.day / "robot-x" / "start_check.jsonl").read_text())["action"] == "send_goal"
     h.send_goal([1.0, 0.5])  # no scan: relative to the robot now, unchanged
-    assert sent[-1] == {"act": "goal", "ahead": 1.0, "left": 0.5}
+    assert {k: v for k, v in sent[-1].items() if k not in ("id", "source")} == {"act": "goal", "ahead": 1.0, "left": 0.5}

@@ -691,6 +691,10 @@ class Session:
         if key == "s":
             if st["estop"]:
                 return "refused", "the runner is in E-STOP: end the session"
+            if st.get("control"):
+                return "refused", "SONIC is already in CONTROL"
+            if not st.get("init"):  # Start SONIC during the stand ramp dropped the practice robot (2026-10-28)
+                return "refused", "the runner is still booting (stand ramp): Start SONIC after INIT done"
             if self.args.mode == "sim" and self.args.remote_start:
                 (self.dir / "remote" / "start").touch()  # virtual remote Start (enables SONIC's planner)
                 self.event("operator: remote Start")

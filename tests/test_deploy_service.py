@@ -153,7 +153,8 @@ def rehearsal_run(h, name, kind, set_name, result="arrived", scan="scan-a", offs
         meta["offset"] = {"pose": s_from_c}
     (d / "rehearsal.json").write_text(json.dumps(meta))
     t = np.arange(1, 2 * n + 1) * 0.01  # the 100 Hz log
-    xy = np.c_[np.linspace(0, 2.5, 2 * n), np.zeros(2 * n)] if walk is None else walk
+    end = F.apply(F.inverse(s_from_c), [2.5, -0.3])  # a walk that ends at the goal on the simulator's truth
+    xy = np.c_[np.linspace(0, end[0], 2 * n), np.linspace(0, end[1], 2 * n)] if walk is None else walk
     q = np.zeros((n, 50))
     q[:, :2] = xy[::2]
     q[:, 2] = 0.78
@@ -309,7 +310,7 @@ def test_rehearsal_sets_verdicts_and_tracks(tmp_path):
     assert q[0, :2] == pytest.approx(OFFSET[:2], abs=1e-4)  # the course origin is the offset in the scene
     assert F.yaw_of_quat(q[0, 3:7]) == pytest.approx(OFFSET[2], abs=1e-3)
     assert [c["n"] for c in tr["contacts"]] == [9.0] and tr["contact_max_n"] == 9.0 and tr["arrived"] is False
-    assert tr["final_dist_m"] == pytest.approx(float(np.hypot(*(F.apply(OFFSET, [2.5, 0.0]) - [2.5, -0.3]))), abs=0.02)
+    assert tr["final_dist_m"] == pytest.approx(0.0, abs=0.02)  # the fixture walk ends at the goal on the truth
     code, ex = h.track("rehearse-100000-deploy-twin-scan-a")
     assert ex["arrived"] and np.array(ex["qpos"])[-1, 0] == pytest.approx(2.5, abs=0.03)
     assert h.track("../etc")[0] == 404

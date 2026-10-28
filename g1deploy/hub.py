@@ -72,6 +72,7 @@ def gpu_free_mib():
     except Exception:
         return None
 # the automatic rehearsal in a scanned twin: the robot-day ladder without a hand on it (the panel shows it live)
+# --step-timeout 180: a cold planner compile (a new checkout) took over 90 s to get ready on 2026-10-28
 REHEARSE_SCRIPT = "wait:init,key:s,wait:control,wait:ready,sleep:3,key:g,wait:arrived,sleep:3"
 # The second rehearsal of every pair: true odometry with the step-tied error lab-g1's leg odometry showed
 # (g1deploy/odom_error.py preset lab-g1-leg, through the sim LIO stand-in: the node registers raw lidar frames with
@@ -88,6 +89,37 @@ CONFIRM_LEGACY = ("gantry", "estop", "remote", "clear")  # the legacy page's
 RUN_KINDS = ("exact", "drift", "offset")  # a rehearsal set, in order
 ENVELOPE_SLACK_M, ENVELOPE_SLACK_DEG = 0.05, 5.0  # the start check is inside a set's offset envelope with this slack
 TRACK_HZ, CONTACT_N = 25.0, 5.0
+# A rehearsal arrived for real when the simulator's truth ends this close to the goal. The node judges arrival on its
+# own estimate, which the drift run corrupts on purpose: its "arrived" can be a metre off (2026-10-28, gap-069).
+TRUTH_ARRIVE_M = 0.5
+_TRUTH = {}
+
+
+def truth_result(summ):
+    """A rehearsal run's result on the simulator's truth (a session summary with `rehearsal` and `attempts`): the node's
+    result, except an "arrived" whose true final position is over TRUTH_ARRIVE_M from the goal becomes "missed"."""
+    res = summ["attempts"][-1].get("result") if summ.get("attempts") else None
+    reh = summ.get("rehearsal") or {}
+    goal = reh.get("goal_scene") or reh.get("goal")
+    if res != "arrived" or not goal:
+        return res
+    d = Path(summ["dir"])
+    try:
+        key = (str(d), (d / "sim.npz").stat().st_mtime_ns)
+    except OSError:
+        return res
+    if key not in _TRUTH:
+        import numpy as np
+
+        try:
+            with np.load(d / "sim.npz", allow_pickle=False) as z:
+                end = z["root_pos"][-1, :2]
+            end = frames.apply(reh.get("scene_from_course") or [0.0, 0.0, 0.0], end)
+            _TRUTH[key] = float(np.hypot(*(np.asarray(end) - np.asarray(goal, dtype=float))))
+        except (OSError, KeyError, ValueError, IndexError):
+            _TRUTH[key] = None
+    off = _TRUTH[key]
+    return "missed" if off is not None and off > TRUTH_ARRIVE_M else res
 GOAL_CLEAR_M = 0.25  # the coarse live goal check: no obstacle cell this close to the goal
 OBSTACLE_M = 0.3  # workspace.MAP_CODES: support >= 0.3 m is an obstacle ('2', '3')
 VIEW_HZ, VIEW_TIMEOUT_S, VIEW_RETRY_S = 5.0, 0.5, 30.0
@@ -847,7 +879,7 @@ class Hub:
         """The exact run `e` and the drifted run `x` (session summaries): did the drifted one arrive the same way?"""
         import numpy as np
 
-        res = lambda s: (s["attempts"][-1].get("result") if s["attempts"] else None)  # noqa: E731
+        res = truth_result
         way = None
         try:
             with np.load(Path(e["dir"]) / "sim.npz") as a, np.load(Path(x["dir"]) / "sim.npz") as b:
@@ -924,7 +956,7 @@ class Hub:
         if mode == "sim":  # isolated ports, low priority: it may run beside a live robot session
             cmd = ["nice", "-n", "10"] + cmd + ["--port-base", str(REHEARSAL_PORT_BASE)]
         if mode == "sim" and req.get("script"):
-            cmd = [c for c in cmd if c != "--arm"] + ["--script", req["script"], "--step-timeout", "60"]
+            cmd = [c for c in cmd if c != "--arm"] + ["--script", req["script"], "--step-timeout", "180"]
         if req.get("note"):
             cmd += ["--note", str(req["note"])[:300]]
         if req.get("operator"):
@@ -1185,8 +1217,7 @@ class Hub:
         out = []
         for name, st in sets.items():
             summ = st.pop("summ")
-            res = {k: (summ[k]["attempts"][-1].get("result") if summ.get(k) and summ[k]["attempts"] else None)
-                   for k in RUN_KINDS}
+            res = {k: (truth_result(summ[k]) if summ.get(k) else None) for k in RUN_KINDS}
             ended = {k: bool(summ.get(k) and summ[k]["ended"]) for k in RUN_KINDS}
             running = bool(job and job["name"] == name and job.get("running"))
             verdict = apart = None
@@ -1784,8 +1815,11 @@ class Hub:
                                  "n": round(float(cn[j]), 1)})
         goal = reh.get("goal_scene") or reh.get("goal")
         final = frames.apply(s_from_c, rp[-1, :2]) if len(rp) else None
-        result = rows[-1].get("result") if rows else None
+        estimate = rows[-1].get("result") if rows else None
+        off = float(np.hypot(*(final - goal))) if final is not None and goal else None
+        result = "missed" if estimate == "arrived" and off is not None and off > TRUTH_ARRIVE_M else estimate
         return 200, {"name": run, "running": False, "arrived": result == "arrived", "result": result,
+                     "result_estimate": estimate,
                      "kind": reh.get("kind") or ("drift" if reh.get("drift") else "exact"), "set": reh.get("set"),
                      "frame": "scene", "scene_from_course": s_from_c, "goal_scene": goal,
                      "joint_names": list(contract.MJ_JOINTS), "hz": round(1.0 / max(float(np.median(np.diff(t25))), 1e-3), 1)
