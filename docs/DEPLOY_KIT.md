@@ -271,6 +271,15 @@ Unitree combos (L2 + ...) mean something else here. On 2026-10-27 an L2 then D-l
 boxing set mid-turn, and a later L2 threw a left hook. The console logs every press, and a D-down / left / right
 during a walk stands the student and raises an alarm; the panel names the runner's motion set.
 
+**If the console process dies, the runner stops with it (kept on purpose, 2026-10-29).** The SONIC runner runs under
+the console; when the console was killed in simulation (2026-10-28), lowcmd stopped about 1 s later. This is the
+intended behaviour: a runner that outlived its console would keep commanding the motors with no GO gate, no E-STOP from
+Studio, the phone panel or the remote's Select (all three go through the console), and no recording. What lab-g1 itself
+does when lowcmd stops has not been measured: treat a console crash as a sudden loss of control, which is one more
+reason for the gantry carrying the weight or a spotter on the rope, and the physical E-stop in hand. Studio shows
+"CONSOLE NOT RESPONDING — use the physical E-stop" when the console's heartbeat stops; the recorder finalizes on its
+own 60 s later and the session's evidence reads "lost".
+
 **H0 desk (the day before or that morning).** `./g1 doctor` all ✓; `./g1 test`; one `./g1 sim --layout open-3m`
 and one `./g1 sim --layout nav-room --mission course` (also builds the TensorRT engines and planner kernels).
 
